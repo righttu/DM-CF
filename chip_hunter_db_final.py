@@ -12,6 +12,8 @@
 #    7. [审计] 修复 NaN 击穿 NTM 计算的 Bug，并对齐 3日换手率的绝对阈值(Sum > 24%)。
 # ==============================================================================
 
+import os
+import requests
 import tushare as ts
 import pandas as pd
 import numpy as np
@@ -21,85 +23,33 @@ import traceback
 import warnings
 from dateutil.relativedelta import relativedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from sqlalchemy import create_engine, Column, Integer, String, Float
-from sqlalchemy.orm import sessionmaker, declarative_base
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # ================= 配置区 =================
 MY_TOKEN = os.getenv('MY_TUSHARE_TOKEN') 
 DB_PATH = 'sqlite:///quant_data.db'
+D1_API_URL = 'https://stock-api.righttu.uk'
+CF_ACCESS_CLIENT_ID = os.getenv('CF_ACCESS_CLIENT_ID')
+CF_ACCESS_CLIENT_SECRET = os.getenv('CF_ACCESS_CLIENT_SECRET')
 
 # ================= 数据库定义 =================
-Base = declarative_base()
 
-class ChipHunterResult(Base):
-    __tablename__ = 'chip_hunter'
-    __table_args__ = {'extend_existing': True}
+class CloudAPIClient:
+    def __init__(self, base_url):
+        self.base_url = base_url.rstrip('/')
+        self.headers = {
+            'Content-Type': 'application/json',
+            'CF-Access-Client-Id': CF_ACCESS_CLIENT_ID,
+            'CF-Access-Client-Secret': CF_ACCESS_CLIENT_SECRET,
+        }
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    
-    # --- A. 基础身份 ---
-    scan_date = Column(String(8), index=True)
-    ts_code = Column(String(20), index=True)
-    name = Column(String(20))
-    industry = Column(String(20))
-    
-    # --- B. 核心行情 ---
-    close = Column(Float)
-    pct_chg = Column(Float)
-    volume_ratio = Column(Float)
-    total_mv = Column(Float)
-    
-    # --- C. 换手率体系 ---
-    turnover_rate = Column(Float)
-    turnover_rate_3d = Column(Float)
-    industry_turnover_rate_3d = Column(Float)
-    
-    # --- D. 筹码与评分 ---
-    score = Column(Float)
-    tags = Column(String(200))
-    holders_wan = Column(Float)
-    chip_cumu_change = Column(Float)
-    chip_latest_change = Column(Float)
-    
-    # --- E. 资金流向 ---
-    net_mf_amount = Column(Float)
-    net_inflow_5d = Column(Float)
-    
-    # --- F. 估值体系 ---
-    pe_ttm = Column(Float)
-    pe_ttm_percentile = Column(Float)
-    industry_pe_ttm_median = Column(Float)
-    peg = Column(Float)
-    
-    pb = Column(Float)
-    pb_percentile = Column(Float)
-    industry_pb_median = Column(Float)
-    # 👇 增这两行机构筹码字段
-    ratio_current = Column(Float)
-    ratio_prev_1 = Column(Float)
-    ps_ttm = Column(Float)
-    
-    # --- G. 预期与成长 ---
-    forecast_eps_fy1 = Column(Float)
-    forecast_eps_fy2 = Column(Float)
-    con_growth_rate = Column(Float)
-    
-    # --- H. 财务基本面 ---
-    roe = Column(Float)
-    grossprofit_margin = Column(Float)
-    netprofit_yoy = Column(Float)
-    
-    # --- I. 文本信息 ---
-    concepts = Column(String(500))
-    top_list_reason = Column(String(100))
-    
-    # --- J. 技术筛选留痕 ---
-    pattern = Column(String(20))
-    bias_60 = Column(Float)
-    vol_signal = Column(String(20))
-    create_time = Column(String(20))
+    def _post(self, path, payload):
+        resp = requests.post(f'{self.base_url}{path}', json=payload, headers=self.headers, timeout=30)
+        data = resp.json()
+        if not data.get('success'):
+            raise Exception(data.get('error', f'API call failed: {path}'))
+        return data
 
 # ================= 策略引擎 =================
 
@@ -118,13 +68,12 @@ class ChipHunterStrategy:
         # _session.mount('https://', HTTPAdapter(max_retries=_retries)) #第三方代理
         #self.pro_main._DataApi__session = _session  #第三方代理
         #####################################
-        self.engine = create_engine(DB_PATH, echo=False)
+        self.api = CloudAPIClient(D1_API_URL)
         try:
-            Base.metadata.create_all(self.engine)
+            self._ensure_table()
         except Exception as e:
             # 建表失败属于致命错误，直接抛出并终止程序，防止后续白跑
             raise RuntimeError(f"💥 数据库初始化失败，程序终止: {e}") from e
-        self.Session = sessionmaker(bind=self.engine)
 
 
         import datetime
@@ -133,6 +82,30 @@ class ChipHunterStrategy:
         self.w1, self.w2 = (365 - day_of_year) / 365.0, day_of_year / 365.0
         self.col_eps1, self.col_eps2, self.col_eps_prev = f"{now.year}预测每股收益", f"{now.year + 1}预测每股收益", f"{now.year - 1}预测每股收益"
 
+    def _ensure_table(self):
+        ddl_statements = [
+            """
+            CREATE TABLE IF NOT EXISTS chip_hunter (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_date TEXT, ts_code TEXT, name TEXT, industry TEXT,
+                close REAL, pct_chg REAL, volume_ratio REAL, total_mv REAL,
+                turnover_rate REAL, turnover_rate_3d REAL, industry_turnover_rate_3d REAL,
+                score REAL, tags TEXT, holders_wan REAL, chip_cumu_change REAL, chip_latest_change REAL,
+                net_mf_amount REAL, net_inflow_5d REAL,
+                pe_ttm REAL, pe_ttm_percentile REAL, industry_pe_ttm_median REAL, peg REAL,
+                pb REAL, pb_percentile REAL, industry_pb_median REAL,
+                ratio_current REAL, ratio_prev_1 REAL, ps_ttm REAL,
+                forecast_eps_fy1 REAL, forecast_eps_fy2 REAL, con_growth_rate REAL,
+                roe REAL, grossprofit_margin REAL, netprofit_yoy REAL,
+                concepts TEXT, top_list_reason TEXT,
+                pattern TEXT, bias_60 REAL, vol_signal TEXT, create_time TEXT
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_chip_ts_code ON chip_hunter(ts_code)",
+            "CREATE INDEX IF NOT EXISTS idx_chip_scan_date ON chip_hunter(scan_date)",
+        ]
+        for sql in ddl_statements:
+            self.api._post('/api/db/execute', {'sql': sql})
 
     def _get_pro_worker(self):
         #彻底复用单例
@@ -320,10 +293,12 @@ class ChipHunterStrategy:
         if df.empty: return df
         print("🛑 [4/6] 数据库查重 (断点续传)...")
         today_str = datetime.datetime.now().strftime('%Y%m%d')
-        session = self.Session()
         try:
-            existing_codes = session.query(ChipHunterResult.ts_code).filter(ChipHunterResult.scan_date == today_str).all()
-            existing_set = {x[0] for x in existing_codes}
+            resp = self.api._post('/api/db/query', {
+                'sql': 'SELECT ts_code FROM chip_hunter WHERE scan_date = ?',
+                'params': [today_str]
+            })
+            existing_set = {r['ts_code'] for r in resp.get('results', [])}
             if not existing_set:
                 print("   ⚪ 今日尚无记录，全量处理。")
                 return df
@@ -336,8 +311,6 @@ class ChipHunterStrategy:
         except Exception as e:
             print(f"   ❌ 查重失败: {e}")
             return df
-        finally:
-            session.close()
 
     # ================= 5. 重型计算 =================
     def _calculate_core_metrics(self, stock_info):
@@ -687,8 +660,7 @@ class ChipHunterStrategy:
                 except: return None
             return val
 
-        session = self.Session()
-        success_count = 0
+        records = []
         try:
             for _, row in df.iterrows():
                 cumu_change = safe_get(row, 'cumulative_change')
@@ -706,66 +678,62 @@ class ChipHunterStrategy:
                 holders = safe_get(row, 'latest_holders')
                 holders_wan_val = holders / 10000 if holders is not None else None
 
-                record = ChipHunterResult(
-                    scan_date = row.get('scan_date'),
-                    ts_code = row.get('ts_code'),
-                    name = row.get('name'),
-                    industry = row.get('industry'),
+                record = {
+                    'scan_date': row.get('scan_date'),
+                    'ts_code': row.get('ts_code'),
+                    'name': row.get('name'),
+                    'industry': row.get('industry'),
                     
-                    close = safe_get(row, 'close'),
-                    pct_chg = safe_get(row, 'pct_chg'),
-                    turnover_rate = safe_get(row, 'turnover_rate'),
-                    volume_ratio = safe_get(row, 'volume_ratio'),
-                    total_mv = safe_get(row, 'total_mv'),
+                    'close': safe_get(row, 'close'),
+                    'pct_chg': safe_get(row, 'pct_chg'),
+                    'turnover_rate': safe_get(row, 'turnover_rate'),
+                    'volume_ratio': safe_get(row, 'volume_ratio'),
+                    'total_mv': safe_get(row, 'total_mv'),
                     
-                    tags = dynamic_tags,  
-                    score = score_val,
-                    holders_wan = holders_wan_val,
-                    chip_cumu_change = cumu_change,
-                    chip_latest_change = safe_get(row, 'latest_change'),
+                    'tags': dynamic_tags,
+                    'score': score_val,
+                    'holders_wan': holders_wan_val,
+                    'chip_cumu_change': cumu_change,
+                    'chip_latest_change': safe_get(row, 'latest_change'),
                     
-                    net_mf_amount = safe_get(row, 'net_mf_amount'),
-                    net_inflow_5d = safe_get(row, 'net_inflow_5d'),
+                    'net_mf_amount': safe_get(row, 'net_mf_amount'),
+                    'net_inflow_5d': safe_get(row, 'net_inflow_5d'),
                     
-                    turnover_rate_3d = safe_get(row, 'turnover_rate_3d'),
-                    industry_turnover_rate_3d = safe_get(row, 'industry_turnover_rate_3d'),
+                    'turnover_rate_3d': safe_get(row, 'turnover_rate_3d'),
+                    'industry_turnover_rate_3d': safe_get(row, 'industry_turnover_rate_3d'),
                     
-                    pe_ttm = safe_get(row, 'pe_ttm'),
-                    pe_ttm_percentile = safe_get(row, 'pe_ttm_percentile'),
-                    industry_pe_ttm_median = safe_get(row, 'industry_pe_ttm_median'),
-                    peg = safe_get(row, 'peg'),
-                    pb = safe_get(row, 'pb'),
-                    pb_percentile = safe_get(row, 'pb_percentile'),
-                    industry_pb_median = safe_get(row, 'industry_pb_median'),
-                    ratio_current = safe_get(row, 'ratio_current'),
-                    ratio_prev_1 = safe_get(row, 'ratio_prev_1'),
-                    ps_ttm = safe_get(row, 'ps_ttm'),
+                    'pe_ttm': safe_get(row, 'pe_ttm'),
+                    'pe_ttm_percentile': safe_get(row, 'pe_ttm_percentile'),
+                    'industry_pe_ttm_median': safe_get(row, 'industry_pe_ttm_median'),
+                    'peg': safe_get(row, 'peg'),
+                    'pb': safe_get(row, 'pb'),
+                    'pb_percentile': safe_get(row, 'pb_percentile'),
+                    'industry_pb_median': safe_get(row, 'industry_pb_median'),
+                    'ratio_current': safe_get(row, 'ratio_current'),
+                    'ratio_prev_1': safe_get(row, 'ratio_prev_1'),
+                    'ps_ttm': safe_get(row, 'ps_ttm'),
                     
-                    forecast_eps_fy1 = safe_get(row, 'forecast_eps_fy1'),
-                    forecast_eps_fy2 = safe_get(row, 'forecast_eps_fy2'),
-                    con_growth_rate = safe_get(row, 'con_growth_rate'),
+                    'forecast_eps_fy1': safe_get(row, 'forecast_eps_fy1'),
+                    'forecast_eps_fy2': safe_get(row, 'forecast_eps_fy2'),
+                    'con_growth_rate': safe_get(row, 'con_growth_rate'),
                     
-                    roe = safe_get(row, 'roe'),
-                    grossprofit_margin = safe_get(row, 'grossprofit_margin'),
-                    netprofit_yoy = safe_get(row, 'netprofit_yoy'),
-                    concepts = row.get('concepts'),
-                    top_list_reason = row.get('top_list_reason'),
+                    'roe': safe_get(row, 'roe'),
+                    'grossprofit_margin': safe_get(row, 'grossprofit_margin'),
+                    'netprofit_yoy': safe_get(row, 'netprofit_yoy'),
+                    'concepts': row.get('concepts'),
+                    'top_list_reason': row.get('top_list_reason'),
                     
-                    pattern = row.get('pattern'),
-                    bias_60 = safe_get(row, 'bias_60'),
-                    vol_signal = row.get('vol_signal'),
-                    create_time = row.get('create_time')
-                )
-                session.add(record)
-                success_count += 1
-            session.commit()
-            print(f"✅ 成功入库: {success_count} 条")
+                    'pattern': row.get('pattern'),
+                    'bias_60': safe_get(row, 'bias_60'),
+                    'vol_signal': row.get('vol_signal'),
+                    'create_time': row.get('create_time')
+                }
+                records.append(record)
+            resp = self.api._post('/api/db/save', {'table': 'chip_hunter', 'data': records})
+            print(f"✅ 成功入库: {resp.get('count', len(records))} 条")
         except Exception as e:
-            session.rollback()
             print(f"❌ 入库错误: {e}")
             traceback.print_exc()
-        finally:
-            session.close()
 
     def run(self, mode='established'):
         print(f"🦁 [Chip Hunter V13.1] 启动 -> 模式: {mode}")

@@ -11,9 +11,10 @@
 6. [风控逻辑] 实现 THS(同花顺成分) + EM(东方财富理由) 双重交叉验证。
 ==================================================
 """
+import os
+import requests
 import akshare as ak
 import datetime
-import sqlite3
 import pandas as pd
 import tushare as ts
 from playwright.sync_api import sync_playwright
@@ -25,6 +26,26 @@ from tqdm import tqdm
 TS_TOKEN = os.getenv("MY_TUSHARE_TOKEN") 
 pro = ts.pro_api(TS_TOKEN)
 #pro._DataApi__http_url = 'https://tushare.top/dataapi/' # 镜像站
+
+D1_API_URL = 'https://stock-api.righttu.uk'
+CF_ACCESS_CLIENT_ID = os.getenv('CF_ACCESS_CLIENT_ID')
+CF_ACCESS_CLIENT_SECRET = os.getenv('CF_ACCESS_CLIENT_SECRET')
+
+class CloudAPIClient:
+    def __init__(self, base_url):
+        self.base_url = base_url.rstrip('/')
+        self.headers = {
+            'Content-Type': 'application/json',
+            'CF-Access-Client-Id': CF_ACCESS_CLIENT_ID,
+            'CF-Access-Client-Secret': CF_ACCESS_CLIENT_SECRET,
+        }
+
+    def _post(self, path, payload):
+        resp = requests.post(f'{self.base_url}{path}', json=payload, headers=self.headers, timeout=30)
+        data = resp.json()
+        if not data.get('success'):
+            raise Exception(data.get('error', f'API call failed: {path}'))
+        return data
 
 MARKERS = ["核心", "量产", "采购"]
 
@@ -75,19 +96,16 @@ def clean_reason_v19(raw_text):
     return text.strip()
 
 def init_db():
-    conn = sqlite3.connect('quant_data.db')
-    cursor = conn.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS hotspot_registry (
+    api = CloudAPIClient(D1_API_URL)
+    api._post('/api/db/execute', {'sql': '''CREATE TABLE IF NOT EXISTS hotspot_registry (
         ts_code TEXT, name TEXT, sector TEXT, node TEXT, purity TEXT, 
         em_reason TEXT, ts_main_biz TEXT, volume_node TEXT, remark TEXT, create_date TEXT,
         PRIMARY KEY (ts_code, sector, node)
-    )''')
-    conn.commit()
-    return conn
+    )'''})
+    return api
 
 def run_registry():
-    conn = init_db()
-    cursor = conn.cursor()
+    api = init_db()
     print(">>> 正在加载 Tushare 主营档案库...")
     biz_df = pro.stock_company(fields='ts_code,main_business,business_scope')
     biz_dict = biz_df.set_index('ts_code').to_dict('index')
@@ -253,9 +271,10 @@ def run_registry():
                                     ts_main_biz = excluded.ts_main_biz,
                                     create_date = excluded.create_date
                             """
-                            cursor.execute(sql_upsert, (
-                                ts_code, name, sector_label, node_name, "", reason, full_biz[:400], node_info['time'], "", today_str
-                            ))
+                            api._post('/api/db/execute', {
+                                'sql': sql_upsert,
+                                'params': [ts_code, name, sector_label, node_name, "", reason, full_biz[:400], node_info['time'], "", today_str]
+                            })
                             matched_nodes_list.append(node_name)
 
                     # --- 4. 兜底逻辑 (同步改为 UPSERT) ---
@@ -271,9 +290,10 @@ def run_registry():
                                 ts_main_biz = excluded.ts_main_biz,
                                 create_date = excluded.create_date
                         """
-                        cursor.execute(sql_upsert_fallback, (
-                            ts_code, name, sector_label, f"{sector_label}兜底", "", reason, full_biz[:400], "26Q1", "", today_str
-                        ))
+                        api._post('/api/db/execute', {
+                            'sql': sql_upsert_fallback,
+                            'params': [ts_code, name, sector_label, f"{sector_label}兜底", "", reason, full_biz[:400], "26Q1", "", today_str]
+                        })
                         matched_nodes_list.append(f"{sector_label}兜底")
 
                     '''if not matched_nodes_list and matched_markers:
@@ -287,20 +307,16 @@ def run_registry():
                             matched_nodes_list.append(f"{sector_label}兜底")'''
                     
                     if matched_nodes_list:
-                        conn.commit()
                         print(f"  [SUCCESS] {name}({ts_code}) | 命中: {', '.join(matched_nodes_list)}")
                     else:
                         print(f"  [FILTERED] {name}({ts_code}) | 理由未命中任何指纹")
 
         except KeyboardInterrupt:
             print("\n🛑 操作已由 Control+C 终止，正在安全退出...")
-            conn.commit()
             browser.close()
-            conn.close()
             sys.exit(0)
 
         browser.close()
-    conn.close()
     print("\n✅ V20.0 产业链审计完成！")
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@
 4. [配置] 默认下载时间窗口调整为近五年 (2020-01-01 起)。
 """
 
+import os
 import tushare as ts
 import pandas as pd
 import datetime

@@ -1,7 +1,7 @@
-import sqlite3
 import os
 import json
 import time
+import requests
 from openai import OpenAI
 
 # --- 配置提取 ---
@@ -10,9 +10,29 @@ OLLAMA_MODEL = "qwen3:14b"
 BAILIAN_MODEL = "qwen3.5-flash"
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
 
+D1_API_URL = 'https://stock-api.righttu.uk'
+CF_ACCESS_CLIENT_ID = os.getenv('CF_ACCESS_CLIENT_ID')
+CF_ACCESS_CLIENT_SECRET = os.getenv('CF_ACCESS_CLIENT_SECRET')
+
+class CloudAPIClient:
+    def __init__(self, base_url):
+        self.base_url = base_url.rstrip('/')
+        self.headers = {
+            'Content-Type': 'application/json',
+            'CF-Access-Client-Id': CF_ACCESS_CLIENT_ID,
+            'CF-Access-Client-Secret': CF_ACCESS_CLIENT_SECRET,
+        }
+
+    def _post(self, path, payload):
+        resp = requests.post(f'{self.base_url}{path}', json=payload, headers=self.headers, timeout=30)
+        data = resp.json()
+        if not data.get('success'):
+            raise Exception(data.get('error', f'API call failed: {path}'))
+        return data
+
 class RegistryAuditor:
     def __init__(self):
-        self.db_path = 'quant_data.db'
+        self.api = CloudAPIClient(D1_API_URL)
         self._init_ai_client()
         
     def _init_ai_client(self):
@@ -30,17 +50,17 @@ class RegistryAuditor:
 
     def get_pending_tasks(self):
         """取出所有 purity 字段为空的标的"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        # 提取复合主键(ts_code, sector, node)及素材
-        cursor.execute("""
-            SELECT ts_code, sector, node, name, em_reason, ts_main_biz 
-            FROM hotspot_registry 
-            WHERE purity = '' OR purity IS NULL
-        """)
-        tasks = cursor.fetchall()
-        conn.close()
-        return tasks
+        resp = self.api._post('/api/db/query', {
+            'sql': """
+                SELECT ts_code, sector, node, name, em_reason, ts_main_biz
+                FROM hotspot_registry
+                WHERE purity = '' OR purity IS NULL
+            """
+        })
+        return [(
+            row.get('ts_code'), row.get('sector'), row.get('node'),
+            row.get('name'), row.get('em_reason'), row.get('ts_main_biz')
+        ) for row in resp.get('results', [])]
 
     def audit_one(self, name, reason, biz, node):
         """执行 AI 启发式审计"""
@@ -80,17 +100,16 @@ class RegistryAuditor:
 
     def update_db(self, ts_code, sector, node, purity, ai_remark):
         """精准回写回数据库"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
         # 按照要求格式：真题材|node|ai_remark
         combined_content = f"{purity}|{node}|{ai_remark}"
-        cursor.execute("""
-            UPDATE hotspot_registry 
-            SET purity = ?, remark = ? 
-            WHERE ts_code = ? AND sector = ? AND node = ?
-        """, (purity, combined_content, ts_code, sector, node))
-        conn.commit()
-        conn.close()
+        self.api._post('/api/db/execute', {
+            'sql': """
+                UPDATE hotspot_registry
+                SET purity = ?, remark = ?
+                WHERE ts_code = ? AND sector = ? AND node = ?
+            """,
+            'params': [purity, combined_content, ts_code, sector, node]
+        })
 
     def run(self):
         tasks = self.get_pending_tasks()

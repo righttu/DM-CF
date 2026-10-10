@@ -8,27 +8,49 @@
 3. 聚合逻辑优化: 修复 name 冲突导致的 ValueError 报错.
 ==================================================
 """
+import os
+import requests
 import streamlit as st
 import pandas as pd
-import sqlite3
 import plotly.graph_objects as go
 import numpy as np
+
+D1_API_URL = 'https://stock-api.righttu.uk'
+CF_ACCESS_CLIENT_ID = os.getenv('CF_ACCESS_CLIENT_ID')
+CF_ACCESS_CLIENT_SECRET = os.getenv('CF_ACCESS_CLIENT_SECRET')
 
 # --- 1. 数据引擎：直接读取 Registry 的层级逻辑 ---
 @st.cache_data(ttl=30)
 def load_data():
-    conn = sqlite3.connect('quant_data.db')
     # 使用 r.sector 代替 h.industry，确保层级绝对正确
-    df = pd.read_sql("""
-        SELECT h.*, r.sector, r.node, r.em_reason 
-        FROM hotspot_hunter h 
-        JOIN hotspot_registry r ON h.ts_code = r.ts_code
-    """, conn)
-    conn.close()
+    resp = requests.post(
+        f"{D1_API_URL}/api/db/query",
+        json={'sql': """
+            SELECT h.*, r.sector AS registry_sector, r.node, r.em_reason AS registry_em_reason
+            FROM hotspot_hunter h
+            JOIN hotspot_registry r ON h.ts_code = r.ts_code
+        """},
+        headers={
+            'Content-Type': 'application/json',
+            'CF-Access-Client-Id': CF_ACCESS_CLIENT_ID,
+            'CF-Access-Client-Secret': CF_ACCESS_CLIENT_SECRET,
+        },
+        timeout=30
+    )
+    data = resp.json()
+    if not data.get('success'):
+        raise Exception(data.get('error', 'API call failed: /api/db/query'))
+    df = pd.DataFrame(data.get('results', []))
+    if not df.empty:
+        df['sector'] = df.pop('registry_sector')
+        df['em_reason'] = df.pop('registry_em_reason')
     return df
 
 st.set_page_config(layout="wide", page_title="Hotspot Hunter V39.0.8")
 df_all = load_data()
+if df_all.empty:
+    st.warning("⚠️ 数据库中没有热点猎手数据。")
+    st.stop()
 latest_date = df_all['trade_date'].max()
 
 # --- 2. 侧边栏：基于数据库 Registry 的三级下钻 ---

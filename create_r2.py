@@ -1,4 +1,5 @@
 # 用之前的 Python 脚本方式
+import os
 import requests
 
 ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID")

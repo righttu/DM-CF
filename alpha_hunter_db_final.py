@@ -13,6 +13,7 @@
 #    6. [实战] 实装狙击拦截网：仅当 (预期盈利且高增) 或 (日均换手率>8%) 时允许入库。
 #    7. [审计] 修复格式化 None 引发的 TypeError，及 NaN 击穿 NTM 逻辑的隐患。
 # ==============================================================================
+import os
 import requests as http_requests
 import tushare as ts
 import pandas as pd
@@ -528,34 +529,40 @@ class AlphaHunterStrategy:
         }
         
         # 🛡️ 自动建表（如果不存在）
-        create_sql = """
-        CREATE TABLE IF NOT EXISTS alpha_hunter (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts_code TEXT, name TEXT, industry TEXT, close REAL,
-            turnover_rate_3d REAL, industry_turnover_rate_3d REAL,
-            pe_ttm REAL, pe_ttm_percentile REAL, industry_pe_ttm_median REAL,
-            peg REAL, pb REAL, pb_percentile REAL, industry_pb_median REAL,
-            forecast_eps_fy1 REAL, net_inflow_5d REAL, total_mv REAL,
-            ps_ttm REAL, forecast_eps_fy2 REAL, con_growth_rate REAL,
-            roe REAL, grossprofit_margin REAL, netprofit_yoy REAL,
-            scan_date TEXT, score REAL, tags TEXT,
-            industry_heat_status TEXT, main_business TEXT, market_sentiment TEXT,
-            ratio_current TEXT, ratio_prev_1 TEXT, ratio_prev_2 TEXT,
-            accel_ratio REAL, hold_mv_billion REAL,
-            chip_latest_change TEXT, chip_cumu_change TEXT, create_time TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_alpha_ts_code ON alpha_hunter(ts_code);
-        CREATE INDEX IF NOT EXISTS idx_alpha_scan_date ON alpha_hunter(scan_date);
-        """
-        try:
-            http_requests.post(
-                f"{D1_API_URL}/api/db/execute",
-                headers=headers,
-                json={"sql": create_sql},
-                timeout=15
+        ddl_statements = [
+            """
+            CREATE TABLE IF NOT EXISTS alpha_hunter (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts_code TEXT, name TEXT, industry TEXT, close REAL,
+                turnover_rate_3d REAL, industry_turnover_rate_3d REAL,
+                pe_ttm REAL, pe_ttm_percentile REAL, industry_pe_ttm_median REAL,
+                peg REAL, pb REAL, pb_percentile REAL, industry_pb_median REAL,
+                forecast_eps_fy1 REAL, net_inflow_5d REAL, total_mv REAL,
+                ps_ttm REAL, forecast_eps_fy2 REAL, con_growth_rate REAL,
+                roe REAL, grossprofit_margin REAL, netprofit_yoy REAL,
+                scan_date TEXT, score REAL, tags TEXT,
+                industry_heat_status TEXT, main_business TEXT, market_sentiment TEXT,
+                ratio_current TEXT, ratio_prev_1 TEXT, ratio_prev_2 TEXT,
+                accel_ratio REAL, hold_mv_billion REAL,
+                chip_latest_change TEXT, chip_cumu_change TEXT, create_time TEXT
             )
-        except:
-            pass  # 建表失败不阻断，后面写入时自然会报错提示
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_alpha_ts_code ON alpha_hunter(ts_code)",
+            "CREATE INDEX IF NOT EXISTS idx_alpha_scan_date ON alpha_hunter(scan_date)",
+        ]
+        try:
+            for sql in ddl_statements:
+                resp = http_requests.post(
+                    f"{D1_API_URL}/api/db/execute",
+                    headers=headers,
+                    json={"sql": sql},
+                    timeout=15
+                )
+                data = resp.json()
+                if not data.get('success'):
+                    raise Exception(data.get('error', 'DDL execution failed'))
+        except Exception as e:
+            print(f"   ⚠️ 建表失败: {e}")  # 建表失败不阻断，后面写入时自然会报错提示
         
         def safe_get(row, key, is_float=True):
             val = row.get(key)

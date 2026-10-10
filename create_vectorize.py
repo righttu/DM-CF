@@ -1,3 +1,4 @@
+import os
 import requests
 
 ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID")

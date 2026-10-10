@@ -15,8 +15,9 @@
 8. 数据库减负: 修复了原代码重复的 SQLite 连接；清洗了底层 Pandas NaN 穿透 Bug。
 ==================================================
 """
+import os
+import requests
 import tushare as ts
-import sqlite3
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -27,6 +28,28 @@ TS_TOKEN = os.getenv("MY_TUSHARE_TOKEN")
 pro = ts.pro_api(TS_TOKEN)
 #pro._DataApi__http_url = 'https://tushare.top/dataapi/' 
 
+D1_API_URL = 'https://stock-api.righttu.uk'
+CF_ACCESS_CLIENT_ID = os.getenv('CF_ACCESS_CLIENT_ID')
+CF_ACCESS_CLIENT_SECRET = os.getenv('CF_ACCESS_CLIENT_SECRET')
+
+class CloudAPIClient:
+    def __init__(self, base_url):
+        self.base_url = base_url.rstrip('/')
+        self.headers = {
+            'Content-Type': 'application/json',
+            'CF-Access-Client-Id': CF_ACCESS_CLIENT_ID,
+            'CF-Access-Client-Secret': CF_ACCESS_CLIENT_SECRET,
+        }
+
+    def _post(self, path, payload):
+        resp = requests.post(f'{self.base_url}{path}', json=payload, headers=self.headers, timeout=30)
+        data = resp.json()
+        if not data.get('success'):
+            raise Exception(data.get('error', f'API call failed: {path}'))
+        return data
+
+api = CloudAPIClient(D1_API_URL)
+
 def get_accurate_hist_days(target_date, count=5):
     """获取 target_date 及其之前的 N 个交易日窗口"""
     start_lookback = (datetime.strptime(target_date, '%Y%m%d') - timedelta(days=30)).strftime('%Y%m%d')
@@ -35,11 +58,8 @@ def get_accurate_hist_days(target_date, count=5):
 
 def get_sync_list():
     """计算需要同步的日期列表"""
-    conn = sqlite3.connect('quant_data.db')
-    cursor = conn.cursor()
-    
     # 1. 如果表不存在则创建 (注意字段名已改为 scan_date)
-    cursor.execute('''CREATE TABLE IF NOT EXISTS hotspot_hunter (
+    api._post('/api/db/execute', {'sql': '''CREATE TABLE IF NOT EXISTS hotspot_hunter (
         ts_code TEXT, trade_date TEXT, name TEXT, industry TEXT, sector TEXT, close REAL,
         turnover_rate_3d REAL, industry_turnover_rate_3d REAL, pe_ttm REAL, 
         pe_ttm_percentile REAL, industry_pe_ttm_median REAL, peg REAL, pb REAL, 
@@ -49,13 +69,11 @@ def get_sync_list():
         volume_ratio REAL, mf_intensity REAL, pct_chg REAL, net_mf_amount REAL,
         bias_60 REAL, is_institutional INTEGER, em_reason TEXT, scan_date TEXT, tags TEXT,
         PRIMARY KEY (ts_code, trade_date)
-    )''')
-    conn.commit()
+    )'''})
     # 检测数据库现有最后一天
-    cursor.execute("SELECT MAX(trade_date) FROM hotspot_hunter")
-    res = cursor.fetchone()
-    db_last_date = res[0] if res and res[0] else None
-    conn.close()
+    resp = api._post('/api/db/query', {'sql': "SELECT MAX(trade_date) AS max_date FROM hotspot_hunter"})
+    res = resp.get('results', [])
+    db_last_date = res[0].get('max_date') if res and res[0].get('max_date') else None
     
     today = datetime.now()
     today_str = today.strftime('%Y%m%d')
@@ -103,9 +121,6 @@ def run_sync_v45_2():
     col_eps2 = f"{current_year + 1}预测每股收益"
     col_eps_prev = f"{current_year - 1}预测每股收益"  # 🛡️ 新增：年报季错位嗅探列
 
-    conn = sqlite3.connect('quant_data.db')
-    cursor = conn.cursor()
-    
     total_inserted = 0  # 🌟 新增：初始化本次任务的总入库计数器
 
     for t_date in sync_list:
@@ -141,9 +156,14 @@ def run_sync_v45_2():
             break
 
         # D. 遍历审计库
-        fetch_sql = "SELECT ts_code, name, sector, remark, em_reason, purity FROM hotspot_registry WHERE purity = '真题材'"
-        cursor.execute(fetch_sql)
-        registry = cursor.fetchall()
+        fetch_sql = """SELECT ts_code, name, sector, remark, em_reason, purity
+FROM hotspot_registry
+WHERE purity = '真题材'"""
+        resp = api._post('/api/db/query', {'sql': fetch_sql})
+        registry = [(
+            row.get('ts_code'), row.get('name'), row.get('sector'),
+            row.get('remark'), row.get('em_reason'), row.get('purity')
+        ) for row in resp.get('results', [])]
         success_count = 0
 
         for ts_code, name, sector, remark, em_reason, purity in registry:
@@ -257,20 +277,32 @@ def run_sync_v45_2():
                 def safe_val(val):
                     return float(val) if pd.notna(val) else None
 
-                cursor.execute('''INSERT OR REPLACE INTO hotspot_hunter VALUES (
-                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
-                )''', (
-                    ts_code, t_date, name, ind, sector, safe_val(d.get('close')),
-                    safe_val(turnover_3d_map.get(ts_code)), safe_val(ind_to_avg.get(ind)), 
-                    pe_ttm_val, pe_pct, safe_val(ind_pe_map.get(ind)), actual_peg, 
-                    safe_val(b.get('pb')), pb_pct, safe_val(ind_pb_map.get(ind)), eps1, eps2, 
-                    safe_val(inflow_5d_map.get(ts_code)), 
-                    safe_val(b.get('total_mv'))/10000 if pd.notna(b.get('total_mv')) else None, 
-                    safe_val(b.get('ps_ttm')), 
-                    con_growth, c_latest, c_cumu, safe_val(b.get('volume_ratio')), 
-                    mf_i, safe_val(d.get('pct_chg')), safe_val(m.get('net_mf_amount')), 
-                    bias_60, is_inst, em_reason, now_scan_date, combined_tags
-                ))
+                api._post('/api/db/execute', {
+                    'sql': '''INSERT OR REPLACE INTO hotspot_hunter (
+    ts_code, trade_date, name, industry, sector, close,
+    turnover_rate_3d, industry_turnover_rate_3d, pe_ttm,
+    pe_ttm_percentile, industry_pe_ttm_median, peg, pb,
+    pb_percentile, industry_pb_median, forecast_eps_fy1,
+    forecast_eps_fy2, net_inflow_5d, total_mv, ps_ttm,
+    con_growth_rate, chip_latest_change, chip_cumu_change,
+    volume_ratio, mf_intensity, pct_chg, net_mf_amount,
+    bias_60, is_institutional, em_reason, scan_date, tags
+) VALUES (
+    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+)''',
+                    'params': [
+                        ts_code, t_date, name, ind, sector, safe_val(d.get('close')),
+                        safe_val(turnover_3d_map.get(ts_code)), safe_val(ind_to_avg.get(ind)),
+                        pe_ttm_val, pe_pct, safe_val(ind_pe_map.get(ind)), actual_peg,
+                        safe_val(b.get('pb')), pb_pct, safe_val(ind_pb_map.get(ind)), eps1, eps2,
+                        safe_val(inflow_5d_map.get(ts_code)),
+                        safe_val(b.get('total_mv'))/10000 if pd.notna(b.get('total_mv')) else None,
+                        safe_val(b.get('ps_ttm')),
+                        con_growth, c_latest, c_cumu, safe_val(b.get('volume_ratio')),
+                        mf_i, safe_val(d.get('pct_chg')), safe_val(m.get('net_mf_amount')),
+                        bias_60, is_inst, em_reason, now_scan_date, combined_tags
+                    ]
+                })
                 success_count += 1
                 
             except Exception as e:
@@ -281,11 +313,8 @@ def run_sync_v45_2():
                 else:
                     print(f"❌ 审计 {ts_code} {name} 遇到未知异常: {e}")
                     continue
-        conn.commit()
         total_inserted += success_count  # 🌟 新增：把当天的数量累加到总池子里
         print(f"🚩 {t_date} 审计成功入库 {success_count} 条记录。")
-    
-    conn.close()
     
     # 🌟 新增：打印醒目的最终战报
     print("\n" + "="*50)
