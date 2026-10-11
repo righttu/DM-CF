@@ -1,7 +1,5 @@
 import datetime
-import math
 import traceback
-import pandas as pd
 
 # 导入原有模块
 from chip_hunter_db_final import ChipHunterStrategy, MY_TOKEN, CloudAPIClient, D1_API_URL
@@ -11,27 +9,6 @@ class ManualAnalystEngine:
         print("🔧 [System] 初始化手动诊断引擎...")
         self.hunter = ChipHunterStrategy(MY_TOKEN)
         self.api = CloudAPIClient(D1_API_URL)
-        self._init_manual_table()
-
-    def _init_manual_table(self):
-        """创建 manual_hunter 影子表 (每代码仅保留一份最新快照)"""
-        create_sql = """
-            CREATE TABLE IF NOT EXISTS manual_hunter (
-                ts_code TEXT PRIMARY KEY, name TEXT, industry TEXT, close REAL,
-                turnover_rate_3d REAL, industry_turnover_rate_3d REAL,
-                pe_ttm REAL, pe_ttm_percentile REAL, industry_pe_ttm_median REAL,
-                peg REAL, pb REAL, pb_percentile REAL, industry_pb_median REAL,
-                ps_ttm REAL, total_mv REAL, net_inflow_5d REAL,
-                chip_cumu_change REAL, chip_latest_change REAL,
-                forecast_eps_fy1 REAL, forecast_eps_fy2 REAL, con_growth_rate REAL,
-                tags TEXT, scan_date TEXT, create_time TEXT
-            )
-        """
-        try:
-            self.api._post('/api/db/execute', {'sql': create_sql})
-        except Exception as e:
-            print(f"⚠️ [Database] 初始化影子表提示: {e}")
-            raise RuntimeError(f"manual_hunter D1 建表失败: {e}") from e
 
     def _normalize_ts_code(self, ts_code):
         ts_code = str(ts_code).strip()
@@ -57,41 +34,6 @@ class ManualAnalystEngine:
                 return False
             raise
         return bool(resp.get('results'))
-
-    def _safe_value(self, value):
-        if value is None:
-            return None
-        try:
-            if pd.isna(value):
-                return None
-        except (TypeError, ValueError):
-            pass
-        if hasattr(value, 'item'):
-            try:
-                value = value.item()
-            except (TypeError, ValueError):
-                pass
-        if isinstance(value, float) and not math.isfinite(value):
-            return None
-        return value
-
-    def _save_manual_record(self, data_dict):
-        columns = [
-            'ts_code', 'name', 'industry', 'close',
-            'turnover_rate_3d', 'industry_turnover_rate_3d',
-            'pe_ttm', 'pe_ttm_percentile', 'industry_pe_ttm_median',
-            'peg', 'pb', 'pb_percentile', 'industry_pb_median',
-            'ps_ttm', 'total_mv', 'net_inflow_5d',
-            'chip_cumu_change', 'chip_latest_change',
-            'forecast_eps_fy1', 'forecast_eps_fy2', 'con_growth_rate',
-            'tags', 'scan_date', 'create_time'
-        ]
-        params = [self._safe_value(data_dict.get(col)) for col in columns]
-        sql = (
-            f"INSERT OR REPLACE INTO manual_hunter ({', '.join(columns)}) "
-            f"VALUES ({','.join(['?'] * len(columns))})"
-        )
-        self.api._post('/api/db/execute', {'sql': sql, 'params': params})
 
     def run_diagnostic(self, ts_code):
         """执行单股全流程穿透分析"""
@@ -137,18 +79,11 @@ class ManualAnalystEngine:
             return {'status': 'error', 'success': False, 'ts_code': final_code, 'error': error_msg}
 
         # ---------------------------------------------------------
-        # 3. 影子入库 (写入 manual_hunter)
+        # 3. 补充元数据 (供 Brain 直接使用)
         # ---------------------------------------------------------
         data_dict['source_strategy'] = "Manual"
         data_dict['scan_date'] = datetime.datetime.now().strftime('%Y%m%d')
         data_dict['create_time'] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        try:
-            self._save_manual_record(data_dict)
-            print(f"✅ [Step 1/3] 核心数据已计入影子表 (Source: Manual)")
-        except Exception as e:
-            error_msg = f"写入影子表失败: {str(e)}"
-            print(f"❌ {error_msg}")
-            return {'status': 'error', 'success': False, 'ts_code': final_code, 'error': error_msg}
 
         # ---------------------------------------------------------
         # 4. 驱动 Brain (AI 生成报告)

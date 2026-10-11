@@ -129,7 +129,7 @@ class DBLoader:
                     df = pd.DataFrame(resp2.get('results', []))
 
             if not df.empty:
-                df['source_strategy'] = "Manual" if table_name == "manual_hunter" else table_name
+                df['source_strategy'] = table_name
                 return df.drop_duplicates(subset=['ts_code'])
             return pd.DataFrame()
         except Exception as e:
