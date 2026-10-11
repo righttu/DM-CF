@@ -252,6 +252,7 @@ class VectorDBManager:
                 self.api._post('/api/vector/upsert', batch)
             except Exception as e:
                 print(f"❌ [Vectorize Error] 写入失败 (batch {i}): {e}")
+                raise RuntimeError(f"Vectorize 写入失败 (batch {i})") from e
 
 class Crawler:
     """数据抓取 (保持不变，功能非常强大)"""

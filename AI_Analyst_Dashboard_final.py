@@ -160,12 +160,17 @@ def main():
                     code = manual_code.strip()
                     with st.spinner(f"正在对 {code} 执行穿透审计，请稍候..."):
                         try:
-                            from manual import ManualAnalystEngine
+                            from Manual_Analyst_Engine_final import ManualAnalystEngine
                             m_engine = ManualAnalystEngine()
-                            m_engine.run_diagnostic(code)
-                            st.success(f"✅ {code} 分析完成并已入库！")
-                            st.cache_data.clear()
-                            st.rerun()
+                            result = m_engine.run_diagnostic(code)
+                            if result.get('status') == 'success':
+                                st.success(f"✅ {code} 分析完成并已入库！")
+                                st.cache_data.clear()
+                                st.rerun()
+                            elif result.get('status') == 'skipped':
+                                st.info(f"ℹ️ {code}: {result.get('msg', '今日已有AI报告')}")
+                            else:
+                                st.error(f"❌ 分析未完成 {code}: {result.get('error') or result.get('reason') or result.get('msg') or result}")
                         except Exception as e:
                             st.error(f"❌ 分析失败: {e}")
                 else:

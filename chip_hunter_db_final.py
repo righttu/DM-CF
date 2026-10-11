@@ -418,7 +418,7 @@ class ChipHunterStrategy:
             return df
 
     # ================= 5. 重型计算 =================
-    def _calculate_core_metrics(self, stock_info):
+    def _calculate_core_metrics(self, stock_info, bypass_efficiency_filter=False):
         pro = self._get_pro_worker()
         ts_code = stock_info['ts_code']
         industry = stock_info.get('industry')
@@ -619,7 +619,7 @@ class ChipHunterStrategy:
         is_fund_ok = (eps_ntm is not None and eps_ntm > 0) and (con_growth is not None and con_growth > 0)
         is_hot_ok = (to_3d_val > 8.0)
 
-        if not (is_fund_ok or is_hot_ok):
+        if not bypass_efficiency_filter and not (is_fund_ok or is_hot_ok):
             # 💡 关键：我们在这里给 original_item 偷偷塞进这两个实测值，方便后面打印
             stock_info['_diag_g'] = con_growth 
             stock_info['_diag_to'] = to_3d_val
@@ -683,7 +683,7 @@ class ChipHunterStrategy:
         if chip_results: stock_info.update(chip_results)
 
         # 6. 驱动核心计算引擎 (算 PE, PB, G, PEG)
-        final_res = self._calculate_core_metrics(stock_info)
+        final_res = self._calculate_core_metrics(stock_info, bypass_efficiency_filter=True)
         
         # 7. 处理拦截诊断
         if final_res is None:

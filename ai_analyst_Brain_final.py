@@ -421,6 +421,127 @@ NO Markdown blocks.
             return json.loads(match.group(1).replace('“', '"').replace('”', '"')) if match else None
         except: return None
 
+    def analyze_and_save(self, hunter_data, db, rag, skip_if_exists=False, current_date=None):
+        today = datetime.datetime.now().strftime('%Y%m%d')
+        current_date = current_date or datetime.datetime.now().strftime('%Y年%m月%d日')
+        ts_code = hunter_data['ts_code']
+        stock_name = hunter_data['name']
+
+        d1_headers = {
+            "CF-Access-Client-Id": CF_ACCESS_CLIENT_ID,
+            "CF-Access-Client-Secret": CF_ACCESS_CLIENT_SECRET,
+            "Content-Type": "application/json"
+        }
+        d1_query_url = f"{STOCK_API_BASE}/api/db/query"
+        d1_execute_url = f"{STOCK_API_BASE}/api/db/execute"
+
+        if skip_if_exists:
+            dup_resp = requests.post(
+                d1_query_url,
+                headers=d1_headers,
+                json={"sql": "SELECT 1 FROM ai_analysis_result WHERE report_date=? AND ts_code=?",
+                      "params": [today, ts_code]}
+            )
+            dup_data = dup_resp.json()
+            if not dup_data.get("success"):
+                raise RuntimeError(f"查重失败 {ts_code}: {dup_data.get('error')}")
+            if dup_data.get("results"):
+                return {'status': 'skipped', 'ts_code': ts_code}
+
+        # 🔥 [修复关键点1] 在循环内对每个标的实时提取资金/筹码变量，防止 None/nan
+        ind_heat = self._safe_fmt(hunter_data.get('industry_turnover_rate_3d'), is_price=True)
+        net_inflow = self._safe_fmt(hunter_data.get('net_inflow_5d'), is_price=True)
+        chip_cumu = self._safe_fmt(hunter_data.get('chip_cumu_change'), is_price=True)
+        chip_last = self._safe_fmt(hunter_data.get('chip_latest_change'), is_price=True)
+        tags_val = hunter_data.get('tags', '') # 🔥 获取来自 hunter 表的 tags
+
+        # 4. 获取背景数据
+        fund_data = db.get_fundamentals(ts_code)
+        surveys = db.get_survey_heat(ts_code)
+        context = rag.retrieve_context(ts_code, stock_name)
+
+        # 5. 调用 AI 分析 (generate_analysis 内部会自动保存 TXT 日志)
+        res = self.generate_analysis(hunter_data, fund_data, context, surveys, current_date=current_date)
+
+        if not res or 'q11_conclusion' not in res:
+            return {'status': 'error', 'ts_code': ts_code, 'error': 'AI 分析未返回有效结论'}
+
+        conc = res['q11_conclusion']
+
+        # 计算上涨空间与得分
+        curr_price = self._safe_float(hunter_data.get('close'))
+        target_price = self._safe_float(conc.get('target_price'))
+        upside_val = 0.0
+        if curr_price > 0 and target_price > 0:
+            upside_val = round(((target_price - curr_price) / curr_price) * 100, 2)
+
+        score_growth = upside_val
+        score_certainty = self._safe_float(conc.get('score_certainty', 0))
+        # 兼容 10 分制和 100 分制
+        if 0 < score_certainty <= 10:
+            score_certainty *= 10
+
+        final_score = int(round((score_growth * 0.6) + (int(score_certainty) * 0.4)))
+
+        # 🔥 [修复关键点2] 显式拼接报告正文，确保文字内容不落空
+        q11_detail = f"🎯 目标价: {target_price:.2f}元 (空间 {upside_val}%)\n⚖️ 综合评分: {final_score}\n🛡️ 确定性: {int(score_certainty)}分 - {conc.get('certainty_reason', '无理由')}\n🧮 估值逻辑: {conc.get('valuation_logic', '无')}"
+
+        report_parts = [
+            f"【Q1 质地】{res.get('q1_quality', '')}",
+            f"【Q2 行业】{res.get('q2_industry', '')}",
+            f"【Q3 产业链】{res.get('q3_chain', '')}",
+            f"【Q4 新增长】{res.get('q4_new_growth', '')}",
+            f"【Q5 天花板】{res.get('q5_ceiling', '')}",
+            f"【Q6 催化剂】{res.get('q6_catalyst', '')}",
+            f"【Q7 机构】{res.get('q7_orgs', '')}",
+            f"【Q8 护城河】{res.get('q8_moat', '')}",
+            f"【Q9 质变】{res.get('q9_changes', '')}",
+            f"【Q10 风险】{res.get('q10_risks', '')}",
+            f"【Q11 结论】\n{q11_detail}"
+        ]
+        full_ai_report = "\n\n".join(report_parts)
+
+        # 🔥 [修复关键点3] 显式提取净利率变量
+        npm = self._safe_fmt(fund_data.get('netprofit_margin'), is_price=True)
+
+        # 🔥 [核心审计] 23 个字段物理对齐，请勿随意改动顺序
+        db_data = (
+            today,                      # 1. report_date
+            stock_name,                 # 2. name
+            ts_code,                    # 3. ts_code
+            hunter_data['industry'],    # 4. industry
+            hunter_data.get('source_strategy',''), # 5. source_strategy
+            ind_heat,                   # 6. industry_heat (对应 nan 修复)
+            net_inflow,                 # 7. net_inflow_5d (对应 nan 修复)
+            curr_price,                 # 8. current_price
+            target_price,               # 9. target_price
+            upside_val,                 # 10. upside_potential
+            int(score_certainty),       # 11. score_certainty
+            final_score,                # 12. final_score
+            conc.get('target_market_cap', ''), # 13. target_market_cap
+            conc.get('forecast_net_profit', ''), # 14. forecast_net_profit
+            surveys['active_days'],     # 15. survey_count
+            surveys['total_orgs'],      # 16. org_count
+            surveys['famous_orgs'],     # 17. famous_orgs
+            res.get('q8_moat',''),      # 18. moat_summary
+            chip_cumu,                  # 19. chip_cumu_change (对应 nan 修复)
+            chip_last,                  # 20. chip_latest_change (对应 nan 修复)
+            npm,                        # 21. netprofit_margin (对应 None 修复)
+            full_ai_report,             # 22. ai_report
+            datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'), # 23. update_time
+            tags_val                    # 24 🔥 新增：将 tags 写入第 24 列
+        )
+
+        # 插入或替换记录
+        sql = "INSERT OR REPLACE INTO ai_analysis_result VALUES (" + ",".join(["?"]*24) + ")"
+        params_list = [str(p) if p is not None else None for p in db_data]
+        write_resp = requests.post(d1_execute_url, headers=d1_headers, json={"sql": sql, "params": params_list})
+        write_data = write_resp.json()
+        if not write_data.get("success"):
+            raise RuntimeError(f"D1 写入失败 {ts_code}: {write_data.get('error')}")
+
+        return {'status': 'success', 'ts_code': ts_code, 'final_score': final_score, 'target_price': target_price}
+
 def main():
     print(f"🚀 启动 Brain v1.2 (Engine: {AI_ENGINE})...")
     db = DBLoader(STOCK_API_BASE)
@@ -456,101 +577,14 @@ def main():
 
     # 3. 进入核心处理循环
     for s in tqdm(tasks, desc="AI Processing"):
-        ts_code = s['ts_code']
-        stock_name = s['name']
-
-        # 🔥 [修复关键点1] 在循环内对每个标的实时提取资金/筹码变量，防止 None/nan
-        ind_heat = brain._safe_fmt(s.get('industry_turnover_rate_3d'), is_price=True)
-        net_inflow = brain._safe_fmt(s.get('net_inflow_5d'), is_price=True)
-        chip_cumu = brain._safe_fmt(s.get('chip_cumu_change'), is_price=True)
-        chip_last = brain._safe_fmt(s.get('chip_latest_change'), is_price=True)
-        tags_val = s.get('tags', '') # 🔥 获取来自 hunter 表的 tags
-
-        # 4. 获取背景数据
-        fund_data = db.get_fundamentals(ts_code)
-        surveys = db.get_survey_heat(ts_code)
-        context = rag.retrieve_context(ts_code, stock_name)
-        
-        # 5. 调用 AI 分析 (generate_analysis 内部会自动保存 TXT 日志)
-        res = brain.generate_analysis(s, fund_data, context, surveys, current_date=current_date_str)
-        
-        if res and 'q11_conclusion' in res:
-            try:
-                conc = res['q11_conclusion']
-                
-                # 计算上涨空间与得分
-                curr_price = brain._safe_float(s.get('close'))
-                target_price = brain._safe_float(conc.get('target_price'))
-                upside_val = 0.0
-                if curr_price > 0 and target_price > 0:
-                    upside_val = round(((target_price - curr_price) / curr_price) * 100, 2)
-                
-                score_growth = upside_val
-                score_certainty = brain._safe_float(conc.get('score_certainty', 0))
-                # 兼容 10 分制和 100 分制
-                if 0 < score_certainty <= 10: 
-                    score_certainty *= 10
-                
-                final_score = int(round((score_growth * 0.6) + (int(score_certainty) * 0.4)))
-
-                # 🔥 [修复关键点2] 显式拼接报告正文，确保文字内容不落空
-                q11_detail = f"🎯 目标价: {target_price:.2f}元 (空间 {upside_val}%)\n⚖️ 综合评分: {final_score}\n🛡️ 确定性: {int(score_certainty)}分 - {conc.get('certainty_reason', '无理由')}\n🧮 估值逻辑: {conc.get('valuation_logic', '无')}"
-                
-                report_parts = [
-                    f"【Q1 质地】{res.get('q1_quality', '')}",
-                    f"【Q2 行业】{res.get('q2_industry', '')}",
-                    f"【Q3 产业链】{res.get('q3_chain', '')}",
-                    f"【Q4 新增长】{res.get('q4_new_growth', '')}",
-                    f"【Q5 天花板】{res.get('q5_ceiling', '')}",
-                    f"【Q6 催化剂】{res.get('q6_catalyst', '')}",
-                    f"【Q7 机构】{res.get('q7_orgs', '')}",
-                    f"【Q8 护城河】{res.get('q8_moat', '')}",
-                    f"【Q9 质变】{res.get('q9_changes', '')}",
-                    f"【Q10 风险】{res.get('q10_risks', '')}",
-                    f"【Q11 结论】\n{q11_detail}"
-                ]
-                full_ai_report = "\n\n".join(report_parts)
-                
-                # 🔥 [修复关键点3] 显式提取净利率变量
-                npm = brain._safe_fmt(fund_data.get('netprofit_margin'), is_price=True)
-
-                # 🔥 [核心审计] 23 个字段物理对齐，请勿随意改动顺序
-                db_data = (
-                    today,                      # 1. report_date
-                    stock_name,                 # 2. name
-                    ts_code,                    # 3. ts_code
-                    s['industry'],              # 4. industry
-                    s.get('source_strategy',''), # 5. source_strategy
-                    ind_heat,                   # 6. industry_heat (对应 nan 修复)
-                    net_inflow,                 # 7. net_inflow_5d (对应 nan 修复)
-                    curr_price,                 # 8. current_price
-                    target_price,               # 9. target_price
-                    upside_val,                 # 10. upside_potential
-                    int(score_certainty),       # 11. score_certainty
-                    final_score,                # 12. final_score
-                    conc.get('target_market_cap', ''), # 13. target_market_cap
-                    conc.get('forecast_net_profit', ''), # 14. forecast_net_profit
-                    surveys['active_days'],     # 15. survey_count
-                    surveys['total_orgs'],      # 16. org_count
-                    surveys['famous_orgs'],     # 17. famous_orgs
-                    res.get('q8_moat',''),      # 18. moat_summary
-                    chip_cumu,                  # 19. chip_cumu_change (对应 nan 修复)
-                    chip_last,                  # 20. chip_latest_change (对应 nan 修复)
-                    npm,                        # 21. netprofit_margin (对应 None 修复)
-                    full_ai_report,             # 22. ai_report
-                    datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'), # 23. update_time
-                    tags_val                    # 24 🔥 新增：将 tags 写入第 24 列
-                )
-
-                # 插入或替换记录
-                sql = "INSERT OR REPLACE INTO ai_analysis_result VALUES (" + ",".join(["?"]*24) + ")"
-                params_list = [str(p) if p is not None else None for p in db_data]
-                write_resp = requests.post(d1_execute_url, headers=d1_headers, json={"sql": sql, "params": params_list})
-                if not write_resp.json().get("success"):
-                    tqdm.write(f"❌ D1 写入失败 {ts_code}: {write_resp.json().get('error')}")
-
-            except Exception as e:
-                tqdm.write(f"❌ 数据库写入失败 {ts_code}: {e}")
+        try:
+            result = brain.analyze_and_save(
+                s, db, rag, skip_if_exists=False, current_date=current_date_str
+            )
+            if result.get('status') == 'error':
+                tqdm.write(f"❌ AI 分析失败 {s['ts_code']}: {result.get('error')}")
+        except Exception as e:
+            tqdm.write(f"❌ 分析或数据库写入失败 {s['ts_code']}: {e}")
 
     print("✨ 所有任务处理完毕。")
 
