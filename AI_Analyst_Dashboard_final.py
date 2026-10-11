@@ -234,6 +234,7 @@ def main():
     df_table_filtered = df_display.copy()
 
     # --- 模块 1: 图表可视化 ---
+    event = None
     if not df_display.empty:
         with st.expander("📈 市场全景可视化 (点击饼图可过滤下方表格)", expanded=True):
             col_chart1, col_chart2 = st.columns([2, 1])
@@ -262,7 +263,7 @@ def main():
 
     # 处理饼图过滤交互
     selected_industry = None
-    if event.selection:
+    if event is not None and event.selection:
         for key in event.selection:
             if event.selection[key]:
                 selected_industry = event.selection[key][0].get("industry")

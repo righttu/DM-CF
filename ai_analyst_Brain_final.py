@@ -23,7 +23,7 @@ except ImportError:
 # ================= 配置区 =================
 AI_ENGINE = "BAILIAN"  # 开关: "OLLAMA" 或 "BAILIAN"
 OLLAMA_MODEL = "qwen3:14b"
-BAILIAN_MODEL = "qwen3-max-preview"
+BAILIAN_MODEL = "qwen3.8-2.4t-a95b"
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY") # 从环境变量读取
 CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID")
 CF_AIG_TOKEN = os.getenv("CF_AIG_TOKEN")
