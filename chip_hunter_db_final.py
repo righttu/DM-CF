@@ -21,6 +21,8 @@ import datetime
 import time
 import traceback
 import warnings
+import threading
+from collections import deque
 from dateutil.relativedelta import relativedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -35,6 +37,25 @@ CF_ACCESS_CLIENT_SECRET = os.getenv('CF_ACCESS_CLIENT_SECRET')
 BATCH_SIZE = 50
 
 # ================= 数据库定义 =================
+
+class SlidingWindowRateLimiter:
+    def __init__(self, max_calls, period_seconds):
+        self.max_calls = max_calls
+        self.period_seconds = period_seconds
+        self.calls = deque()
+        self.lock = threading.Lock()
+
+    def acquire(self):
+        while True:
+            with self.lock:
+                now = time.monotonic()
+                while self.calls and now - self.calls[0] >= self.period_seconds:
+                    self.calls.popleft()
+                if len(self.calls) < self.max_calls:
+                    self.calls.append(now)
+                    return
+                wait_seconds = self.period_seconds - (now - self.calls[0]) + 0.05
+            time.sleep(max(wait_seconds, 0.05))
 
 class CloudAPIClient:
     def __init__(self, base_url):
@@ -75,6 +96,12 @@ class ChipHunterStrategy:
         except Exception as e:
             # 建表失败属于致命错误，直接抛出并终止程序，防止后续白跑
             raise RuntimeError(f"💥 数据库初始化失败，程序终止: {e}") from e
+        self.rate_limiters = {
+            'daily': SlidingWindowRateLimiter(450, 60),
+            'daily_basic': SlidingWindowRateLimiter(450, 60),
+            'stk_holdernumber': SlidingWindowRateLimiter(450, 60),
+        }
+        self.holdernumber_by_code = None
 
 
         import datetime
@@ -118,6 +145,38 @@ class ChipHunterStrategy:
         self.api._post('/api/db/execute', {'sql': "CREATE INDEX IF NOT EXISTS idx_chip_scan_date ON chip_hunter(scan_date)"})
         self.api._post('/api/db/execute', {'sql': "CREATE UNIQUE INDEX IF NOT EXISTS idx_chip_code_scan_date ON chip_hunter(ts_code, scan_date)"})
 
+    def _load_holdernumber_pool(self, start_date, end_date):
+        page_size = 3000
+        frames = []
+        for page_no in range(100):
+            df_page = self._request_with_retry(
+                self.pro_main.stk_holdernumber,
+                api_name='stk_holdernumber',
+                start_date=start_date,
+                end_date=end_date,
+                fields='ts_code,end_date,holder_num',
+                limit=page_size,
+                offset=page_no * page_size
+            )
+            if df_page is None:
+                raise RuntimeError('stk_holdernumber 返回 None')
+            if not df_page.empty:
+                frames.append(df_page)
+            if len(df_page) < page_size:
+                break
+        else:
+            raise RuntimeError('stk_holdernumber 分页超过100页，拒绝使用截断数据')
+
+        if not frames:
+            raise RuntimeError('stk_holdernumber 全市场批量结果为空，拒绝将全市场误判为不合格')
+
+        df_all = pd.concat(frames, ignore_index=True)
+        self.holdernumber_by_code = {
+            ts_code: group.copy()
+            for ts_code, group in df_all.groupby('ts_code')
+        }
+        print(f"✅ 股东人数一次性预取完成: {len(df_all)} 条，共 {len(frames)} 页")
+
     def _get_pro_worker(self):
         #彻底复用单例
         #pro = ts.pro_api(self.token)
@@ -127,16 +186,24 @@ class ChipHunterStrategy:
         #return pro
         return self.pro_main
 
-    def _request_with_retry(self, func, **kwargs):
+    def _request_with_retry(self, func, api_name=None, **kwargs):
         max_retries = 3
         for i in range(max_retries):
             try:
+                limiter = self.rate_limiters.get(api_name)
+                if limiter:
+                    limiter.acquire()
                 if 'timeout' not in kwargs: kwargs['timeout'] = 15
                 return func(**kwargs)
             except Exception as e:
-                if i == max_retries - 1: raise e
-                if '频率超限' in str(e) or '每分钟最多访问' in str(e):
-                    print(f"⚠️ Tushare 频率限制，等待 65 秒后重试: {e}")
+                error_message = str(e)
+                if '次/天' in error_message:
+                    print(f"⚠️ Tushare 每日调用额度已用完，本次不再重试: {e}")
+                    raise
+                if i == max_retries - 1:
+                    raise
+                if '频率超限' in error_message or '每分钟最多访问' in error_message:
+                    print(f"⚠️ Tushare 分钟频率限制，等待 65 秒后重试: {e}")
                     time.sleep(65)
                 else:
                     time.sleep(1 * (i + 1))
@@ -200,7 +267,10 @@ class ChipHunterStrategy:
         end_date = datetime.datetime.now().strftime('%Y%m%d')
         start_date = (datetime.datetime.now() - relativedelta(months=18)).strftime('%Y%m%d')
         try:
-            df = self._request_with_retry(pro.stk_holdernumber, ts_code=code, start_date=start_date, end_date=end_date)
+            if self.holdernumber_by_code is not None:
+                df = self.holdernumber_by_code.get(code, pd.DataFrame()).copy()
+            else:
+                df = self._request_with_retry(pro.stk_holdernumber, api_name='stk_holdernumber', ts_code=code, start_date=start_date, end_date=end_date)
             if df is None or df.empty or len(df) < 2: return None
             df = df.sort_values('end_date', ascending=False).reset_index(drop=True)
             
@@ -229,6 +299,9 @@ class ChipHunterStrategy:
 
     def get_chip_candidates(self, stock_df, mode):
         print(f"🔍 [2/6] 扫描筹码 (模式: {mode} | 多线程加速)...")
+        end_date = datetime.datetime.now().strftime('%Y%m%d')
+        start_date = (datetime.datetime.now() - relativedelta(months=18)).strftime('%Y%m%d')
+        self._load_holdernumber_pool(start_date, end_date)
         candidates = []
         stock_list = stock_df.to_dict('records')
         total = len(stock_list); processed = 0
@@ -250,7 +323,7 @@ class ChipHunterStrategy:
         end_date = datetime.datetime.now().strftime('%Y%m%d')
         start_date = (datetime.datetime.now() - datetime.timedelta(days=600)).strftime('%Y%m%d')
         try:
-            df = self._request_with_retry(pro.daily, ts_code=code, start_date=start_date, end_date=end_date, fields='ts_code,trade_date,close,vol,pct_chg')
+            df = self._request_with_retry(pro.daily, api_name='daily', ts_code=code, start_date=start_date, end_date=end_date, fields='ts_code,trade_date,close,vol,pct_chg')
             if df is None or df.empty or len(df) < 60: return None
             df = df.sort_values('trade_date', ascending=False).reset_index(drop=True)
             current_close = df.loc[0, 'close']
@@ -338,7 +411,7 @@ class ChipHunterStrategy:
 
         # --- A. 行情与估值 (获取锚点日期) ---
         try:
-            df_daily = self._request_with_retry(pro.daily_basic, ts_code=ts_code, limit=3, 
+            df_daily = self._request_with_retry(pro.daily_basic, api_name='daily_basic', ts_code=ts_code, limit=3,
                                                 fields='ts_code,trade_date,turnover_rate,pe_ttm,pb,ps_ttm,total_mv,volume_ratio')
             if not df_daily.empty:
                 #res['turnover_rate_3d'] = df_daily['turnover_rate'].mean() # 3日日均换手
@@ -398,7 +471,7 @@ class ChipHunterStrategy:
         # --- C. 5年历史分位 ---
         try:
             start_date_5y = (datetime.datetime.now() - relativedelta(years=5)).strftime('%Y%m%d')
-            df_hist = self._request_with_retry(pro.daily_basic, ts_code=ts_code, start_date=start_date_5y, fields='pe_ttm,pb')
+            df_hist = self._request_with_retry(pro.daily_basic, api_name='daily_basic', ts_code=ts_code, start_date=start_date_5y, fields='pe_ttm,pb')
             if not df_hist.empty and len(df_hist) > 100:
                 cur_pe = res.get('pe_ttm')
                 if pd.notna(cur_pe): res['pe_ttm_percentile'] = round((df_hist['pe_ttm'] < float(cur_pe)).mean() * 100, 2)
@@ -414,7 +487,7 @@ class ChipHunterStrategy:
                     df_ind_stocks = df_ind_stocks[df_ind_stocks['industry'] == industry]
                     ind_codes_list = df_ind_stocks['ts_code'].tolist()
                     if ind_codes_list:
-                        df_market_daily = self._request_with_retry(pro.daily_basic, trade_date=anchor_date, fields='ts_code,pe_ttm,pb,turnover_rate')
+                        df_market_daily = self._request_with_retry(pro.daily_basic, api_name='daily_basic', trade_date=anchor_date, fields='ts_code,pe_ttm,pb,turnover_rate')
                         if not df_market_daily.empty:
                             df_ind_daily = df_market_daily[df_market_daily['ts_code'].isin(ind_codes_list)]
                             if not df_ind_daily.empty:
@@ -570,7 +643,7 @@ class ChipHunterStrategy:
         try:
             end_date_t = datetime.datetime.now().strftime('%Y%m%d')
             start_date_t = (datetime.datetime.now() - datetime.timedelta(days=600)).strftime('%Y%m%d')
-            df_tech = self._request_with_retry(self.pro_main.daily, ts_code=ts_code, start_date=start_date_t, end_date=end_date_t, fields='ts_code,trade_date,close,vol,pct_chg')
+            df_tech = self._request_with_retry(self.pro_main.daily, api_name='daily', ts_code=ts_code, start_date=start_date_t, end_date=end_date_t, fields='ts_code,trade_date,close,vol,pct_chg')
             if not df_tech.empty:
                 df_tech = df_tech.sort_values('trade_date', ascending=False).reset_index(drop=True)
                 stock_info['close'] = df_tech.loc[0, 'close']  # 注入收盘价（计算 G 的生命线）

@@ -22,6 +22,8 @@ import datetime
 import time
 import traceback
 import warnings
+import threading
+from collections import deque
 from dateutil.relativedelta import relativedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -37,6 +39,25 @@ CF_ACCESS_CLIENT_SECRET = os.getenv('CF_ACCESS_CLIENT_SECRET')
 BATCH_SIZE = 50
 
 # ================= 数据库定义 =================
+
+class SlidingWindowRateLimiter:
+    def __init__(self, max_calls, period_seconds):
+        self.max_calls = max_calls
+        self.period_seconds = period_seconds
+        self.calls = deque()
+        self.lock = threading.Lock()
+
+    def acquire(self):
+        while True:
+            with self.lock:
+                now = time.monotonic()
+                while self.calls and now - self.calls[0] >= self.period_seconds:
+                    self.calls.popleft()
+                if len(self.calls) < self.max_calls:
+                    self.calls.append(now)
+                    return
+                wait_seconds = self.period_seconds - (now - self.calls[0]) + 0.05
+            time.sleep(max(wait_seconds, 0.05))
 
 class CloudAPIClient:
     def __init__(self, base_url):
@@ -64,6 +85,11 @@ class AlphaHunterStrategy:
         #self.pro_main._DataApi__http_url = 'https://tushare.top/dataapi/'
         self.api = CloudAPIClient(D1_API_URL)
         self._ensure_table()
+        self.rate_limiters = {
+            'daily': SlidingWindowRateLimiter(450, 60),
+            'daily_basic': SlidingWindowRateLimiter(450, 60),
+            'stk_holdernumber': SlidingWindowRateLimiter(450, 60),
+        }
         self.current_date_str = datetime.datetime.now().strftime('%Y%m%d')
 
     def _ensure_table(self):
@@ -78,7 +104,7 @@ class AlphaHunterStrategy:
                 ps_ttm REAL, forecast_eps_fy2 REAL, con_growth_rate REAL,
                 roe REAL, grossprofit_margin REAL, netprofit_yoy REAL,
                 scan_date TEXT, score REAL, tags TEXT,
-                industry_heat_status TEXT, main_business TEXT, market_sentiment TEXT,
+                industry_heat_status TEXT, main_business TEXT,
                 ratio_current TEXT, ratio_prev_1 TEXT, ratio_prev_2 TEXT,
                 accel_ratio REAL, hold_mv_billion REAL,
                 chip_latest_change TEXT, chip_cumu_change TEXT, create_time TEXT
@@ -106,16 +132,24 @@ class AlphaHunterStrategy:
         except: pass
         return pro
 
-    def _request_with_retry(self, func, **kwargs):
+    def _request_with_retry(self, func, api_name=None, **kwargs):
         max_retries = 3
         for i in range(max_retries):
             try:
+                limiter = self.rate_limiters.get(api_name)
+                if limiter:
+                    limiter.acquire()
                 if 'timeout' not in kwargs: kwargs['timeout'] = 15
                 return func(**kwargs)
             except Exception as e:
-                if i == max_retries - 1: raise e
-                if '频率超限' in str(e) or '每分钟最多访问' in str(e):
-                    print(f"⚠️ Tushare 频率限制，等待 65 秒后重试: {e}")
+                error_message = str(e)
+                if '次/天' in error_message:
+                    print(f"⚠️ Tushare 每日调用额度已用完，本次不再重试: {e}")
+                    raise
+                if i == max_retries - 1:
+                    raise
+                if '频率超限' in error_message or '每分钟最多访问' in error_message:
+                    print(f"⚠️ Tushare 分钟频率限制，等待 65 秒后重试: {e}")
                     time.sleep(65)
                 else:
                     time.sleep(1 * (i + 1))
@@ -154,11 +188,11 @@ class AlphaHunterStrategy:
             df_basic = df_basic[df_basic['list_date'] < one_year_ago]
             
             today = datetime.datetime.now().strftime('%Y%m%d')
-            df_mv = self._request_with_retry(self.pro_main.daily_basic, trade_date=today, fields='ts_code,trade_date,close,total_mv')
+            df_mv = self._request_with_retry(self.pro_main.daily_basic, api_name='daily_basic', trade_date=today, fields='ts_code,trade_date,close,total_mv')
             
             if df_mv is None or df_mv.empty:
                 start_back = (datetime.datetime.now() - datetime.timedelta(days=5)).strftime('%Y%m%d')
-                df_mv = self._request_with_retry(self.pro_main.daily_basic, start_date=start_back, end_date=today, fields='ts_code,trade_date,close,total_mv')
+                df_mv = self._request_with_retry(self.pro_main.daily_basic, api_name='daily_basic', start_date=start_back, end_date=today, fields='ts_code,trade_date,close,total_mv')
                 if not df_mv.empty:
                     df_mv = df_mv.sort_values('trade_date', ascending=False).drop_duplicates('ts_code')
 
@@ -225,7 +259,7 @@ class AlphaHunterStrategy:
         
         # --- # 0. MA60 & 技术位置 ---
         start_dt = (datetime.datetime.strptime(current_date, '%Y%m%d') - datetime.timedelta(days=150)).strftime('%Y%m%d')
-        df_daily = self._request_with_retry(pro.daily, ts_code=ts_code, start_date=start_dt, end_date=current_date)
+        df_daily = self._request_with_retry(pro.daily, api_name='daily', ts_code=ts_code, start_date=start_dt, end_date=current_date)
         if df_daily is None or df_daily.empty or len(df_daily) < 60: return False, {}
         
         df_daily = df_daily.sort_values('trade_date').reset_index(drop=True)
@@ -309,7 +343,7 @@ class AlphaHunterStrategy:
         # --- # 6. 筹码集中度 ---
         start_check = (datetime.datetime.strptime(available_periods[0], '%Y%m%d') - datetime.timedelta(days=500)).strftime('%Y%m%d')
 
-        df_chips = self._request_with_retry(pro.stk_holdernumber, ts_code=ts_code, start_date=start_check)
+        df_chips = self._request_with_retry(pro.stk_holdernumber, api_name='stk_holdernumber', ts_code=ts_code, start_date=start_check)
         
         # 🔴 [修改内容1] 将假 0.0 清洗为 None
         chg_q = None; chg_3q = None 
@@ -356,7 +390,7 @@ class AlphaHunterStrategy:
         # 1. 基础行情
         anchor_date = None
         try:
-            df_daily = self._request_with_retry(pro.daily_basic, ts_code=ts_code, limit=3, 
+            df_daily = self._request_with_retry(pro.daily_basic, api_name='daily_basic', ts_code=ts_code, limit=3,
                                                 fields='ts_code,trade_date,turnover_rate,pe_ttm,pb,ps_ttm,total_mv,close')
             if not df_daily.empty:
                 # 🔴 [修改微调] 对齐换手率量纲：改为 mean() 日均换手，以适配 > 8 条件
@@ -386,7 +420,7 @@ class AlphaHunterStrategy:
         # 3. 历史分位
         try:
             start_5y = (datetime.datetime.now() - relativedelta(years=5)).strftime('%Y%m%d')
-            df_hist = self._request_with_retry(pro.daily_basic, ts_code=ts_code, start_date=start_5y, fields='pe_ttm,pb')
+            df_hist = self._request_with_retry(pro.daily_basic, api_name='daily_basic', ts_code=ts_code, start_date=start_5y, fields='pe_ttm,pb')
             if not df_hist.empty and len(df_hist) > 100:
                 cur_pe = res.get('pe_ttm')
                 if pd.notna(cur_pe): res['pe_ttm_percentile'] = round((df_hist['pe_ttm'] < float(cur_pe)).mean() * 100, 2)
@@ -403,7 +437,7 @@ class AlphaHunterStrategy:
                     ind_codes_list = df_ind_stocks['ts_code'].tolist()
                     
                     if ind_codes_list:
-                        df_market = self._request_with_retry(pro.daily_basic, trade_date=anchor_date, fields='ts_code,pe_ttm,pb,turnover_rate')
+                        df_market = self._request_with_retry(pro.daily_basic, api_name='daily_basic', trade_date=anchor_date, fields='ts_code,pe_ttm,pb,turnover_rate')
                         if not df_market.empty:
                             df_ind_daily = df_market[df_market['ts_code'].isin(ind_codes_list)]
                             if not df_ind_daily.empty:
@@ -427,16 +461,6 @@ class AlphaHunterStrategy:
                 res['net_inflow_5d'] = df_flow['net'].sum()
         except: pass
 
-        # 6. 一致预期与机构情绪
-        try:
-            start_rc = (datetime.datetime.now() - datetime.timedelta(days=180)).strftime('%Y%m%d')
-            df_rc = self._request_with_retry(pro.report_rc, ts_code=ts_code, start_date=start_rc, fields='report_date,quarter,eps,rating')
-            if not df_rc.empty:
-                rpt_count = len(df_rc)
-                buy_count = len(df_rc[df_rc['rating'].str.contains('买入|推荐|增持', na=False)])
-                res['market_sentiment'] = f"180天{rpt_count}家关注({buy_count}家看多)"
-        except: pass
-        
         # 🔴 [修改内容2] NTM 动态估值算法 (基于 Akshare 且严格防御 NaN)
         # 🛡️ 错位探测装甲：如果去年的列有数据，说明 Akshare 表头左移了，强制右移纠偏
         # 🔴 [修改位置2]：同步 Chip Hunter 的工业级加固 NTM 算法
@@ -553,7 +577,7 @@ class AlphaHunterStrategy:
         except Exception as e:
             print(f"⚠️ Akshare 数据拉取失败: {e}")
             self.df_ak = pd.DataFrame()
-            
+
         current_year = datetime.datetime.now().year
         day_of_year = datetime.datetime.now().timetuple().tm_yday
         self.w1 = (365 - day_of_year) / 365.0
@@ -663,7 +687,6 @@ class AlphaHunterStrategy:
                     "tags": safe_get(row, 'tags', is_float=False),
                     "industry_heat_status": safe_get(row, 'industry_heat_status', is_float=False),
                     "main_business": safe_get(row, 'main_business', is_float=False),
-                    "market_sentiment": safe_get(row, 'market_sentiment', is_float=False),
                     "ratio_current": safe_get(row, 'ratio_current', is_float=False),
                     "ratio_prev_1": safe_get(row, 'ratio_prev_1', is_float=False),
                     "ratio_prev_2": safe_get(row, 'ratio_prev_2', is_float=False),
