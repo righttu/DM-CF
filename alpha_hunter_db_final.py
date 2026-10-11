@@ -34,8 +34,25 @@ MY_TOKEN = os.getenv('MY_TUSHARE_TOKEN')
 D1_API_URL = 'https://stock-api.righttu.uk'
 CF_ACCESS_CLIENT_ID = os.getenv('CF_ACCESS_CLIENT_ID')
 CF_ACCESS_CLIENT_SECRET = os.getenv('CF_ACCESS_CLIENT_SECRET')
+BATCH_SIZE = 50
 
 # ================= 数据库定义 =================
+
+class CloudAPIClient:
+    def __init__(self, base_url):
+        self.base_url = base_url.rstrip('/')
+        self.headers = {
+            'Content-Type': 'application/json',
+            'CF-Access-Client-Id': CF_ACCESS_CLIENT_ID,
+            'CF-Access-Client-Secret': CF_ACCESS_CLIENT_SECRET,
+        }
+
+    def _post(self, path, payload):
+        resp = http_requests.post(f'{self.base_url}{path}', json=payload, headers=self.headers, timeout=30)
+        data = resp.json()
+        if not data.get('success'):
+            raise Exception(data.get('error', f'API call failed: {path}'))
+        return data
 
 # ================= 策略引擎 =================
 
@@ -45,7 +62,41 @@ class AlphaHunterStrategy:
         self.token = token
         self.pro_main = ts.pro_api(self.token)
         #self.pro_main._DataApi__http_url = 'https://tushare.top/dataapi/'
+        self.api = CloudAPIClient(D1_API_URL)
+        self._ensure_table()
         self.current_date_str = datetime.datetime.now().strftime('%Y%m%d')
+
+    def _ensure_table(self):
+        self.api._post('/api/db/execute', {'sql': """
+            CREATE TABLE IF NOT EXISTS alpha_hunter (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts_code TEXT, name TEXT, industry TEXT, close REAL,
+                turnover_rate_3d REAL, industry_turnover_rate_3d REAL,
+                pe_ttm REAL, pe_ttm_percentile REAL, industry_pe_ttm_median REAL,
+                peg REAL, pb REAL, pb_percentile REAL, industry_pb_median REAL,
+                forecast_eps_fy1 REAL, net_inflow_5d REAL, total_mv REAL,
+                ps_ttm REAL, forecast_eps_fy2 REAL, con_growth_rate REAL,
+                roe REAL, grossprofit_margin REAL, netprofit_yoy REAL,
+                scan_date TEXT, score REAL, tags TEXT,
+                industry_heat_status TEXT, main_business TEXT, market_sentiment TEXT,
+                ratio_current TEXT, ratio_prev_1 TEXT, ratio_prev_2 TEXT,
+                accel_ratio REAL, hold_mv_billion REAL,
+                chip_latest_change TEXT, chip_cumu_change TEXT, create_time TEXT
+            )
+        """})
+        resp = self.api._post('/api/db/query', {'sql': """
+            SELECT ts_code, scan_date, COUNT(*) AS duplicate_count
+            FROM alpha_hunter
+            GROUP BY ts_code, scan_date
+            HAVING COUNT(*) > 1
+            LIMIT 10
+        """})
+        duplicates = resp.get('results', [])
+        if duplicates:
+            raise RuntimeError(f"❌ alpha_hunter 存在重复的 (ts_code, scan_date) 记录，请先人工清理后再创建唯一索引: {duplicates}")
+        self.api._post('/api/db/execute', {'sql': "CREATE INDEX IF NOT EXISTS idx_alpha_ts_code ON alpha_hunter(ts_code)"})
+        self.api._post('/api/db/execute', {'sql': "CREATE INDEX IF NOT EXISTS idx_alpha_scan_date ON alpha_hunter(scan_date)"})
+        self.api._post('/api/db/execute', {'sql': "CREATE UNIQUE INDEX IF NOT EXISTS idx_alpha_code_scan_date ON alpha_hunter(ts_code, scan_date)"})
 
     def _get_pro_worker(self):
         pro = ts.pro_api(self.token)
@@ -63,9 +114,35 @@ class AlphaHunterStrategy:
                 return func(**kwargs)
             except Exception as e:
                 if i == max_retries - 1: raise e
-                time.sleep(1 * (i + 1))
+                if '频率超限' in str(e) or '每分钟最多访问' in str(e):
+                    print(f"⚠️ Tushare 频率限制，等待 65 秒后重试: {e}")
+                    time.sleep(65)
+                else:
+                    time.sleep(1 * (i + 1))
         return None
 
+    def filter_existing_in_db(self, df):
+        if df.empty: return df
+        print("🛑 数据库查重 (断点续传)...")
+        today_str = datetime.datetime.now().strftime('%Y%m%d')
+        try:
+            resp = self.api._post('/api/db/query', {
+                'sql': 'SELECT ts_code FROM alpha_hunter WHERE scan_date = ?',
+                'params': [today_str]
+            })
+            existing_set = {r['ts_code'] for r in resp.get('results', [])}
+            if not existing_set:
+                print("   ⚪ 今日尚无记录，全量处理。")
+                return df
+            original_count = len(df)
+            df_new = df[~df['ts_code'].isin(existing_set)].copy()
+            skipped_count = original_count - len(df_new)
+            if skipped_count > 0: print(f"   ⚠️ 跳过 {skipped_count} 条，剩余 {len(df_new)} 条。")
+            else: print("   ⚪ 无重复记录。")
+            return df_new
+        except Exception as e:
+            print(f"   ❌ 查重失败: {e}")
+            return df
 
     # ================= 1. 股票池 =================
     def get_valid_stock_list(self):
@@ -461,6 +538,10 @@ class AlphaHunterStrategy:
     def run(self):
         df_base = self.get_valid_stock_list()
         if df_base.empty: return
+        df_base = self.filter_existing_in_db(df_base)
+        if df_base.empty:
+            print("✅ 今日 Alpha 结果已处理完毕。")
+            return
         
         # 🔴 [修改位置1]：在并发扫描前，必须先初始化所有 NTM 变量
         import akshare as ak
@@ -481,10 +562,19 @@ class AlphaHunterStrategy:
         self.col_eps2 = f"{current_year + 1}预测每股收益"
         self.col_eps_prev = f"{current_year - 1}预测每股收益" # 🛡️ 错位嗅探列
 
-        print(f"\n🔍 [Step 2] 深度扫描 (多线程并发: 5)...")
+        print(f"\n🔍 [Step 2] 深度扫描 (多线程并发: 2)...")
         stock_list = df_base.to_dict('records')
-        final_results = []
-        
+        pending_results = []
+        selected_count = 0
+
+        def format_pct(value, width):
+            try:
+                if value is None or pd.isna(value):
+                    return "数据缺失"
+                return f"{float(value):>{width}.2f}%"
+            except (TypeError, ValueError):
+                return "数据缺失"
+
         with ThreadPoolExecutor(max_workers=2) as executor:
             future_to_stock = {executor.submit(self.process_stock_task, item): item for item in stock_list}
             
@@ -497,86 +587,52 @@ class AlphaHunterStrategy:
                 try:
                     res = future.result()
                     if res:
-                        final_results.append(res)
+                        selected_count += 1
+                        pending_results.append(res)
                         # ✅ 入围显示：对齐 Chip Hunter 的显示风格
-                        g_show = res.get('con_growth_rate', 0.0)
-                        to_show = res.get('turnover_rate_3d', 0.0)
-                        print(f"   ✅ 入围: {res['name']:<4} | G: {f'{g_show:>6}%' if g_show else '0.00%'} | 换手: {to_show:>5.2f}% | 分: {res.get('score',0)}")
+                        g_str = format_pct(res.get('con_growth_rate'), 6)
+                        to_str = format_pct(res.get('turnover_rate_3d'), 5)
+                        print(f"   ✅ 入围: {res['name']:<4} | G: {g_str:>8} | 换手: {to_str} | 分: {res.get('score',0)}")
                     else:
                         # 🛡️ 拦截显示：让你看清为什么没入围
                         g_val = original_item.get('_diag_g', 'N/A')
                         to_val = original_item.get('_diag_to', 0.0)
                         
                         # 格式化 G 值，防止 None 报错
-                        g_str = f"{g_val}%" if g_val is not None and g_val != 'N/A' else "数据缺失"
-                        print(f"   🛡️ 拦截诊断 [{original_item['name']:<4}] | 实际 G: {g_str:>8} | 换手: {to_val:>5.2f}%")
+                        g_str = format_pct(g_val, 6)
+                        to_str = format_pct(to_val, 5)
+                        print(f"   🛡️ 拦截诊断 [{original_item['name']:<4}] | 实际 G: {g_str:>8} | 换手: {to_str}")
                         
                 except Exception as e:
                     # 打印具体哪只标的出了异常
                     print(f"   ❌ 异常 [{original_item.get('name')}]: {e}")
 
-        print(f"\n🎉 扫描完成! 共筛选出 {len(final_results)} 只优质标的")
-        
-        if final_results:
-            self.save_to_db(pd.DataFrame(final_results))
+                if len(pending_results) >= BATCH_SIZE:
+                    self.save_to_db(pd.DataFrame(pending_results))
+                    pending_results.clear()
+
+        if pending_results:
+            self.save_to_db(pd.DataFrame(pending_results))
+            pending_results.clear()
+
+        print(f"\n🎉 扫描完成! 共筛选出 {selected_count} 只优质标的")
     def save_to_db(self, df):
         
         print(f"💾 [Step 3] 正在写入 D1 (via Worker API)...")
-        headers = {
-            "CF-Access-Client-Id": CF_ACCESS_CLIENT_ID,
-            "CF-Access-Client-Secret": CF_ACCESS_CLIENT_SECRET,
-            "Content-Type": "application/json"
-        }
-        
-        # 🛡️ 自动建表（如果不存在）
-        ddl_statements = [
-            """
-            CREATE TABLE IF NOT EXISTS alpha_hunter (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts_code TEXT, name TEXT, industry TEXT, close REAL,
-                turnover_rate_3d REAL, industry_turnover_rate_3d REAL,
-                pe_ttm REAL, pe_ttm_percentile REAL, industry_pe_ttm_median REAL,
-                peg REAL, pb REAL, pb_percentile REAL, industry_pb_median REAL,
-                forecast_eps_fy1 REAL, net_inflow_5d REAL, total_mv REAL,
-                ps_ttm REAL, forecast_eps_fy2 REAL, con_growth_rate REAL,
-                roe REAL, grossprofit_margin REAL, netprofit_yoy REAL,
-                scan_date TEXT, score REAL, tags TEXT,
-                industry_heat_status TEXT, main_business TEXT, market_sentiment TEXT,
-                ratio_current TEXT, ratio_prev_1 TEXT, ratio_prev_2 TEXT,
-                accel_ratio REAL, hold_mv_billion REAL,
-                chip_latest_change TEXT, chip_cumu_change TEXT, create_time TEXT
-            )
-            """,
-            "CREATE INDEX IF NOT EXISTS idx_alpha_ts_code ON alpha_hunter(ts_code)",
-            "CREATE INDEX IF NOT EXISTS idx_alpha_scan_date ON alpha_hunter(scan_date)",
-        ]
-        try:
-            for sql in ddl_statements:
-                resp = http_requests.post(
-                    f"{D1_API_URL}/api/db/execute",
-                    headers=headers,
-                    json={"sql": sql},
-                    timeout=15
-                )
-                data = resp.json()
-                if not data.get('success'):
-                    raise Exception(data.get('error', 'DDL execution failed'))
-        except Exception as e:
-            print(f"   ⚠️ 建表失败: {e}")  # 建表失败不阻断，后面写入时自然会报错提示
-        
+
         def safe_get(row, key, is_float=True):
             val = row.get(key)
             if pd.isna(val) or val == '' or val is None: return None
             if is_float:
                 try: 
                     f_val = float(val)
-                    if np.isinf(f_val): return None
+                    if not np.isfinite(f_val): return None
                     return f_val
                 except: return None
             return val
         
         try:
-            count = 0
+            records = []
             for _, row in df.iterrows():
                 
                 record = {
@@ -618,22 +674,14 @@ class AlphaHunterStrategy:
                     "create_time": safe_get(row, 'create_time', is_float=False)
                 }
 
-                resp = http_requests.post(
-                    f"{D1_API_URL}/api/db/save",
-                    headers=headers,
-                    json={"table": "alpha_hunter", "data": [record]},
-                    timeout=15
-                )
-                
-                if resp.status_code == 200:
-                    count += 1
-                else:
-                    print(f"   ⚠️ 写入失败 [{row.get('name')}]: {resp.status_code} {resp.text}")
-            
-            print(f"✅ 成功入库: {count} 条")
+                records.append(record)
+            resp = self.api._post('/api/db/save', {'table': 'alpha_hunter', 'data': records})
+            print(f"✅ 本批成功入库: {resp.get('count', len(records))} 条")
+            return resp.get('count', len(records))
         except Exception as e:
             print(f"❌ 入库失败: {e}")
             traceback.print_exc()
+            raise
 
 
 if __name__ == "__main__":

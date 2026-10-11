@@ -32,6 +32,7 @@ DB_PATH = 'sqlite:///quant_data.db'
 D1_API_URL = 'https://stock-api.righttu.uk'
 CF_ACCESS_CLIENT_ID = os.getenv('CF_ACCESS_CLIENT_ID')
 CF_ACCESS_CLIENT_SECRET = os.getenv('CF_ACCESS_CLIENT_SECRET')
+BATCH_SIZE = 50
 
 # ================= 数据库定义 =================
 
@@ -101,11 +102,21 @@ class ChipHunterStrategy:
                 pattern TEXT, bias_60 REAL, vol_signal TEXT, create_time TEXT
             )
             """,
-            "CREATE INDEX IF NOT EXISTS idx_chip_ts_code ON chip_hunter(ts_code)",
-            "CREATE INDEX IF NOT EXISTS idx_chip_scan_date ON chip_hunter(scan_date)",
         ]
-        for sql in ddl_statements:
-            self.api._post('/api/db/execute', {'sql': sql})
+        self.api._post('/api/db/execute', {'sql': ddl_statements[0]})
+        resp = self.api._post('/api/db/query', {'sql': """
+            SELECT ts_code, scan_date, COUNT(*) AS duplicate_count
+            FROM chip_hunter
+            GROUP BY ts_code, scan_date
+            HAVING COUNT(*) > 1
+            LIMIT 10
+        """})
+        duplicates = resp.get('results', [])
+        if duplicates:
+            raise RuntimeError(f"❌ chip_hunter 存在重复的 (ts_code, scan_date) 记录，请先人工清理后再创建唯一索引: {duplicates}")
+        self.api._post('/api/db/execute', {'sql': "CREATE INDEX IF NOT EXISTS idx_chip_ts_code ON chip_hunter(ts_code)"})
+        self.api._post('/api/db/execute', {'sql': "CREATE INDEX IF NOT EXISTS idx_chip_scan_date ON chip_hunter(scan_date)"})
+        self.api._post('/api/db/execute', {'sql': "CREATE UNIQUE INDEX IF NOT EXISTS idx_chip_code_scan_date ON chip_hunter(ts_code, scan_date)"})
 
     def _get_pro_worker(self):
         #彻底复用单例
@@ -124,7 +135,11 @@ class ChipHunterStrategy:
                 return func(**kwargs)
             except Exception as e:
                 if i == max_retries - 1: raise e
-                time.sleep(1 * (i + 1))
+                if '频率超限' in str(e) or '每分钟最多访问' in str(e):
+                    print(f"⚠️ Tushare 频率限制，等待 65 秒后重试: {e}")
+                    time.sleep(65)
+                else:
+                    time.sleep(1 * (i + 1))
         return None
 
     # === [移植自 Alpha] 识别聪明钱身份 ===
@@ -291,7 +306,7 @@ class ChipHunterStrategy:
     # ================= 4. 断点续传 =================
     def filter_existing_in_db(self, df):
         if df.empty: return df
-        print("🛑 [4/6] 数据库查重 (断点续传)...")
+        print("🛑 数据库查重 (断点续传)...")
         today_str = datetime.datetime.now().strftime('%Y%m%d')
         try:
             resp = self.api._post('/api/db/query', {
@@ -609,9 +624,10 @@ class ChipHunterStrategy:
         return final_res
 
     def run_heavy_analysis_parallel(self, df_candidates):
-        if df_candidates.empty: return pd.DataFrame()
+        if df_candidates.empty: return 0
         print("🏋️ [5/6] 启动重型计算 (全字段/多线程)...")
-        final_list = []
+        pending_results = []
+        selected_count = 0
         failed_list = []
         def format_pct(value, width):
             try:
@@ -631,7 +647,8 @@ class ChipHunterStrategy:
                 try:
                     result = future.result()
                     if result:
-                        final_list.append(result)
+                        selected_count += 1
+                        pending_results.append(result)
                         print(f"   ✅ 完成 {processed}/{total}: {original_item['name']} ", end='\r')
                     else:
                         failed_list.append(original_item['ts_code'])
@@ -647,8 +664,16 @@ class ChipHunterStrategy:
                     failed_list.append(original_item['ts_code'])
                     print(f"   ❌ 异常 {processed}/{total}: {original_item['name']} {e}   ", end='\r')
 
-        print(f"\n   🎉 计算完成! 成功: {len(final_list)}, 失败/拦截: {len(failed_list)}")
-        return pd.DataFrame(final_list)
+                if len(pending_results) >= BATCH_SIZE:
+                    self.save_to_db(pd.DataFrame(pending_results))
+                    pending_results.clear()
+
+        if pending_results:
+            self.save_to_db(pd.DataFrame(pending_results))
+            pending_results.clear()
+
+        print(f"\n   🎉 计算完成! 成功: {selected_count}, 失败/拦截: {len(failed_list)}")
+        return selected_count
 
     # ================= 6. 存库 =================
     def save_to_db(self, df):
@@ -743,20 +768,22 @@ class ChipHunterStrategy:
         except Exception as e:
             print(f"❌ 入库错误: {e}")
             traceback.print_exc()
+            raise
 
     def run(self, mode='established'):
         print(f"🦁 [Chip Hunter V13.1] 启动 -> 模式: {mode}")
         df_stocks = self.get_valid_stock_list(mode=mode)
         if df_stocks.empty: return
+        df_stocks = self.filter_existing_in_db(df_stocks)
+        if df_stocks.empty:
+            print("✅ 今日 Chip 结果已处理完毕。")
+            return
         
         df_chip = self.get_chip_candidates(df_stocks, mode=mode)
         if df_chip.empty: print("❌ 无筹码合格标的"); return
             
         df_tech = self.apply_technical_filters(df_chip)
         if df_tech.empty: print("❌ 技术面过滤后无剩余"); return
-            
-        df_new = self.filter_existing_in_db(df_tech)
-        if df_new.empty: print("✅ 今日已处理完毕。"); return
 
         import akshare as ak
         print("🌐 [INFO] 正在通过 Akshare 拉取全市场【机构一致预期】...")
@@ -780,16 +807,15 @@ class ChipHunterStrategy:
         try:
             if not getattr(self, 'df_ak', pd.DataFrame()).empty:
                 valid_forecast_codes = set(self.df_ak.index)
-                initial_len = len(df_new)
-                df_new['pure_code'] = df_new['ts_code'].apply(lambda x: x.split('.')[0])
-                df_new = df_new[df_new['pure_code'].isin(valid_forecast_codes)].copy()
-                df_new = df_new.drop(columns=['pure_code'])
-                print(f"   ✅ 已过滤掉 {initial_len - len(df_new)} 只无预测标的，剩余 {len(df_new)} 只进入深度计算。")
+                initial_len = len(df_tech)
+                df_tech['pure_code'] = df_tech['ts_code'].apply(lambda x: x.split('.')[0])
+                df_tech = df_tech[df_tech['pure_code'].isin(valid_forecast_codes)].copy()
+                df_tech = df_tech.drop(columns=['pure_code'])
+                print(f"   ✅ 已过滤掉 {initial_len - len(df_tech)} 只无预测标的，剩余 {len(df_tech)} 只进入深度计算。")
         except Exception as e:
             print(f"   ⚠️ 预清理失败(跳过): {e}")
             
-        df_final = self.run_heavy_analysis_parallel(df_new)
-        self.save_to_db(df_final)
+        self.run_heavy_analysis_parallel(df_tech)
 
 if __name__ == "__main__":
     screener = ChipHunterStrategy(MY_TOKEN)
