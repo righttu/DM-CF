@@ -90,6 +90,7 @@ class AlphaHunterStrategy:
             'daily_basic': SlidingWindowRateLimiter(450, 60),
             'stk_holdernumber': SlidingWindowRateLimiter(450, 60),
         }
+        self.holdernumber_by_code = None
         self.current_date_str = datetime.datetime.now().strftime('%Y%m%d')
 
     def _ensure_table(self):
@@ -123,6 +124,55 @@ class AlphaHunterStrategy:
         self.api._post('/api/db/execute', {'sql': "CREATE INDEX IF NOT EXISTS idx_alpha_ts_code ON alpha_hunter(ts_code)"})
         self.api._post('/api/db/execute', {'sql': "CREATE INDEX IF NOT EXISTS idx_alpha_scan_date ON alpha_hunter(scan_date)"})
         self.api._post('/api/db/execute', {'sql': "CREATE UNIQUE INDEX IF NOT EXISTS idx_alpha_code_scan_date ON alpha_hunter(ts_code, scan_date)"})
+
+    def _load_holdernumber_pool(self, start_date, end_date):
+        page_size = 3000
+        frames = []
+        total_pages = 0
+        range_start = datetime.datetime.strptime(start_date, '%Y%m%d')
+        final_end = datetime.datetime.strptime(end_date, '%Y%m%d')
+
+        while range_start <= final_end:
+            range_end = min(range_start + datetime.timedelta(days=29), final_end)
+            range_start_str = range_start.strftime('%Y%m%d')
+            range_end_str = range_end.strftime('%Y%m%d')
+
+            for page_no in range(34):
+                offset = page_no * page_size
+                df_page = self._request_with_retry(
+                    self.pro_main.stk_holdernumber,
+                    api_name='stk_holdernumber',
+                    start_date=range_start_str,
+                    end_date=range_end_str,
+                    fields='ts_code,ann_date,end_date,holder_num',
+                    limit=page_size,
+                    offset=offset
+                )
+                total_pages += 1
+                if df_page is None:
+                    raise RuntimeError(
+                        f'stk_holdernumber 返回 None: {range_start_str}-{range_end_str}, offset={offset}'
+                    )
+                if not df_page.empty:
+                    frames.append(df_page)
+                if len(df_page) < page_size:
+                    break
+            else:
+                raise RuntimeError(
+                    f'stk_holdernumber 日期段 {range_start_str}-{range_end_str} 达到 offset 上限，拒绝使用截断数据'
+                )
+
+            range_start = range_end + datetime.timedelta(days=1)
+
+        if not frames:
+            raise RuntimeError('stk_holdernumber 全市场批量结果为空，拒绝将全市场误判为不合格')
+
+        df_all = pd.concat(frames, ignore_index=True)
+        self.holdernumber_by_code = {
+            ts_code: group.copy()
+            for ts_code, group in df_all.groupby('ts_code')
+        }
+        print(f"✅ 股东人数分段预取完成: {len(df_all)} 条，共 {total_pages} 页")
 
     def _get_pro_worker(self):
         pro = ts.pro_api(self.token)
@@ -343,7 +393,17 @@ class AlphaHunterStrategy:
         # --- # 6. 筹码集中度 ---
         start_check = (datetime.datetime.strptime(available_periods[0], '%Y%m%d') - datetime.timedelta(days=500)).strftime('%Y%m%d')
 
-        df_chips = self._request_with_retry(pro.stk_holdernumber, api_name='stk_holdernumber', ts_code=ts_code, start_date=start_check)
+        if self.holdernumber_by_code is not None:
+            df_chips = self.holdernumber_by_code.get(ts_code, pd.DataFrame()).copy()
+            if not df_chips.empty:
+                df_chips = df_chips[df_chips['ann_date'] >= start_check]
+        else:
+            df_chips = self._request_with_retry(
+                pro.stk_holdernumber,
+                api_name='stk_holdernumber',
+                ts_code=ts_code,
+                start_date=start_check
+            )
         
         # 🔴 [修改内容1] 将假 0.0 清洗为 None
         chg_q = None; chg_3q = None 
@@ -572,11 +632,27 @@ class AlphaHunterStrategy:
         print(f"\n🌐 [INFO] 正在通过 Akshare 拉取全市场【机构一致预期】...")
         try:
             self.df_ak = ak.stock_profit_forecast_em()
+            if self.df_ak is None or self.df_ak.empty:
+                raise RuntimeError("Akshare 机构一致预期为空")
             self.df_ak['pure_code'] = self.df_ak['代码'].astype(str).str.zfill(6)
             self.df_ak = self.df_ak.set_index('pure_code')
         except Exception as e:
-            print(f"⚠️ Akshare 数据拉取失败: {e}")
-            self.df_ak = pd.DataFrame()
+            print(f"❌ Akshare 数据拉取失败，Alpha Hunter 终止: {e}")
+            return
+
+        valid_forecast_codes = set(self.df_ak.index)
+        initial_len = len(df_base)
+        df_base = df_base[df_base['ts_code'].str.split('.').str[0].isin(valid_forecast_codes)].copy()
+        print(f"🧹 [预清理] 已过滤掉 {initial_len - len(df_base)} 只无机构预测标的，剩余 {len(df_base)} 只。")
+        if df_base.empty:
+            print("❌ 机构预测过滤后无剩余标的")
+            return
+
+        holder_end = self.current_date_str
+        holder_start = (
+            datetime.datetime.strptime(holder_end, '%Y%m%d') - datetime.timedelta(days=950)
+        ).strftime('%Y%m%d')
+        self._load_holdernumber_pool(holder_start, holder_end)
 
         current_year = datetime.datetime.now().year
         day_of_year = datetime.datetime.now().timetuple().tm_yday

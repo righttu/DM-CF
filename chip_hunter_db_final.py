@@ -868,43 +868,33 @@ class ChipHunterStrategy:
         if df_stocks.empty:
             print("✅ 今日 Chip 结果已处理完毕。")
             return
-        
+
+        import akshare as ak
+        print("🌐 [INFO] 正在通过 Akshare 拉取全市场【机构一致预期】...")
+        try:
+            self.df_ak = ak.stock_profit_forecast_em()
+            if self.df_ak is None or self.df_ak.empty:
+                raise RuntimeError("Akshare 机构一致预期为空")
+            self.df_ak['pure_code'] = self.df_ak['代码'].astype(str).str.zfill(6)
+            self.df_ak = self.df_ak.set_index('pure_code')
+        except Exception as e:
+            print(f"❌ Akshare 数据拉取失败，Chip Hunter 终止: {e}")
+            return
+
+        valid_forecast_codes = set(self.df_ak.index)
+        initial_len = len(df_stocks)
+        df_stocks = df_stocks[df_stocks['ts_code'].str.split('.').str[0].isin(valid_forecast_codes)].copy()
+        print(f"🧹 [预清理] 已过滤掉 {initial_len - len(df_stocks)} 只无机构预测标的，剩余 {len(df_stocks)} 只。")
+        if df_stocks.empty:
+            print("❌ 机构预测过滤后无剩余标的")
+            return
+
         df_chip = self.get_chip_candidates(df_stocks, mode=mode)
         if df_chip.empty: print("❌ 无筹码合格标的"); return
             
         df_tech = self.apply_technical_filters(df_chip)
         if df_tech.empty: print("❌ 技术面过滤后无剩余"); return
 
-        import akshare as ak
-        print("🌐 [INFO] 正在通过 Akshare 拉取全市场【机构一致预期】...")
-        try:
-            self.df_ak = ak.stock_profit_forecast_em()
-            self.df_ak['pure_code'] = self.df_ak['代码'].astype(str)
-            self.df_ak = self.df_ak.set_index('pure_code')
-        except Exception as e:
-            print(f"⚠️ Akshare 数据拉取失败: {e}")
-            self.df_ak = pd.DataFrame()
-            #############################跑一段时间没有问题，下面这段代码就可以删了，因为已经放在_init_中了
-        #current_year = datetime.datetime.now().year
-        #day_of_year = datetime.datetime.now().timetuple().tm_yday
-        #self.w1 = (365 - day_of_year) / 365.0
-        #self.w2 = day_of_year / 365.0
-        #self.col_eps1 = f"{current_year}预测每股收益"
-        #self.col_eps2 = f"{current_year + 1}预测每股收益"
-        #self.col_eps_prev = f"{current_year - 1}预测每股收益" # 🛡️ 新增：错位嗅探列
-            ###########################
-        print("🧹 [预清理] 正在过滤无机构预测的标的以减轻计算压力...")
-        try:
-            if not getattr(self, 'df_ak', pd.DataFrame()).empty:
-                valid_forecast_codes = set(self.df_ak.index)
-                initial_len = len(df_tech)
-                df_tech['pure_code'] = df_tech['ts_code'].apply(lambda x: x.split('.')[0])
-                df_tech = df_tech[df_tech['pure_code'].isin(valid_forecast_codes)].copy()
-                df_tech = df_tech.drop(columns=['pure_code'])
-                print(f"   ✅ 已过滤掉 {initial_len - len(df_tech)} 只无预测标的，剩余 {len(df_tech)} 只进入深度计算。")
-        except Exception as e:
-            print(f"   ⚠️ 预清理失败(跳过): {e}")
-            
         self.run_heavy_analysis_parallel(df_tech)
 
 if __name__ == "__main__":

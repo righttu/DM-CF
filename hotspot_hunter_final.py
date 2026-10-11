@@ -105,12 +105,15 @@ def run_sync_v45_2():
     print("🌐 [INFO] 正在通过 Akshare 拉取东方财富全市场【机构一致预期】...")
     try:
         df_ak = ak.stock_profit_forecast_em()
-        df_ak['pure_code'] = df_ak['代码'].astype(str)
+        if df_ak is None or df_ak.empty:
+            raise RuntimeError("Akshare 机构一致预期为空")
+        df_ak['pure_code'] = df_ak['代码'].astype(str).str.zfill(6)
         df_ak = df_ak.set_index('pure_code')
         print("✅ 成功拉取机构盈利预测全量表！")
     except Exception as e:
-        print(f"⚠️ Akshare 数据拉取失败，预测数据将设为 None: {e}")
-        df_ak = pd.DataFrame()
+        print(f"❌ Akshare 数据拉取失败，Hotspot Hunter 终止: {e}")
+        return
+    valid_forecast_codes = set(df_ak.index)
 
     # 🚀 全局 NTM 权重与动态年份列名初始化 (每天仅算一次)
     current_year = datetime.now().year
@@ -122,6 +125,7 @@ def run_sync_v45_2():
     col_eps_prev = f"{current_year - 1}预测每股收益"  # 🛡️ 新增：年报季错位嗅探列
 
     total_inserted = 0  # 🌟 新增：初始化本次任务的总入库计数器
+    holdernumber_cache = {}
 
     for t_date in sync_list:
         print(f"\n🚀 [V45.2-Final] 正在执行深度审计: {t_date}")
@@ -164,6 +168,10 @@ WHERE purity = '真题材'"""
             row.get('ts_code'), row.get('name'), row.get('sector'),
             row.get('remark'), row.get('em_reason'), row.get('purity')
         ) for row in resp.get('results', [])]
+        registry = [
+            row for row in registry
+            if str(row[0]).split('.')[0].zfill(6) in valid_forecast_codes
+        ]
         success_count = 0
 
         for ts_code, name, sector, remark, em_reason, purity in registry:
@@ -177,7 +185,9 @@ WHERE purity = '真题材'"""
                 mf_i = (m['net_mf_amount'] * 10 / amount_val) * 100 if pd.notna(amount_val) and amount_val > 0 else None
 
                 # 2. 筹码数据 (初始化为 None)
-                chips = pro.stk_holdernumber(ts_code=ts_code, limit=4)
+                if ts_code not in holdernumber_cache:
+                    holdernumber_cache[ts_code] = pro.stk_holdernumber(ts_code=ts_code, limit=4)
+                chips = holdernumber_cache[ts_code].copy()
                 c_latest, c_cumu = None, None
                 if len(chips) >= 2:
                     c_latest = f"{((chips.iloc[0]['holder_num']/chips.iloc[1]['holder_num']-1)*100):.2f}%"
