@@ -91,7 +91,7 @@ def agg_v39(x):
     w = x['total_mv'] + 1
     return pd.Series({
         'mf_amt_sum': x['net_mf_amount'].sum(),
-        'vol_rat_avg': x['vol_ratio'].mean(),
+        'vol_rat_avg': x['volume_ratio'].mean(),
         'mf_int_weighted': np.average(x['mf_intensity'], weights=w)
     })
 
@@ -108,11 +108,14 @@ if not stats.empty:
         op = 1.0 if is_f else 0.05
         
         t_data = stats[stats[group_col] == t].sort_values('trade_date').tail(lookback + 2)
-        if len(t_data) < 3: continue
-        
+        t_data = t_data.dropna(subset=['mf_int_weighted', 'vol_rat_avg'])
+        if t_data.empty:
+            continue
+
         # 提取真实真相坐标
         x_raw, y_raw = t_data['mf_int_weighted'].values, t_data['vol_rat_avg'].values
-        inflow = t_data['mf_amt_sum'].iloc[-1]
+        inflow_raw = t_data['mf_amt_sum'].iloc[-1]
+        inflow = float(inflow_raw) if pd.notna(inflow_raw) else 0.0
         
         # WMA 计算滑尾 (5:3:2)
         w_x, w_y = [], []
@@ -120,17 +123,18 @@ if not stats.empty:
             w_x.append(x_raw[i]*0.5 + x_raw[i-1]*0.3 + x_raw[i-2]*0.2)
             w_y.append(y_raw[i]*0.5 + y_raw[i-1]*0.3 + y_raw[i-2]*0.2)
 
-        # A. 丝滑 Spline 轨迹 (滑尾至昨日)
-        fig.add_trace(go.Scatter(x=w_x[:-1], y=w_y[:-1], mode='lines', 
-                                 line=dict(width=2, shape='spline'), 
-                                 opacity=0.3 if is_f else 0.01, showlegend=False))
+        if len(w_x) >= 2:
+            # A. 丝滑 Spline 轨迹 (滑尾至昨日)
+            fig.add_trace(go.Scatter(x=w_x[:-1], y=w_y[:-1], mode='lines',
+                                     line=dict(width=2, shape='spline'),
+                                     opacity=0.3 if is_f else 0.01, showlegend=False))
 
-        # B. 动能虚线箭头 (昨日平滑重心 -> 今日真相点)
-        fig.add_trace(go.Scatter(x=[w_x[-2], x_raw[-1]], y=[w_y[-2], y_raw[-1]], 
-                                 mode='lines+markers', 
-                                 marker=dict(symbol='arrow', size=12, angleref="previous"),
-                                 line=dict(width=4 if is_f else 1, dash='dot'), 
-                                 opacity=op, showlegend=False))
+            # B. 动能虚线箭头 (昨日平滑重心 -> 今日真相点)
+            fig.add_trace(go.Scatter(x=[w_x[-2], x_raw[-1]], y=[w_y[-2], y_raw[-1]],
+                                     mode='lines+markers',
+                                     marker=dict(symbol='arrow', size=12, angleref="previous"),
+                                     line=dict(width=4 if is_f else 1, dash='dot'),
+                                     opacity=op, showlegend=False))
 
         # C. 今日真实气泡 (Raw Head)
         # 面积映射资金量：半径 sqrt(abs(inflow))
@@ -148,7 +152,10 @@ if not stats.empty:
             hovertemplate=f"<b>{t}</b><br>真相强度(X): %{{x:.2f}}%<br>净流入: {inflow:.0f}万<extra></extra>"
         ))
 
-    fig.update_layout(height=800, template="plotly_dark", xaxis=dict(title="资金强度 (X)"), yaxis=dict(title="量比 (Y)"))
-    st.plotly_chart(fig, use_container_width=True)
+    if fig.data:
+        fig.update_layout(height=800, template="plotly_dark", xaxis=dict(title="资金强度 (X)"), yaxis=dict(title="量比 (Y)"))
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("⚠️ 当前数据缺少有效的资金强度或量比，暂时无法绘图。")
 
 # --- 4. 底部 30 字段全维度
