@@ -148,24 +148,41 @@ class ChipHunterStrategy:
     def _load_holdernumber_pool(self, start_date, end_date):
         page_size = 3000
         frames = []
-        for page_no in range(100):
-            df_page = self._request_with_retry(
-                self.pro_main.stk_holdernumber,
-                api_name='stk_holdernumber',
-                start_date=start_date,
-                end_date=end_date,
-                fields='ts_code,end_date,holder_num',
-                limit=page_size,
-                offset=page_no * page_size
-            )
-            if df_page is None:
-                raise RuntimeError('stk_holdernumber 返回 None')
-            if not df_page.empty:
-                frames.append(df_page)
-            if len(df_page) < page_size:
-                break
-        else:
-            raise RuntimeError('stk_holdernumber 分页超过100页，拒绝使用截断数据')
+        total_pages = 0
+        range_start = datetime.datetime.strptime(start_date, '%Y%m%d')
+        final_end = datetime.datetime.strptime(end_date, '%Y%m%d')
+
+        while range_start <= final_end:
+            range_end = min(range_start + datetime.timedelta(days=29), final_end)
+            range_start_str = range_start.strftime('%Y%m%d')
+            range_end_str = range_end.strftime('%Y%m%d')
+
+            for page_no in range(34):
+                offset = page_no * page_size
+                df_page = self._request_with_retry(
+                    self.pro_main.stk_holdernumber,
+                    api_name='stk_holdernumber',
+                    start_date=range_start_str,
+                    end_date=range_end_str,
+                    fields='ts_code,end_date,holder_num',
+                    limit=page_size,
+                    offset=offset
+                )
+                total_pages += 1
+                if df_page is None:
+                    raise RuntimeError(
+                        f'stk_holdernumber 返回 None: {range_start_str}-{range_end_str}, offset={offset}'
+                    )
+                if not df_page.empty:
+                    frames.append(df_page)
+                if len(df_page) < page_size:
+                    break
+            else:
+                raise RuntimeError(
+                    f'stk_holdernumber 日期段 {range_start_str}-{range_end_str} 达到 offset 上限，拒绝使用截断数据'
+                )
+
+            range_start = range_end + datetime.timedelta(days=1)
 
         if not frames:
             raise RuntimeError('stk_holdernumber 全市场批量结果为空，拒绝将全市场误判为不合格')
@@ -175,7 +192,7 @@ class ChipHunterStrategy:
             ts_code: group.copy()
             for ts_code, group in df_all.groupby('ts_code')
         }
-        print(f"✅ 股东人数一次性预取完成: {len(df_all)} 条，共 {len(frames)} 页")
+        print(f"✅ 股东人数分段预取完成: {len(df_all)} 条，共 {total_pages} 页")
 
     def _get_pro_worker(self):
         #彻底复用单例
