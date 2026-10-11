@@ -613,6 +613,13 @@ class ChipHunterStrategy:
         print("🏋️ [5/6] 启动重型计算 (全字段/多线程)...")
         final_list = []
         failed_list = []
+        def format_pct(value, width):
+            try:
+                if value is None or pd.isna(value):
+                    return "数据缺失"
+                return f"{float(value):>{width}.2f}%"
+            except (TypeError, ValueError):
+                return "数据缺失"
         stock_list = df_candidates.to_dict('records')
         total = len(stock_list); processed = 0
         
@@ -633,7 +640,9 @@ class ChipHunterStrategy:
                         to_val = original_item.get('_diag_to', 0.0)
                     
                         # 格式化打印：一眼看出是哪项没达标
-                        print(f"   🛡️ 拦截诊断 [{original_item['name']:<4}] | 实际 G: {f'{g_val:>6}%' if g_val != 'N/A' else '数据缺失'} | 3日均换手: {to_val:>5.2f}%")
+                        g_str = format_pct(g_val, 6)
+                        to_str = format_pct(to_val, 5)
+                        print(f"   🛡️ 拦截诊断 [{original_item['name']:<4}] | 实际 G: {g_str:>8} | 3日均换手: {to_str}")
                 except Exception as e:
                     failed_list.append(original_item['ts_code'])
                     print(f"   ❌ 异常 {processed}/{total}: {original_item['name']} {e}   ", end='\r')
@@ -655,7 +664,7 @@ class ChipHunterStrategy:
             if is_float:
                 try: 
                     f_val = float(val)
-                    if np.isinf(f_val): return None 
+                    if not np.isfinite(f_val): return None
                     return f_val
                 except: return None
             return val
@@ -679,10 +688,10 @@ class ChipHunterStrategy:
                 holders_wan_val = holders / 10000 if holders is not None else None
 
                 record = {
-                    'scan_date': row.get('scan_date'),
-                    'ts_code': row.get('ts_code'),
-                    'name': row.get('name'),
-                    'industry': row.get('industry'),
+                    'scan_date': safe_get(row, 'scan_date', is_float=False),
+                    'ts_code': safe_get(row, 'ts_code', is_float=False),
+                    'name': safe_get(row, 'name', is_float=False),
+                    'industry': safe_get(row, 'industry', is_float=False),
                     
                     'close': safe_get(row, 'close'),
                     'pct_chg': safe_get(row, 'pct_chg'),
@@ -720,13 +729,13 @@ class ChipHunterStrategy:
                     'roe': safe_get(row, 'roe'),
                     'grossprofit_margin': safe_get(row, 'grossprofit_margin'),
                     'netprofit_yoy': safe_get(row, 'netprofit_yoy'),
-                    'concepts': row.get('concepts'),
-                    'top_list_reason': row.get('top_list_reason'),
+                    'concepts': safe_get(row, 'concepts', is_float=False),
+                    'top_list_reason': safe_get(row, 'top_list_reason', is_float=False),
                     
-                    'pattern': row.get('pattern'),
+                    'pattern': safe_get(row, 'pattern', is_float=False),
                     'bias_60': safe_get(row, 'bias_60'),
-                    'vol_signal': row.get('vol_signal'),
-                    'create_time': row.get('create_time')
+                    'vol_signal': safe_get(row, 'vol_signal', is_float=False),
+                    'create_time': safe_get(row, 'create_time', is_float=False)
                 }
                 records.append(record)
             resp = self.api._post('/api/db/save', {'table': 'chip_hunter', 'data': records})
