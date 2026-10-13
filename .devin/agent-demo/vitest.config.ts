@@ -1,5 +1,5 @@
 import { defineConfig } from "vitest/config";
-import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-pool-workers";
+import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-plugin";
 import esbuild from "esbuild";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";

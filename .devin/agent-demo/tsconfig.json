@@ -19,6 +19,6 @@
     "../../apps/agent-demo/src/**/*.ts",
     "../../apps/agent-demo/test/**/*.ts",
     "../../apps/agent-demo/node_modules/@cloudflare/workers-types/index.d.ts",
-    "../../apps/agent-demo/node_modules/@cloudflare/vitest-pool-workers/types/cloudflare-test.d.ts"
+    "../../apps/agent-demo/node_modules/@cloudflare/vitest-plugin/types/cloudflare-test.d.ts"
   ]
 }
