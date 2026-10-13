@@ -1,0 +1,89 @@
+.devin/agent-demo/package.json
+  s_02649a17b7b371::t_a1da713bf0b19a 1-5
+.devin/agent-demo/wrangler.test.jsonc
+  s_02649a17b7b371::t_411d4a3e71c527 1-47
+apps/agent-demo/migrations/0001_demo.sql
+  s_02649a17b7b371::t_59f2fdb232f569 1-29
+apps/agent-demo/src/research-policy.ts
+  s_02649a17b7b371::t_39eb556b7eb2ce 1-33
+apps/agent-demo/test/auth.test.ts
+  s_02649a17b7b371::t_17a2ba51177b9d 1-114
+apps/agent-demo/test/setup.ts
+  s_02649a17b7b371::t_90ad7b2493e82e 1-7
+.devin/agent-demo/preview-proxy.mjs
+  s_7f735969c12dbf::t_1bf83698362d56 1-43
+.devin/agent-demo/tsconfig.json
+  s_7f735969c12dbf::t_bb6a8e05966310 1-24
+.devin/agent-demo/vitest.config.ts
+  s_7f735969c12dbf::t_67e3b4fff74ffe 1-74
+.devin/agent-demo/wrangler.agent.jsonc
+  s_7f735969c12dbf::t_b38da1c537b07a 1-66
+.devin/agent-demo/wrangler.mcp.jsonc
+  s_7f735969c12dbf::t_c76ddb8c7953be 1-63
+.gitignore
+  s_7f735969c12dbf::t_56ddf01c55f8bb 5-23
+AGENTS.md
+  s_7f735969c12dbf::t_632755199b449e 1-58
+apps/agent-demo/package-lock.json
+  s_7f735969c12dbf::t_a6c1290a9ea040 1-5929
+apps/agent-demo/package.json
+  s_7f735969c12dbf::t_94b53fbd449b88 1-38
+apps/agent-demo/scripts/ensure-config-node-modules.mjs
+  s_7f735969c12dbf::t_e882a0330d6130 1-28
+apps/agent-demo/src/agent/dlp.ts
+  s_7f735969c12dbf::t_6a440b0955b3b8 1-58
+apps/agent-demo/src/agent/index.ts
+  s_7f735969c12dbf::t_a6c0a95c615eda 1-770
+apps/agent-demo/src/agent/ui.ts
+  s_7f735969c12dbf::t_e1e958cfa3d0ca 1-311
+apps/agent-demo/src/mcp/index.ts
+  s_7f735969c12dbf::t_269c3e86affe2c 1-435
+apps/agent-demo/src/shared/access.ts
+  s_7f735969c12dbf::t_0bbe5fdbd7c9c6 1-180
+apps/agent-demo/src/shared/body.ts
+  s_7f735969c12dbf::t_78b8baa74540bd 1-37
+apps/agent-demo/src/shared/demo-tools.ts
+  s_7f735969c12dbf::t_358129233ff366 1-63
+apps/agent-demo/test/agent.test.ts
+  s_7f735969c12dbf::t_00f23420120e60 1-423
+apps/agent-demo/test/aux-mcp-entry.ts
+  s_7f735969c12dbf::t_57f0bf9bb82cac 1-16
+apps/agent-demo/test/dlp.test.ts
+  s_7f735969c12dbf::t_82d73557df73f2 1-251
+apps/agent-demo/test/e2e.test.ts
+  s_7f735969c12dbf::t_575b4db45a2723 1-40
+apps/agent-demo/test/entry.ts
+  s_7f735969c12dbf::t_03214a685daaa7 1-19
+apps/agent-demo/test/helpers.ts
+  s_7f735969c12dbf::t_d4b9502de4e36f 1-155
+apps/agent-demo/test/keys.ts
+  s_7f735969c12dbf::t_453f3a68c162ef 1-16
+apps/agent-demo/test/mcp.test.ts
+  s_7f735969c12dbf::t_4f8d08e432f583 1-406
+apps/agent-demo/test/ui.test.ts
+  s_7f735969c12dbf::t_49d46eccbb95dd 1-33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1dda46af7f8ab923c3f9e39abfa5329e833bcdb3",
+  "prompts": {},
+  "sessions": {
+    "s_02649a17b7b371": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "calm-noun",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    },
+    "s_7f735969c12dbf": {
+      "agent_id": {
+        "tool": "devin",
+        "id": "s_7f735969c12dbf",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
