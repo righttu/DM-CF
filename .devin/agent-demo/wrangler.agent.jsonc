@@ -1,0 +1,66 @@
+{
+  "name": "agent-demo-frontend",
+  "main": "../../apps/agent-demo/src/agent/index.ts",
+  "compatibility_date": "2026-10-02",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "routes": [
+    { "pattern": "agent-demo.righttu.uk", "custom_domain": true }
+  ],
+  "observability": {
+    "enabled": true,
+    "traces": { "enabled": true }
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "ResearchAgent", "class_name": "ResearchAgent" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ResearchAgent"] }
+  ],
+  "kv_namespaces": [
+    { "binding": "CALLBACK_KV", "id": "REPLACE_ME_CALLBACK_KV_ID" }
+  ],
+  "vars": {
+    "TEAM_DOMAIN": "https://REPLACE_TEAM.cloudflareaccess.com",
+    "AGENT_ACCESS_AUD": "REPLACE_ME_AGENT_ACCESS_AUD",
+    "PUBLIC_ORIGIN": "https://agent-demo.righttu.uk",
+    "ANALYST_EMAILS": "analyst@example.com",
+    "VIEWER_EMAILS": "viewer@example.com",
+    "MCP_SERVER_URL": "https://portal-demo.righttu.uk/mcp",
+    "MCP_TOOL_NAMES_JSON": "{}",
+    "ACCOUNT_ID": "REPLACE_ME_ACCOUNT_ID",
+    "GATEWAY_ID": "REPLACE_ME_GATEWAY_ID",
+    "MODEL_ID": "qwen3.8-2.4t-a95b",
+    "ENVIRONMENT": "production"
+  },
+  "env": {
+    "local": {
+      "durable_objects": {
+        "bindings": [
+          { "name": "ResearchAgent", "class_name": "ResearchAgent" }
+        ]
+      },
+      "kv_namespaces": [
+        { "binding": "CALLBACK_KV", "id": "local-callback-kv" }
+      ],
+      "vars": {
+        "ENVIRONMENT": "local",
+        "PUBLIC_ORIGIN": "http://localhost:8787",
+        "TEAM_DOMAIN": "https://local.invalid",
+        "AGENT_ACCESS_AUD": "local-agent-aud",
+        "MCP_SERVER_URL": "http://localhost:8788/mcp",
+        "MCP_TOOL_NAMES_JSON": "{}",
+        "ACCOUNT_ID": "REPLACE_ME_ACCOUNT_ID",
+        "GATEWAY_ID": "REPLACE_ME_GATEWAY_ID",
+        "MODEL_ID": "qwen3.8-2.4t-a95b",
+        "ANALYST_EMAILS": "analyst@local.test",
+        "VIEWER_EMAILS": "viewer@local.test",
+        "LOCAL_DEV_IDENTITY_ENABLED": "true",
+        "LOCAL_ANALYST_EMAIL": "analyst@local.test",
+        "LOCAL_VIEWER_EMAIL": "viewer@local.test"
+      }
+    }
+  }
+}

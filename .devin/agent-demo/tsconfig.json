@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2023"],
+    "paths": {
+      "@cloudflare/workers-types": ["../../apps/agent-demo/node_modules/@cloudflare/workers-types/index.d.ts"]
+    },
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true
+  },
+  "include": [
+    "../../apps/agent-demo/src/**/*.ts",
+    "../../apps/agent-demo/test/**/*.ts",
+    "../../apps/agent-demo/node_modules/@cloudflare/workers-types/index.d.ts",
+    "../../apps/agent-demo/node_modules/@cloudflare/vitest-pool-workers/types/cloudflare-test.d.ts"
+  ]
+}
