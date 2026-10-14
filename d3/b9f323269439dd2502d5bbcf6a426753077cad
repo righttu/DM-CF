@@ -1,0 +1,23 @@
+AGENTS.md
+  s_f7ea06dedaae68::t_984d86c109378c 64-72
+apps/agent-demo/src/agent/dlp.ts
+  s_f7ea06dedaae68::t_85ea726ef85213 30-34,37,39-40,43-50,56-59,61-65,69-73
+apps/agent-demo/test/dlp.test.ts
+  s_f7ea06dedaae68::t_ef249ff9bf5e6c 70-139,303-346
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d3b9f323269439dd2502d5bbcf6a426753077cad",
+  "prompts": {},
+  "sessions": {
+    "s_f7ea06dedaae68": {
+      "agent_id": {
+        "tool": "devin",
+        "id": "s_f7ea06dedaae68",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
