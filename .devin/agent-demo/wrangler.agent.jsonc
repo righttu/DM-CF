@@ -4,6 +4,7 @@
   "compatibility_date": "2026-10-02",
   "compatibility_flags": ["nodejs_compat"],
   "account_id": "ebc4f70211dc33165a239c6018da8e2d",
+  "keep_vars": true,
   "workers_dev": false,
   "routes": [
     { "pattern": "agent-demo.righttu.uk", "custom_domain": true }
@@ -27,10 +28,8 @@
     "TEAM_DOMAIN": "https://righttu.cloudflareaccess.com",
     "AGENT_ACCESS_AUD": "82ba84b6961e0a2deb1eb0e40c5a57f40ae90d2c45586db370a089200a673ed0",
     "PUBLIC_ORIGIN": "https://agent-demo.righttu.uk",
-    "ANALYST_EMAILS": "",
-    "VIEWER_EMAILS": "",
     "MCP_SERVER_URL": "https://portal-demo.righttu.uk/mcp",
-    "MCP_TOOL_NAMES_JSON": "{}",
+    "MCP_TOOL_NAMES_JSON": "{\"list_demo_stocks\":\"stock-research-demo_list_demo_stocks\",\"get_latest_analysis\":\"stock-research-demo_get_latest_analysis\",\"read_research_document\":\"stock-research-demo_read_research_document\"}",
     "ACCOUNT_ID": "ebc4f70211dc33165a239c6018da8e2d",
     "GATEWAY_ID": "agent-demo",
     "MODEL_ID": "qwen3.8-2.4t-a95b",

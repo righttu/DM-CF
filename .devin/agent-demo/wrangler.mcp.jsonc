@@ -4,6 +4,7 @@
   "compatibility_date": "2026-10-02",
   "compatibility_flags": ["nodejs_compat"],
   "account_id": "ebc4f70211dc33165a239c6018da8e2d",
+  "keep_vars": true,
   "workers_dev": false,
   "routes": [
     { "pattern": "mcp-demo.righttu.uk", "custom_domain": true }
@@ -29,8 +30,6 @@
     "MCP_AUTHORIZE_ACCESS_AUD": "552cb8760d3d458fe1bcb705faa276d73630e9f1293e7cac871f1edd77168cf2",
     "PUBLIC_MCP_ORIGIN": "https://mcp-demo.righttu.uk",
     "ALLOWED_ORIGINS": "https://agent-demo.righttu.uk,https://portal-demo.righttu.uk",
-    "ANALYST_EMAILS": "",
-    "VIEWER_EMAILS": "",
     "ENVIRONMENT": "production"
   },
   "env": {
