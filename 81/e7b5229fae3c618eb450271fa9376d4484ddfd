@@ -1,0 +1,31 @@
+AGENTS.md
+  s_02649a17b7b371::t_c1eafd66762349 54-56
+.devin/agent-demo/wrangler.agent.jsonc
+  s_478f3589bad54d::t_4dbb9585303fd4 6,24,27-28,30-31,34-35
+.devin/agent-demo/wrangler.mcp.jsonc
+  s_478f3589bad54d::t_e2ee91c02e191f 6,19,24-25,28-29,32-33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "81e7b5229fae3c618eb450271fa9376d4484ddfd",
+  "prompts": {},
+  "sessions": {
+    "s_02649a17b7b371": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "calm-noun",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    },
+    "s_478f3589bad54d": {
+      "agent_id": {
+        "tool": "devin",
+        "id": "s_478f3589bad54d",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
