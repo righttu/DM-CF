@@ -1,0 +1,23 @@
+.devin/agent-demo/wrangler.agent.jsonc
+  s_60c8892cd1b9e0::t_5981b9cfef3f5b 7,32
+.devin/agent-demo/wrangler.mcp.jsonc
+  s_60c8892cd1b9e0::t_1f29b260665b13 7
+AGENTS.md
+  s_60c8892cd1b9e0::t_9d6864e8b5c888 56
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d9c116bd643eeb1bf43740d341711c98bbc7fceb",
+  "prompts": {},
+  "sessions": {
+    "s_60c8892cd1b9e0": {
+      "agent_id": {
+        "tool": "devin",
+        "id": "s_60c8892cd1b9e0",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
