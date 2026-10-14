@@ -27,25 +27,50 @@ export async function captureDlpOutcome(
     } catch {
     }
   }
-  if (response.status === 400 || response.status === 403) {
+  if (
+    response.status === 400 ||
+    response.status === 403 ||
+    response.status === 424
+  ) {
     try {
       const body = (await response.json()) as {
-        error?: { code?: number };
+        error?: { code?: number } | { code?: number }[];
         errors?: { code?: number; message?: string }[];
+        name?: string;
+        internalCode?: number;
       };
       const codes: number[] = [];
-      if (typeof body?.error?.code === "number") codes.push(body.error.code);
+      const err = body?.error;
+      if (Array.isArray(err)) {
+        for (const e of err) {
+          if (typeof e?.code === "number") codes.push(e.code);
+        }
+      } else if (typeof err?.code === "number") {
+        codes.push(err.code);
+      }
       if (Array.isArray(body?.errors)) {
         for (const e of body.errors) {
           if (typeof e?.code === "number") codes.push(e.code);
         }
       }
+      if (body?.name === "AiGatewayError" && typeof body?.internalCode === "number") {
+        codes.push(body.internalCode);
+      }
+      const isGatewayStatus = response.status === 424;
       if (codes.includes(2029)) {
-        sink.push({ action: "BLOCK", logId, detail: "error_2029_request" });
+        sink.push({
+          action: "BLOCK",
+          logId,
+          detail: isGatewayStatus ? "error_2029_gateway" : "error_2029_request"
+        });
         return;
       }
       if (codes.includes(2030)) {
-        sink.push({ action: "BLOCK", logId, detail: "error_2030_response" });
+        sink.push({
+          action: "BLOCK",
+          logId,
+          detail: isGatewayStatus ? "error_2030_gateway" : "error_2030_response"
+        });
         return;
       }
     } catch {

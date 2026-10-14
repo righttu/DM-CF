@@ -67,6 +67,76 @@ describe("DLP outcome classification", () => {
     expect(sink2[0].detail).toBe("error_2030_response");
   });
 
+  it("recognizes documented 2030 inside a 424 AiGatewayError body (observed live shape)", async () => {
+    const body = {
+      success: false,
+      result: [],
+      messages: [],
+      error: [{ code: 2030, message: "Request content blocked due to DLP policy violations" }],
+      name: "AiGatewayError",
+      httpCode: 424,
+      internalCode: 2030,
+      message: "Request content blocked due to DLP policy violations",
+      description: "Request content blocked due to DLP policy violations"
+    };
+    const resp = new Response(JSON.stringify(body), {
+      status: 424,
+      headers: { "content-type": "application/json", "cf-aig-log-id": "log-live-424" }
+    });
+    const sink = await collect(resp);
+    expect(sink).toHaveLength(1);
+    expect(sink[0].action).toBe("BLOCK");
+    expect(sink[0].logId).toBe("log-live-424");
+    expect(sink[0].detail).toBe("error_2030_gateway");
+  });
+
+  it("recognizes a 424 singular error array without internalCode/name", async () => {
+    const resp = new Response(JSON.stringify({ error: [{ code: 2030 }] }), {
+      status: 424,
+      headers: { "content-type": "application/json" }
+    });
+    const sink = await collect(resp);
+    expect(sink[0].action).toBe("BLOCK");
+    expect(sink[0].detail).toBe("error_2030_gateway");
+  });
+
+  it("recognizes internalCode only inside an AiGatewayError envelope", async () => {
+    const resp = new Response(
+      JSON.stringify({ name: "AiGatewayError", internalCode: 2030 }),
+      { status: 424, headers: { "content-type": "application/json" } }
+    );
+    const sink = await collect(resp);
+    expect(sink[0].action).toBe("BLOCK");
+    expect(sink[0].detail).toBe("error_2030_gateway");
+  });
+
+  it("does not classify bare or non-DLP 424s", async () => {
+    const bare = await collect(new Response("not json", { status: 424 }));
+    expect(bare).toHaveLength(0);
+    const otherCodes = await collect(
+      new Response(
+        JSON.stringify({ name: "AiGatewayError", internalCode: 2000, error: [{ code: 2000 }] }),
+        { status: 424, headers: { "content-type": "application/json" } }
+      )
+    );
+    expect(otherCodes).toHaveLength(0);
+    const nonGateway = await collect(
+      new Response(JSON.stringify({ name: "ProviderError", internalCode: 2030 }), {
+        status: 424,
+        headers: { "content-type": "application/json" }
+      })
+    );
+    expect(nonGateway).toHaveLength(0);
+  });
+
+  it("does not classify a 200 body containing error codes without a DLP header", async () => {
+    const resp = new Response(JSON.stringify({ errors: [{ code: 2030 }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+    expect(await collect(resp)).toHaveLength(0);
+  });
+
   it("does not label generic 400/404 as DLP", async () => {
     const resp400 = new Response(JSON.stringify({ error: { message: "bad request" } }), {
       status: 400,
@@ -228,6 +298,50 @@ describe("DLP outcome classification", () => {
     const session = await authedFetch("/api/session", { jwt });
     const sessionData = (await session.json()) as { history: unknown[] };
     expect(sessionData.history).toHaveLength(0);
+  });
+
+  it("app-level: observed 424 AiGatewayError blocks chat and dlp-test without echoing the marker", async () => {
+    const body = {
+      success: false,
+      result: [],
+      messages: [],
+      error: [{ code: 2030, message: "Request content blocked due to DLP policy violations" }],
+      name: "AiGatewayError",
+      httpCode: 424,
+      internalCode: 2030,
+      message: "Request content blocked due to DLP policy violations",
+      description: "Request content blocked due to DLP policy violations"
+    };
+    __setModelFetchForTests(async () => {
+      return new Response(JSON.stringify(body), {
+        status: 424,
+        headers: { "content-type": "application/json", "cf-aig-log-id": "log-live-424" }
+      });
+    });
+    const jwt = await signJwt({ sub: "sub-dlp-424", email: ANALYST_EMAIL });
+    await connectAgentMcp({ sub: "sub-dlp-424", email: ANALYST_EMAIL });
+    const resp = await authedFetch("/api/chat", {
+      jwt,
+      method: "POST",
+      body: { message: "CF_DEMO_SECRET_9274" }
+    });
+    const data = (await resp.json()) as {
+      reply: string;
+      dlp?: { action: string; logId?: string; detail?: string };
+    };
+    expect(data.dlp?.action).toBe("BLOCK");
+    expect(data.dlp?.logId).toBe("log-live-424");
+    expect(data.dlp?.detail).toBe("error_2030_gateway");
+    expect(data.reply).not.toContain("CF_DEMO_SECRET_9274");
+
+    const session = await authedFetch("/api/session", { jwt });
+    const sessionData = (await session.json()) as { history: unknown[] };
+    expect(sessionData.history).toHaveLength(0);
+
+    const dlpTest = await authedFetch("/api/dlp-test", { jwt, method: "POST", body: {} });
+    const dlpData = (await dlpTest.json()) as { dlp?: { action: string }; error?: string };
+    expect(dlpData.dlp?.action).toBe("BLOCK");
+    expect(dlpData.error).toBeUndefined();
   });
 
   it("generic gateway errors are not labelled DLP", async () => {

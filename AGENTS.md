@@ -61,4 +61,12 @@ Remaining manual/user steps: Access policies + real user emails, portal DNS for 
 
 ## VM runtime note
 
-Test VM `/home/righttu/ai-finance/CloudFlare` (`master`, `origin git@github.com:righttu/DM-CF.git`): node/npm are not on the default PATH — source `~/.nvm/nvm.sh` (node v24.21.0, npm 12.2.0) before `npm ci`/`wrangler` in non-interactive SSH. The checked non-interactive SSH session did not expose Cloudflare credential environment variables; deployment needs an explicitly provisioned private environment file.
+Test VM `/home/righttu/ai-finance/CloudFlare` (`master`, `origin git@github.com:righttu/DM-CF.git`): node/npm are not on the default PATH — source `~/.nvm/nvm.sh` (node v24.21.0, npm 12.2.0) before `npm ci`/`wrangler` in non-interactive SSH. User-authorized credential source is `/home/righttu/.bashrc`; use an interactive `bash -ic` shell to load its exported variables. Never print credential values or search other credential locations.
+
+## Verified rollout follow-up (2026-10-14)
+
+Both Workers have deployed `d9c116b`; both role allowlists and the frontend Portal tool map match the intended configuration. Dedicated Gateway `agent-demo` now has the `block-demo-marker` policy (Block Request) bound to custom profile `c381f346-8164-439d-b2f1-3cdb9781275f`, with enabled regex `CF_DEMO_SECRET_9274` and `allowed_match_count:0`. Frozen SDK probes and their Gateway logs confirm ordinary text succeeds and the synthetic marker triggers Request BLOCK. Evidence is in `test/evidence/probes/dlp-log-details-2026-10-14.json`.
+
+This provider route returns HTTP 424 without `cf-aig-dlp` for the confirmed block: its JSON has `name:"AiGatewayError"`, an `error` array, and numeric `internalCode:2030`. That observed code corresponds to a request block despite the documented request/response code mapping; use the neutral `error_2030_gateway` detail for 424. Never classify status 424 alone as DLP. The application classifier regression covers this envelope and non-DLP 424 errors.
+
+Portal Managed OAuth and strict frontend callback are enabled. MCP server visibility app `4f6e1112-2d74-4744-953d-801879c117aa` is type `mcp`, scoped only to destination `via_mcp_server_portal` / `stock-research-demo`, with Allow policy `e7f2e3a9-9ae7-4bb0-a51e-ad60ceca0e24` matching the two user-confirmed emails. App-specific policy IDs cannot be reused across applications; create a separate scoped policy rather than broadening access. DNS API still returns 403 for `righttu.uk`, and `portal-demo.righttu.uk` did not resolve during the probe. Portal server remains waiting for browser OAuth with an empty tool list. User OAuth, full live Agent-to-Portal chat, and native trace display remain unverified.
