@@ -51,7 +51,9 @@ Limits of the local loop: a browser cannot set `x-demo-local-role`, and the OAut
 
 ## Cloud prerequisites (not yet configured)
 
-Approved production hostnames (custom domains, `workers_dev:false`): `agent-demo.righttu.uk` (frontend worker), `mcp-demo.righttu.uk` (MCP worker), `portal-demo.righttu.uk` (required MCP Portal endpoint for `MCP_SERVER_URL` — no direct-server fallback). Access team domain + AUDs, KV/D1 real IDs, `DASHSCOPE_API_KEY` + `CF_AIG_TOKEN` secrets, dedicated isolated AI Gateway `custom-dashscope` provider + DLP profile (marker `CF_DEMO_SECRET_9274`, Block Request), MCP Portal instance. Cloud Qwen, Access, Portal, DLP and native trace display remain unverified until those are supplied.
+Approved production hostnames (custom domains, `workers_dev:false`): `agent-demo.righttu.uk` (frontend worker), `mcp-demo.righttu.uk` (MCP worker), `portal-demo.righttu.uk` (required MCP Portal endpoint for `MCP_SERVER_URL` — no direct-server fallback).
+
+Cloud state: isolated D1 (`demo-agent-db`), KV (CALLBACK/OAUTH/CONSENT) and dedicated AI Gateway `agent-demo` (auth + byok_only, caching disabled, 30 req/60 s) are created and frozen in the production configs. Access apps exist and both AUDs are set — `policy_count=0` and production `ANALYST_EMAILS`/`VIEWER_EMAILS` are empty strings, so Access denies everyone until the user supplies real emails and policies. Existing dashscope provider stays enabled (`https://dashscope.aliyuncs.com`, unchanged globally), org `deny_unmatched=false`, OTP IdP `725e6447-…`. Still pending: `DASHSCOPE_API_KEY` + `CF_AIG_TOKEN` secrets, DLP profile (marker `CF_DEMO_SECRET_9274`, Block Request), MCP Portal instance (DNS API currently 403), user emails. Cloud Qwen, Access, Portal, DLP and native trace display remain unverified.
 
 ## VM runtime note
 

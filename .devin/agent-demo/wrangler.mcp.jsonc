@@ -3,6 +3,7 @@
   "main": "../../apps/agent-demo/src/mcp/index.ts",
   "compatibility_date": "2026-10-02",
   "compatibility_flags": ["nodejs_compat"],
+  "account_id": "ebc4f70211dc33165a239c6018da8e2d",
   "workers_dev": false,
   "routes": [
     { "pattern": "mcp-demo.righttu.uk", "custom_domain": true }
@@ -15,21 +16,21 @@
     {
       "binding": "DEMO_DB",
       "database_name": "demo-agent-db",
-      "database_id": "REPLACE_ME_DEMO_D1_ID",
+      "database_id": "52a8d901-e4fe-4234-8d0c-e28179a56b8e",
       "migrations_dir": "../../apps/agent-demo/migrations"
     }
   ],
   "kv_namespaces": [
-    { "binding": "OAUTH_KV", "id": "REPLACE_ME_OAUTH_KV_ID" },
-    { "binding": "CONSENT_KV", "id": "REPLACE_ME_CONSENT_KV_ID" }
+    { "binding": "OAUTH_KV", "id": "40692a26799d4365aacbd534a9e509c8" },
+    { "binding": "CONSENT_KV", "id": "5156c98767de48908e1ae13a2863c650" }
   ],
   "vars": {
-    "TEAM_DOMAIN": "https://REPLACE_TEAM.cloudflareaccess.com",
-    "MCP_AUTHORIZE_ACCESS_AUD": "REPLACE_ME_MCP_AUTHORIZE_AUD",
+    "TEAM_DOMAIN": "https://righttu.cloudflareaccess.com",
+    "MCP_AUTHORIZE_ACCESS_AUD": "552cb8760d3d458fe1bcb705faa276d73630e9f1293e7cac871f1edd77168cf2",
     "PUBLIC_MCP_ORIGIN": "https://mcp-demo.righttu.uk",
     "ALLOWED_ORIGINS": "https://agent-demo.righttu.uk,https://portal-demo.righttu.uk",
-    "ANALYST_EMAILS": "analyst@example.com",
-    "VIEWER_EMAILS": "viewer@example.com",
+    "ANALYST_EMAILS": "",
+    "VIEWER_EMAILS": "",
     "ENVIRONMENT": "production"
   },
   "env": {

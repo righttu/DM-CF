@@ -3,6 +3,7 @@
   "main": "../../apps/agent-demo/src/agent/index.ts",
   "compatibility_date": "2026-10-02",
   "compatibility_flags": ["nodejs_compat"],
+  "account_id": "ebc4f70211dc33165a239c6018da8e2d",
   "workers_dev": false,
   "routes": [
     { "pattern": "agent-demo.righttu.uk", "custom_domain": true }
@@ -20,18 +21,18 @@
     { "tag": "v1", "new_sqlite_classes": ["ResearchAgent"] }
   ],
   "kv_namespaces": [
-    { "binding": "CALLBACK_KV", "id": "REPLACE_ME_CALLBACK_KV_ID" }
+    { "binding": "CALLBACK_KV", "id": "1fa8c3f84ff44ddda1e9a9764b981fb0" }
   ],
   "vars": {
-    "TEAM_DOMAIN": "https://REPLACE_TEAM.cloudflareaccess.com",
-    "AGENT_ACCESS_AUD": "REPLACE_ME_AGENT_ACCESS_AUD",
+    "TEAM_DOMAIN": "https://righttu.cloudflareaccess.com",
+    "AGENT_ACCESS_AUD": "82ba84b6961e0a2deb1eb0e40c5a57f40ae90d2c45586db370a089200a673ed0",
     "PUBLIC_ORIGIN": "https://agent-demo.righttu.uk",
-    "ANALYST_EMAILS": "analyst@example.com",
-    "VIEWER_EMAILS": "viewer@example.com",
+    "ANALYST_EMAILS": "",
+    "VIEWER_EMAILS": "",
     "MCP_SERVER_URL": "https://portal-demo.righttu.uk/mcp",
     "MCP_TOOL_NAMES_JSON": "{}",
-    "ACCOUNT_ID": "REPLACE_ME_ACCOUNT_ID",
-    "GATEWAY_ID": "REPLACE_ME_GATEWAY_ID",
+    "ACCOUNT_ID": "ebc4f70211dc33165a239c6018da8e2d",
+    "GATEWAY_ID": "agent-demo",
     "MODEL_ID": "qwen3.8-2.4t-a95b",
     "ENVIRONMENT": "production"
   },
