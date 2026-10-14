@@ -189,6 +189,7 @@ async function handleAuthorizeGet(request: Request, env: McpEnv): Promise<Respon
   for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
     headers.set(name, value);
   }
+  headers.set("referrer-policy", "same-origin");
   headers.set("content-security-policy", "frame-ancestors 'none'");
   return new Response(
     consentPage({

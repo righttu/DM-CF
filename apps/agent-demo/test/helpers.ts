@@ -131,7 +131,8 @@ export async function connectAgentMcp(input: {
     headers: {
       "content-type": "application/x-www-form-urlencoded",
       cookie: cookies,
-      "cf-access-jwt-assertion": mcpJwt
+      "cf-access-jwt-assertion": mcpJwt,
+      origin: authUrl.origin
     },
     body: `handle=${encodeURIComponent(handle)}&decision=approve`
   });

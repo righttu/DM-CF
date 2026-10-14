@@ -206,6 +206,80 @@ describe("MCP OAuth + tools", () => {
     expect(portOrigin.status).toBe(403);
   });
 
+  it("consent GET sends same-origin referrer policy and POST accepts the exact configured origin", async () => {
+    const { clientId, redirectUri } = await registerClient();
+    const jwt = await signJwt({ sub: "sub-consent-hdr", email: ANALYST_EMAIL, aud: MCP_AUD });
+    const getResp = await runAuthorizeGet(jwt, clientId, redirectUri);
+    expect(getResp.status).toBe(200);
+    expect(getResp.headers.get("referrer-policy")).toBe("same-origin");
+    expect(getResp.headers.get("x-frame-options")).toBe("DENY");
+    expect(getResp.headers.get("cache-control")).toContain("no-store");
+    expect(getResp.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    const html = await getResp.text();
+    const handle = /name="handle" value="([^"]+)"/.exec(html)?.[1]!;
+    const cookies = mergeCookieHeader(getSetCookies(getResp));
+
+    const post = await mcpFetch("/authorize", {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        cookie: cookies,
+        "cf-access-jwt-assertion": jwt,
+        origin: "http://localhost"
+      },
+      body: `handle=${encodeURIComponent(handle)}&decision=approve`
+    });
+    expect(post.status).toBe(302);
+    const location = post.headers.get("location") ?? "";
+    expect(location).toContain("code=");
+    expect(location).toContain("state=oauthstate1");
+  });
+
+  it("rejects opaque and foreign Origin values without consuming the consent handle", async () => {
+    const { clientId, redirectUri } = await registerClient();
+    const jwt = await signJwt({ sub: "sub-origin-neg", email: ANALYST_EMAIL, aud: MCP_AUD });
+    const getResp = await runAuthorizeGet(jwt, clientId, redirectUri);
+    const html = await getResp.text();
+    const handle = /name="handle" value="([^"]+)"/.exec(html)?.[1]!;
+    const cookies = mergeCookieHeader(getSetCookies(getResp));
+
+    for (const origin of [
+      "null",
+      "https://evil.example",
+      "http://localhost:9999",
+      "https://localhost",
+      "not-an-origin"
+    ]) {
+      const resp = await mcpFetch("/authorize", {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          cookie: cookies,
+          "cf-access-jwt-assertion": jwt,
+          origin
+        },
+        body: `handle=${encodeURIComponent(handle)}&decision=approve`
+      });
+      expect(resp.status).toBe(403);
+      const data = (await resp.json()) as { error: string };
+      expect(data.error).toBe("origin_not_allowed");
+      expect(resp.headers.get("referrer-policy")).toBe("no-referrer");
+    }
+
+    const approved = await mcpFetch("/authorize", {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        cookie: cookies,
+        "cf-access-jwt-assertion": jwt,
+        origin: "http://localhost"
+      },
+      body: `handle=${encodeURIComponent(handle)}&decision=approve`
+    });
+    expect(approved.status).toBe(302);
+    expect(approved.headers.get("location") ?? "").toContain("code=");
+  });
+
   it("deny decision redirects with an error and never issues a code", async () => {
     const { clientId, redirectUri } = await registerClient();
     const jwt = await signJwt({ sub: "sub-deny", email: ANALYST_EMAIL, aud: MCP_AUD });
@@ -219,7 +293,8 @@ describe("MCP OAuth + tools", () => {
       headers: {
         "content-type": "application/x-www-form-urlencoded",
         cookie: cookies,
-        "cf-access-jwt-assertion": jwt
+        "cf-access-jwt-assertion": jwt,
+        origin: "http://localhost"
       },
       body: `handle=${encodeURIComponent(handle)}&decision=deny`
     });
@@ -250,7 +325,8 @@ describe("MCP OAuth + tools", () => {
       headers: {
         "content-type": "application/x-www-form-urlencoded",
         cookie: cookies,
-        "cf-access-jwt-assertion": jwt
+        "cf-access-jwt-assertion": jwt,
+        origin: "http://localhost"
       },
       body: `handle=${encodeURIComponent(handle)}&decision=approve`
     });
