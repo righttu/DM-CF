@@ -1,0 +1,37 @@
+.devin/agent-demo/wrangler.agent.jsonc
+  s_02649a17b7b371::t_18c1b4a1062ab1 16,36,41,59
+.devin/agent-demo/wrangler.test.jsonc
+  s_02649a17b7b371::t_f9af2bc7538654 43
+AGENTS.md
+  s_02649a17b7b371::t_412eb12f554098 102-105
+apps/agent-demo/package-lock.json
+  s_02649a17b7b371::t_e883a0c4853f7c 21,65,4850-4873
+apps/agent-demo/package.json
+  s_02649a17b7b371::t_e10c701911436f 30,39-43
+apps/agent-demo/src/agent/dlp.ts
+  s_02649a17b7b371::t_00af6d4b9ba615 84-107
+apps/agent-demo/src/agent/index.ts
+  s_02649a17b7b371::t_a9ea5d27acdbc1 5-6,22,45,50,52,54-55,58-59,314-326,328-331,334-373,382-409,418
+apps/agent-demo/test/agent.test.ts
+  s_02649a17b7b371::t_ebefe17f9f9ca0 5,160,168,172,176-177,214-215
+apps/agent-demo/test/dlp.test.ts
+  s_02649a17b7b371::t_f56d8a74eb8e17 3
+apps/agent-demo/test/model-fake.ts
+  s_02649a17b7b371::t_396d2afa36ba93 1-52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3b4e0d08baf15da4c3841fa4657adf6ab677a731",
+  "prompts": {},
+  "sessions": {
+    "s_02649a17b7b371": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "calm-noun",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
