@@ -101,7 +101,7 @@ a{color:#7dd3fc}
   </div>
   <div class="card">
     <h2>权限测试</h2>
-    <button class="ghost" id="test-list">测试 list_demo_stocks</button>
+    <button class="ghost" id="test-list">测试 list_demo_companies</button>
     <button class="ghost" id="test-doc" style="margin-top:8px">测试 read_research_document</button>
     <div class="status-line" style="margin-top:8px"><span>当前可用工具</span><span id="tools-line">—</span></div>
   </div>
@@ -440,7 +440,7 @@ async function toolTest(tool, args) {
   logEvent('tool-test', tool, summary);
   addEvent(tool + ' → ' + summary + (data && data.detail ? '：' + data.detail : ''), data && data.status === 'ok' ? 'ok' : 'denied');
 }
-document.getElementById('test-list').addEventListener('click', () => toolTest('list_demo_stocks', {}));
+document.getElementById('test-list').addEventListener('click', () => toolTest('list_demo_companies', {}));
 document.getElementById('test-doc').addEventListener('click', () => toolTest('read_research_document', { document_id: 'research-note-a' }));
 
 let dlpBusy = false;

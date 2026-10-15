@@ -26,7 +26,7 @@ import {
   MAX_HISTORY_MESSAGES,
   MAX_MESSAGE_CHARACTERS,
   MAX_TOOL_STEPS,
-  STOCK_IDS,
+  COMPANY_IDS,
   SYSTEM_PROMPT,
   TOOL_DESCRIPTIONS
 } from "../research-policy.js";
@@ -382,19 +382,19 @@ function buildTools(
   };
   const available = new Set(agent.availableCanonical(context.role));
   const tools: ai.ToolSet = {};
-  if (available.has("list_demo_stocks")) {
-    tools.list_demo_stocks = ai.tool({
-      description: TOOL_DESCRIPTIONS.list_demo_stocks,
+  if (available.has("list_demo_companies")) {
+    tools.list_demo_companies = ai.tool({
+      description: TOOL_DESCRIPTIONS.list_demo_companies,
       inputSchema: z.object({}),
-      execute: execute("list_demo_stocks")
+      execute: execute("list_demo_companies")
     });
   }
   if (available.has("get_latest_analysis")) {
     tools.get_latest_analysis = ai.tool({
       description: TOOL_DESCRIPTIONS.get_latest_analysis,
-      inputSchema: z.object({ stock_id: z.enum(STOCK_IDS) }),
-      execute: async (args: { stock_id: string }) =>
-        execute("get_latest_analysis")({ stock_id: args.stock_id })
+      inputSchema: z.object({ company_id: z.enum(COMPANY_IDS) }),
+      execute: async (args: { company_id: string }) =>
+        execute("get_latest_analysis")({ company_id: args.company_id })
     });
   }
   if (available.has("read_research_document")) {
@@ -687,7 +687,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
 
   availableCanonical(role: DemoRole): string[] {
     const allowed: CanonicalTool[] =
-      role === "analyst" ? CANONICAL_TOOLS : ["list_demo_stocks", "get_latest_analysis"];
+      role === "analyst" ? CANONICAL_TOOLS : ["list_demo_companies", "get_latest_analysis"];
     const discovered = this.discoveredRemoteNames();
     if (discovered.size === 0) return [];
     return allowed.filter((c) => {
@@ -710,7 +710,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
       },
       tools: this.availableCanonical(role),
       expectedTools:
-        role === "analyst" ? [...CANONICAL_TOOLS] : ["list_demo_stocks", "get_latest_analysis"],
+        role === "analyst" ? [...CANONICAL_TOOLS] : ["list_demo_companies", "get_latest_analysis"],
       portal: {
         listAvailable: connected && names.has("portal_list_servers"),
         manageAvailable: connected && names.has("portal_toggle_servers"),
@@ -1029,14 +1029,14 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     args: Record<string, unknown>
   ): Record<string, unknown> | null {
     const keys = Object.keys(args);
-    if (tool === "list_demo_stocks") {
+    if (tool === "list_demo_companies") {
       return keys.length === 0 ? {} : null;
     }
     if (tool === "get_latest_analysis") {
       return keys.length === 1 &&
-        typeof args.stock_id === "string" &&
-        (STOCK_IDS as readonly string[]).includes(args.stock_id)
-        ? { stock_id: args.stock_id }
+        typeof args.company_id === "string" &&
+        (COMPANY_IDS as readonly string[]).includes(args.company_id)
+        ? { company_id: args.company_id }
         : null;
     }
     return keys.length === 1 &&
@@ -1096,7 +1096,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
   private telemetry(context: AuditContext, action: string) {
     return {
       isEnabled: true,
-      functionId: "stock-research-demo",
+      functionId: "research-demo",
       metadata: {
         agentId: "research-agent",
         conversationId: this.ensureConversationId(),

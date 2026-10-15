@@ -177,8 +177,8 @@ describe("ResearchAgent chat and tools", () => {
       call += 1;
       if (call === 1) {
         return toolCallResponse([
-          { id: "c1", name: "get_latest_analysis", args: "{\"stock_id\":\"DEMO001\"}" },
-          { id: "c2", name: "get_latest_analysis", args: "{\"stock_id\":\"DEMO002\"}" }
+          { id: "c1", name: "get_latest_analysis", args: "{\"company_id\":\"DEMO001\"}" },
+          { id: "c2", name: "get_latest_analysis", args: "{\"company_id\":\"DEMO002\"}" }
         ]);
       }
       return textResponse("最终回答：两个模拟报告已比较。");
@@ -215,7 +215,7 @@ describe("ResearchAgent chat and tools", () => {
     expect((first.messages as { role: string; content?: unknown }[])[0].role).toBe("system");
     expect((first.messages as { role: string; content?: unknown }[])[0].content).toBe(SYSTEM_PROMPT);
     const offered = (first.tools ?? []).map((t) => t.function?.name);
-    expect(offered).toContain("list_demo_stocks");
+    expect(offered).toContain("list_demo_companies");
     expect(offered).toContain("get_latest_analysis");
     expect(offered).toContain("read_research_document");
 
@@ -262,7 +262,7 @@ describe("ResearchAgent chat and tools", () => {
         jwt: jwtA,
         method: "POST",
         body: {
-          tool: "list_demo_stocks",
+          tool: "list_demo_companies",
           args: {},
           actorId: "spoofed-actor",
           requestId: "spoofed-request",
@@ -306,16 +306,16 @@ describe("ResearchAgent chat and tools", () => {
     const list = await authedFetch("/api/tool-test", {
       jwt,
       method: "POST",
-      body: { tool: "list_demo_stocks", args: {} }
+      body: { tool: "list_demo_companies", args: {} }
     });
-    const listData = (await list.json()) as { status: string; result?: { stocks?: unknown[] } };
+    const listData = (await list.json()) as { status: string; result?: { companies?: unknown[] } };
     expect(listData.status).toBe("ok");
-    expect(listData.result?.stocks).toHaveLength(2);
+    expect(listData.result?.companies).toHaveLength(2);
 
     await authedFetch("/api/chat", { jwt, method: "POST", body: { message: "hi" } });
     const offered = (requests[0]?.body.tools ?? []).map((t) => t.function?.name);
     expect(offered).not.toContain("read_research_document");
-    expect(offered).toContain("list_demo_stocks");
+    expect(offered).toContain("list_demo_companies");
     expect(offered).toContain("get_latest_analysis");
   });
 
@@ -343,7 +343,7 @@ describe("ResearchAgent chat and tools", () => {
       const test = await authedFetch("/api/tool-test", {
         jwt,
         method: "POST",
-        body: { tool: "get_latest_analysis", args: { stock_id: "DEMO001" } }
+        body: { tool: "get_latest_analysis", args: { company_id: "DEMO001" } }
       });
       const testData = (await test.json()) as { status: string };
       expect(testData.status).toBe("unavailable");
@@ -351,7 +351,7 @@ describe("ResearchAgent chat and tools", () => {
       const session = await authedFetch("/api/session", { jwt });
       const sessionData = (await session.json()) as { tools: string[] };
       expect(sessionData.tools).not.toContain("get_latest_analysis");
-      expect(sessionData.tools).toContain("list_demo_stocks");
+      expect(sessionData.tools).toContain("list_demo_companies");
     } finally {
       e.MCP_TOOL_NAMES_JSON = original;
     }
@@ -405,7 +405,7 @@ describe("ResearchAgent chat and tools", () => {
     const injected = await authedFetch("/api/tool-test", {
       jwt,
       method: "POST",
-      body: { tool: "get_latest_analysis", args: { stock_id: "DEMO001' OR '1'='1" } }
+      body: { tool: "get_latest_analysis", args: { company_id: "DEMO001' OR '1'='1" } }
     });
     expect(injected.status).toBe(400);
     const injectedData = (await injected.json()) as { status: string };
@@ -414,7 +414,7 @@ describe("ResearchAgent chat and tools", () => {
     const extra = await authedFetch("/api/tool-test", {
       jwt,
       method: "POST",
-      body: { tool: "get_latest_analysis", args: { stock_id: "DEMO001", extra: "x" } }
+      body: { tool: "get_latest_analysis", args: { company_id: "DEMO001", extra: "x" } }
     });
     expect(extra.status).toBe(400);
 
@@ -518,7 +518,7 @@ describe("ResearchAgent chat and tools", () => {
       const test = await authedFetch("/api/tool-test", {
         jwt,
         method: "POST",
-        body: { tool: "get_latest_analysis", args: { stock_id: "DEMO001" } }
+        body: { tool: "get_latest_analysis", args: { company_id: "DEMO001" } }
       });
       const testData = (await test.json()) as { status: string };
       expect(testData.status).toBe("unavailable");
@@ -680,7 +680,7 @@ describe("ResearchAgent chat and tools", () => {
       tools: string[];
     };
     expect(dataA.mcp.connected).toBe(true);
-    expect(dataA.tools).toContain("list_demo_stocks");
+    expect(dataA.tools).toContain("list_demo_companies");
 
     const sessB = await authedFetch("/api/session", { jwt: jwtB });
     const dataB = (await sessB.json()) as { mcp: { connected: boolean } };

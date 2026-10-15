@@ -29,7 +29,7 @@
     "AGENT_ACCESS_AUD": "82ba84b6961e0a2deb1eb0e40c5a57f40ae90d2c45586db370a089200a673ed0",
     "PUBLIC_ORIGIN": "https://agent-demo.righttu.uk",
     "MCP_SERVER_URL": "https://portal-demo.righttu.uk/mcp",
-    "MCP_TOOL_NAMES_JSON": "{\"list_demo_stocks\":\"stock-research-demo_list_demo_stocks\",\"get_latest_analysis\":\"stock-research-demo_get_latest_analysis\",\"read_research_document\":\"stock-research-demo_read_research_document\"}",
+    "MCP_TOOL_NAMES_JSON": "{\"list_demo_companies\":\"research-demo_list_demo_companies\",\"get_latest_analysis\":\"research-demo_get_latest_analysis\",\"read_research_document\":\"research-demo_read_research_document\"}",
     "ACCOUNT_ID": "ebc4f70211dc33165a239c6018da8e2d",
     "GATEWAY_ID": "agent-demo",
     "MODEL_ID": "qwen3.8-2.4t-a95b",

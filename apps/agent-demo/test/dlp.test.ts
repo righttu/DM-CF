@@ -268,7 +268,7 @@ describe("DLP outcome classification", () => {
                     type: "function",
                     function: {
                       name: "get_latest_analysis",
-                      arguments: "{\"stock_id\":\"DEMO001\"}"
+                      arguments: "{\"company_id\":\"DEMO001\"}"
                     }
                   }
                 ]

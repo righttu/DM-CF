@@ -378,40 +378,40 @@ describe("MCP OAuth + tools", () => {
 
     const listResp = await rpc("tools/list", {}, 2);
     const toolNames = (((listResp.body.result as { tools?: { name: string }[] })?.tools) ?? []).map((t) => t.name);
-    expect(toolNames).toContain("list_demo_stocks");
+    expect(toolNames).toContain("list_demo_companies");
     expect(toolNames).toContain("get_latest_analysis");
     expect(toolNames).not.toContain("read_research_document");
 
-    const stocksReqId = crypto.randomUUID();
-    const stocksConvId = crypto.randomUUID();
-    const stocksResp = await rpc("tools/call", {
-      name: "list_demo_stocks",
+    const companiesReqId = crypto.randomUUID();
+    const companiesConvId = crypto.randomUUID();
+    const companiesResp = await rpc("tools/call", {
+      name: "list_demo_companies",
       arguments: {},
       _meta: {
-        "uk.righttu.demo/request_id": stocksReqId,
-        "uk.righttu.demo/conversation_id": stocksConvId,
+        "uk.righttu.demo/request_id": companiesReqId,
+        "uk.righttu.demo/conversation_id": companiesConvId,
         actorId: "forged-actor",
         role: "analyst"
       }
     }, 3);
-    const stocksPayload = JSON.parse(((stocksResp.body.result as { content?: { text?: string }[] })?.content?.[0].text) ?? "{}");
-    expect(stocksPayload.stocks).toHaveLength(2);
-    expect(stocksPayload.is_demo).toBe(true);
-    const stocksAudit = (
-      stocksResp.body.result as {
+    const companiesPayload = JSON.parse(((companiesResp.body.result as { content?: { text?: string }[] })?.content?.[0].text) ?? "{}");
+    expect(companiesPayload.companies).toHaveLength(2);
+    expect(companiesPayload.is_demo).toBe(true);
+    const companiesAudit = (
+      companiesResp.body.result as {
         _meta?: Record<
           string,
           { actorId: string; role: string; requestId: string; conversationId: string | null }
         >;
       }
     )?._meta?.["uk.righttu.demo/audit"];
-    expect(stocksAudit?.actorId).toBe(await sha256Hex("sub-flow-v"));
-    expect(stocksAudit?.role).toBe("viewer");
-    expect(stocksAudit?.requestId).toBe(stocksReqId);
-    expect(stocksAudit?.conversationId).toBe(stocksConvId);
+    expect(companiesAudit?.actorId).toBe(await sha256Hex("sub-flow-v"));
+    expect(companiesAudit?.role).toBe("viewer");
+    expect(companiesAudit?.requestId).toBe(companiesReqId);
+    expect(companiesAudit?.conversationId).toBe(companiesConvId);
 
     const badMetaResp = await rpc("tools/call", {
-      name: "list_demo_stocks",
+      name: "list_demo_companies",
       arguments: {},
       _meta: {
         "uk.righttu.demo/request_id": "x".repeat(500),
@@ -437,7 +437,7 @@ describe("MCP OAuth + tools", () => {
 
     const latestResp = await rpc(
       "tools/call",
-      { name: "get_latest_analysis", arguments: { stock_id: "DEMO001" } },
+      { name: "get_latest_analysis", arguments: { company_id: "DEMO001" } },
       4
     );
     const latestPayload = JSON.parse(((latestResp.body.result as { content?: { text?: string }[] })?.content?.[0].text) ?? "{}");
@@ -446,7 +446,7 @@ describe("MCP OAuth + tools", () => {
 
     const invalidResp = await rpc(
       "tools/call",
-      { name: "get_latest_analysis", arguments: { stock_id: "EVIL001" } },
+      { name: "get_latest_analysis", arguments: { company_id: "EVIL001" } },
       5
     );
     const invalidText = ((invalidResp.body.result as { content?: { text?: string }[] })?.content?.[0].text) ?? "";

@@ -18,12 +18,12 @@ describe("end-to-end connect flow", () => {
       tools: string[];
     };
     expect(sessionData.mcp.connected).toBe(true);
-    expect(sessionData.tools).toContain("list_demo_stocks");
+    expect(sessionData.tools).toContain("list_demo_companies");
 
     const toolTest = await authedFetch("/api/tool-test", {
       jwt: agentJwt,
       method: "POST",
-      body: { tool: "get_latest_analysis", args: { stock_id: "DEMO001" } }
+      body: { tool: "get_latest_analysis", args: { company_id: "DEMO001" } }
     });
     const toolData = (await toolTest.json()) as { status: string; result?: { report?: { report_date?: string } } };
     expect(toolData.status).toBe("ok");

@@ -1,12 +1,12 @@
-import { DOCUMENT_IDS, QUERIES, STOCK_IDS } from "../research-policy.js";
+import { DOCUMENT_IDS, QUERIES, COMPANY_IDS } from "../research-policy.js";
 
 export type CanonicalTool =
-  | "list_demo_stocks"
+  | "list_demo_companies"
   | "get_latest_analysis"
   | "read_research_document";
 
 export const CANONICAL_TOOLS: CanonicalTool[] = [
-  "list_demo_stocks",
+  "list_demo_companies",
   "get_latest_analysis",
   "read_research_document"
 ];
@@ -20,23 +20,23 @@ export interface DemoDb {
   };
 }
 
-export async function listDemoStocks(db: DemoDb) {
-  const { results } = await db.prepare(QUERIES.listStocks).bind().all();
-  return { is_demo: true, source: "demo_db", stocks: results };
+export async function listDemoCompanies(db: DemoDb) {
+  const { results } = await db.prepare(QUERIES.listCompanies).bind().all();
+  return { is_demo: true, source: "demo_db", companies: results };
 }
 
-export async function getLatestAnalysis(db: DemoDb, stockId: string) {
-  if (!(STOCK_IDS as readonly string[]).includes(stockId)) {
+export async function getLatestAnalysis(db: DemoDb, companyId: string) {
+  if (!(COMPANY_IDS as readonly string[]).includes(companyId)) {
     return {
       is_demo: true,
       source: "demo_db",
-      error: "invalid_stock_id",
-      allowed: [...STOCK_IDS]
+      error: "invalid_company_id",
+      allowed: [...COMPANY_IDS]
     };
   }
-  const row = await db.prepare(QUERIES.latestReport).bind(stockId).first();
+  const row = await db.prepare(QUERIES.latestReport).bind(companyId).first();
   if (!row) {
-    return { is_demo: true, source: "demo_db", error: "not_found", stock_id: stockId };
+    return { is_demo: true, source: "demo_db", error: "not_found", company_id: companyId };
   }
   return { is_demo: true, source: "demo_db", report: row };
 }

@@ -19,11 +19,11 @@ import {
 import { readBoundedText } from "../shared/body.js";
 import {
   getLatestAnalysis,
-  listDemoStocks,
+  listDemoCompanies,
   readResearchDocument,
   type DemoDb
 } from "../shared/demo-tools.js";
-import { DOCUMENT_IDS, STOCK_IDS, TOOL_DESCRIPTIONS } from "../research-policy.js";
+import { DOCUMENT_IDS, COMPANY_IDS, TOOL_DESCRIPTIONS } from "../research-policy.js";
 
 interface McpEnv extends AccessEnv {
   DEMO_DB: D1Database;
@@ -615,17 +615,17 @@ function buildMcpServer(env: McpEnv, email: string, principal: McpPrincipal): Mc
   };
 
   server.registerTool(
-    "list_demo_stocks",
+    "list_demo_companies",
     {
-      description: TOOL_DESCRIPTIONS.list_demo_stocks,
+      description: TOOL_DESCRIPTIONS.list_demo_companies,
       inputSchema: z.object({})
     },
     async (_args, ctx) =>
-      call("list_demo_stocks", ctx, async () => {
+      call("list_demo_companies", ctx, async () => {
         if (!resolveRole(env, email)) {
           return { isError: true, ...text({ error: "permission_denied" }) };
         }
-        return text(await listDemoStocks(db));
+        return text(await listDemoCompanies(db));
       })
   );
 
@@ -633,14 +633,14 @@ function buildMcpServer(env: McpEnv, email: string, principal: McpPrincipal): Mc
     "get_latest_analysis",
     {
       description: TOOL_DESCRIPTIONS.get_latest_analysis,
-      inputSchema: z.object({ stock_id: z.enum(STOCK_IDS) })
+      inputSchema: z.object({ company_id: z.enum(COMPANY_IDS) })
     },
-    async ({ stock_id }, ctx) =>
+    async ({ company_id }, ctx) =>
       call("get_latest_analysis", ctx, async () => {
         if (!resolveRole(env, email)) {
           return { isError: true, ...text({ error: "permission_denied" }) };
         }
-        return text(await getLatestAnalysis(db, stock_id));
+        return text(await getLatestAnalysis(db, company_id));
       })
   );
 
