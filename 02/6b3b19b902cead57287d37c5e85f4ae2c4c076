@@ -1,0 +1,39 @@
+.devin/agent-demo/wrangler.agent.jsonc
+  s_02649a17b7b371::t_49b3b194406666 32
+apps/agent-demo/migrations/0001_demo.sql
+  s_02649a17b7b371::t_7065f43197a4f0 2,8,13,21,26
+apps/agent-demo/src/agent/index.ts
+  s_02649a17b7b371::t_fabc197239f9ec 29,385-387,389,395-397,690,713,1032,1037-1039,1099
+apps/agent-demo/src/agent/ui.ts
+  s_02649a17b7b371::t_03133739e1acf2 104,443
+apps/agent-demo/src/mcp/index.ts
+  s_02649a17b7b371::t_bc955cc8c9d01d 22,26,618,620,624,628,636,638,643
+apps/agent-demo/src/research-policy.ts
+  s_02649a17b7b371::t_af9d814d78f5e6 1,10-12,16-18,22,29
+apps/agent-demo/src/shared/demo-tools.ts
+  s_02649a17b7b371::t_a9db357925c33d 1,4,9,23-25,28-29,33-34,37,39
+apps/agent-demo/test/agent.test.ts
+  s_02649a17b7b371::t_781df2fefacdd0 180-181,218,265,309,311,313,318,346,354,408,417,521,683
+apps/agent-demo/test/dlp.test.ts
+  s_02649a17b7b371::t_854681caffada1 271
+apps/agent-demo/test/e2e.test.ts
+  s_02649a17b7b371::t_b323a74fc07060 21,26
+apps/agent-demo/test/mcp.test.ts
+  s_02649a17b7b371::t_2f92910a7b2f13 381,385-388,391-392,397-401,408-411,414,440,449
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "026b3b19b902cead57287d37c5e85f4ae2c4c076",
+  "prompts": {},
+  "sessions": {
+    "s_02649a17b7b371": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "calm-noun",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
