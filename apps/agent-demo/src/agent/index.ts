@@ -573,6 +573,34 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     }
   }
 
+  private healing: Promise<boolean> | null = null;
+
+  private async healMcp(): Promise<boolean> {
+    const conn = this.mcp.mcpConnections["research"];
+    if (!conn) return false;
+    try {
+      conn.clearResumedSession();
+      const reconnect = (await this.mcp.connectToServer("research")) as { state: string };
+      if (reconnect.state !== "connected") return false;
+      const discovered = (await this.mcp.discoverIfConnected("research")) as
+        | { success?: boolean }
+        | undefined;
+      return discovered?.success === true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async ensureMcpReady(): Promise<void> {
+    const entry = this.researchRegistration();
+    const url = mcpServerUrlAllowed(this.env);
+    if (!entry || !url || entry.server_url !== url || String(entry.state) !== "connected") return;
+    this.healing ??= this.healMcp().finally(() => {
+      this.healing = null;
+    });
+    await this.healing;
+  }
+
   private discoveredRemoteNames(): Set<string> {
     const names = new Set<string>();
     for (const tool of this.mcp.listTools({ serverId: "research" })) {
@@ -697,6 +725,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
   }
 
   async getSessionData(role: DemoRole) {
+    await this.ensureMcpReady();
     this.syncRole(role);
     const names = this.discoveredRemoteNames();
     const mcp = this.mcpStatus();
@@ -779,6 +808,12 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
         case "connecting":
         case "discovering":
           return finish({ status: "connecting" });
+        case "connected":
+          if (await this.healMcp()) {
+            this.clearMcpFailure();
+            return finish({ status: "ready" });
+          }
+          return failedResult("session_recovery_failed");
         case "failed":
           try {
             const reconnect = (await this.mcp.connectToServer("research")) as {
@@ -857,6 +892,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     | { status: "requires_connect" | "unsupported" | "error" }
     | { status: "ok"; servers: PortalServerRow[]; truncated: boolean }
   > {
+    await this.ensureMcpReady();
     if (!this.mcpStatus().connected) return { status: "requires_connect" };
     if (!this.discoveredRemoteNames().has("portal_list_servers")) {
       return { status: "unsupported" };
@@ -897,6 +933,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     | { status: "requires_connect" | "unsupported" | "error" }
     | { status: "ok"; authorizationUrl: string }
   > {
+    await this.ensureMcpReady();
     this.syncRole(context.role);
     if (!this.mcpStatus().connected) return { status: "requires_connect" };
     if (!this.discoveredRemoteNames().has("portal_toggle_servers")) {
@@ -1078,6 +1115,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     args: Record<string, unknown>,
     context: AuditContext
   ): Promise<{ status: string; detail?: string; result?: unknown }> {
+    await this.ensureMcpReady();
     if (!CANONICAL_TOOLS.includes(tool as CanonicalTool)) {
       this.audit(context, "tool-test", tool, "denied");
       return { status: "denied", detail: "unknown_tool" };
@@ -1117,6 +1155,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     message: string,
     context: AuditContext
   ): Promise<{ reply: string; events: ChatEvent[]; dlp?: DlpOutcome; mcpRequired?: boolean }> {
+    await this.ensureMcpReady();
     this.syncRole(context.role);
     if (this.busy) {
       return { reply: "", events: [{ text: "上一次对话仍在进行中", kind: "denied" }] };

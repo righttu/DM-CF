@@ -1092,6 +1092,41 @@ describe("ResearchAgent chat and tools", () => {
     }
   });
 
+  it("heals a woken connection that is connected but undiscovered without re-authorizing", async () => {
+    const sub = "sub-heal";
+    const jwt = await signJwt({ sub, email: ANALYST_EMAIL });
+    await connectAgentMcp({ sub, email: ANALYST_EMAIL });
+    const stub = await agentStub(sub);
+    const clientBefore = await runInDurableObject(stub as never, (instance) => {
+      const inst = instance as unknown as {
+        mcp: {
+          mcpConnections: Record<string, { connectionState: string }>;
+          getServersFromStorage(): { id: string; client_id: string | null }[];
+        };
+      };
+      inst.mcp.mcpConnections["research"].connectionState = "connected";
+      return inst.mcp.getServersFromStorage().find((x) => x.id === "research")?.client_id;
+    });
+    const session = (await (await authedFetch("/api/session", { jwt })).json()) as {
+      mcp: { connected: boolean; state: string };
+      tools: string[];
+    };
+    expect(session.mcp.connected).toBe(true);
+    expect(session.tools).toContain("list_demo_companies");
+    const test = await authedFetch("/api/tool-test", {
+      jwt,
+      method: "POST",
+      body: { tool: "list_demo_companies", args: {} }
+    });
+    expect(((await test.json()) as { status: string }).status).toBe("ok");
+    const clientAfter = await runInDurableObject(stub as never, (instance) =>
+      (instance as unknown as {
+        mcp: { getServersFromStorage(): { id: string; client_id: string | null }[] };
+      }).mcp.getServersFromStorage().find((x) => x.id === "research")?.client_id
+    );
+    expect(clientAfter).toBe(clientBefore);
+  });
+
   it("failed connection reconnects via connectToServer keeping grant and history", async () => {
     const sub = "sub-reconnect";
     const jwt = await signJwt({ sub, email: ANALYST_EMAIL });
