@@ -610,6 +610,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
   }
 
   private async ensureMcpReady(): Promise<void> {
+    await this.mcp.waitForConnections({ timeout: 10000 });
     const entry = this.researchRegistration();
     const url = mcpServerUrlAllowed(this.env);
     if (!entry || !url || entry.server_url !== url || String(entry.state) !== "connected") return;
