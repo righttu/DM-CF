@@ -406,6 +406,8 @@ document.getElementById('connect-btn').addEventListener('click', async () => {
     } else {
       addEvent('连接失败（HTTP ' + status + '）' + (data && data.detail ? '：' + data.detail : '') + (data && data.requestId ? ' [请求 ID ' + data.requestId + ']' : ''), 'denied');
       logEvent('connect', 'mcp', 'failed');
+      const d = await api('/api/diag/portal', {});
+      if (!d.stale && d.data) addEvent('Portal 探测（Worker 侧匿名）：' + JSON.stringify(d.data), '');
     }
   } catch (e) {
     addEvent('连接失败（网络错误）', 'denied');

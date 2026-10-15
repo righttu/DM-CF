@@ -1274,6 +1274,42 @@ async function handleRequest(
     }
   }
 
+  if (url.pathname === "/api/diag/portal" && request.method === "POST") {
+    const target = mcpServerUrlAllowed(env);
+    if (!target) return json({ error: "unconfigured" }, 400);
+    try {
+      const resp = await fetch(target, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "diag", version: "1" }
+          }
+        }),
+        redirect: "manual",
+        signal: AbortSignal.timeout(10000)
+      });
+      const text = (await resp.text()).slice(0, 300);
+      return json({
+        status: resp.status,
+        contentType: resp.headers.get("content-type"),
+        location: resp.headers.get("location"),
+        wwwAuthenticate: resp.headers.get("www-authenticate"),
+        body: sanitizeDiagnostic(text, [env.DASHSCOPE_API_KEY, env.CF_AIG_TOKEN])
+      });
+    } catch (e) {
+      return json({ error: "fetch_failed", detail: sanitizeDiagnostic(e, [env.DASHSCOPE_API_KEY, env.CF_AIG_TOKEN]) }, 502);
+    }
+  }
+
   if (url.pathname === "/api/connect" && request.method === "POST") {
     const parsed = await readJsonObject(request);
     if (!parsed.ok) return json({ error: parsed.error }, parsed.status);
