@@ -988,8 +988,12 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     if (!CANONICAL_TOOLS.includes(canonical)) {
       return { status: "denied", detail: "unknown_tool" };
     }
-    if (!this.mcpStatus().connected) {
-      return { status: "unavailable", detail: "MCP 未连接或连接已过期" };
+    const current = this.mcpStatus();
+    if (!current.connected) {
+      return {
+        status: "unavailable",
+        detail: `MCP 未连接或连接已过期（状态：${current.state}${current.detail ? "；" + current.detail : ""}）`
+      };
     }
     const remote = remoteName(this.env, canonical);
     if (remote === null || !this.discoveredRemoteNames().has(remote)) {
@@ -1019,8 +1023,8 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
         return { status: "error", detail: "远端工具执行失败", payload };
       }
       return { status: "ok", payload };
-    } catch {
-      return { status: "error", detail: "工具调用失败" };
+    } catch (e) {
+      return { status: "error", detail: `工具调用失败：${this.diagnostic(e)}` };
     }
   }
 

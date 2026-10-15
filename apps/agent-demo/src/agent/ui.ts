@@ -250,6 +250,7 @@ function refreshSession(s) {
     : s.mcp.state === 'authenticating' ? '等待授权完成，本页将在同窗口跳转。'
     : (s.mcp.state === 'connecting' || s.mcp.state === 'discovering') ? '正在建立连接…'
     : s.mcp.state === 'failed' ? ('连接失败' + (s.mcp.detail ? '：' + s.mcp.detail : ''))
+    : !s.mcp.connected ? ('当前状态：' + s.mcp.state + (s.mcp.detail ? '：' + s.mcp.detail : ''))
     : '';
   const tools = Array.isArray(s.tools) ? s.tools : [];
   const expected = Array.isArray(s.expectedTools) ? s.expectedTools : [];
