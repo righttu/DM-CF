@@ -429,25 +429,52 @@ function isSmallTalk(message: string): boolean {
   return SMALL_TALK.test(message.trim());
 }
 
+type ChatSignal =
+  | { type: "step"; text: string; kind: ChatEvent["kind"] }
+  | { type: "delta"; text: string };
+
+interface ChatOutcome {
+  reply: string;
+  events: ChatEvent[];
+  dlp?: DlpOutcome;
+  mcpRequired?: boolean;
+}
+
+const TOOL_HINT =
+  /DEMO\d|research-|报告|公司|文档|研究|比较|分析|权限|工具|查询|读取|资料|备忘录|来源|analyst|viewer|tool/i;
+const ROUTER_PROMPT =
+  "你是意图分类器。判断用户的最新问题是否需要查询模拟公司报告或研究文档数据库（涉及公司、报告、研究文档、DEMO001/DEMO002、比较分析等）。只回答 YES 或 NO，不要输出其他内容。时间、日期、闲聊、常识问题一律回答 NO。";
+const BLOCKED_REPLY = "该请求被 AI Gateway DLP 策略拦截（云端确认），未返回模型内容。";
+
+function looksLikeLeakedToolCall(text: string): boolean {
+  const t = text.trim().replace(/^[\s[\]'"]+/, "");
+  return t.startsWith("{") && /"name"\s*:/.test(t) && /"(parameters|arguments)"\s*:/.test(t);
+}
+
 function buildTools(
   agent: ResearchAgent,
   context: AuditContext,
-  events: ChatEvent[]
+  events: ChatEvent[],
+  onEvent?: (event: ChatEvent) => void
 ): ai.ToolSet {
   const seen = new Map<string, unknown>();
+  const record = (event: ChatEvent) => {
+    events.push(event);
+    onEvent?.(event);
+  };
   const execute = (canonical: CanonicalTool) => async (args: Record<string, unknown>) => {
     const key = `${canonical}:${JSON.stringify(args)}`;
     if (seen.has(key)) {
       return { already_retrieved: true, result: seen.get(key) };
     }
-    events.push({ text: `工具调用 ${canonical}`, kind: "" });
+    record({ text: `工具调用 ${canonical}`, kind: "" });
     const result = await agent.callRemoteTool(canonical, args, context);
     if (result.status === "ok") seen.set(key, result.payload);
     agent.audit(context, "tool-execute", canonical, result.status);
     if (result.status === "ok") {
-      events.push({ text: `工具返回 ${canonical}`, kind: "ok" });
+      record({ text: `工具返回 ${canonical}`, kind: "ok" });
     } else {
-      events.push({
+      record({
         text: `工具${result.status === "denied" ? "被拒绝" : "不可用/出错"} ${canonical}`,
         kind: "denied"
       });
@@ -1250,23 +1277,55 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     };
   }
 
-  async chat(
+  async chat(message: string, context: AuditContext): Promise<ChatOutcome> {
+    return this.runChat(message, context, () => undefined);
+  }
+
+  chatStream(message: string, context: AuditContext): ReadableStream<Uint8Array> {
+    const encoder = new TextEncoder();
+    return new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        const write = (value: unknown) =>
+          controller.enqueue(encoder.encode(`${JSON.stringify(value)}\n`));
+        this.runChat(message, context, write)
+          .then((outcome) =>
+            write({
+              type: "done",
+              reply: outcome.reply,
+              dlp: outcome.dlp,
+              mcpRequired: outcome.mcpRequired === true,
+              requestId: context.requestId
+            })
+          )
+          .catch(() => write({ type: "error", requestId: context.requestId }))
+          .finally(() => controller.close());
+      }
+    });
+  }
+
+  private async runChat(
     message: string,
-    context: AuditContext
-  ): Promise<{ reply: string; events: ChatEvent[]; dlp?: DlpOutcome; mcpRequired?: boolean }> {
+    context: AuditContext,
+    emit: (signal: ChatSignal) => void
+  ): Promise<ChatOutcome> {
     await this.ensureMcpReady();
     this.syncRole(context.role);
+    const events: ChatEvent[] = [];
+    const record = (event: ChatEvent) => {
+      events.push(event);
+      emit({ type: "step", ...event });
+    };
     if (this.busy) {
-      return { reply: "", events: [{ text: "上一次对话仍在进行中", kind: "denied" }] };
+      record({ text: "上一次对话仍在进行中", kind: "denied" });
+      return { reply: "", events };
     }
     if (typeof message !== "string" || message.length === 0 || message.length > MAX_MESSAGE_CHARACTERS) {
-      return { reply: "消息为空或超出长度限制。", events: [] };
+      return { reply: "消息为空或超出长度限制。", events };
     }
     if (!this.mcpStatus().connected) {
-      return { reply: "", events: [], mcpRequired: true };
+      return { reply: "", events, mcpRequired: true };
     }
     this.busy = true;
-    const events: ChatEvent[] = [];
     const dlpSink: DlpOutcome[] = [];
     try {
       const model = buildChatModel(
@@ -1282,12 +1341,40 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
       const history = this.state.history.slice(-MAX_HISTORY_MESSAGES);
       const userMessage = { role: "user" as const, content: message };
       const traced = wrapAISDK(ai, { storeMessages: false, storeTools: false });
-      const tools = isSmallTalk(message) ? {} : buildTools(this, context, events);
-      const blockedReply =
-        "该请求被 AI Gateway DLP 策略拦截（云端确认），未返回模型内容。";
-      let reply: string;
-      try {
-        const result = await traced.generateText({
+      const telemetry = this.telemetry(context, "chat");
+      const blockedOutcome = (): ChatOutcome | null => {
+        const blocked = lastBlock(dlpSink);
+        if (!blocked) return null;
+        record({ text: "DLP 拦截（云端确认）", kind: "denied" });
+        return { reply: BLOCKED_REPLY, events, dlp: blocked };
+      };
+
+      const needsTools = async (): Promise<boolean> => {
+        if (isSmallTalk(message)) return false;
+        if (TOOL_HINT.test(message)) return true;
+        try {
+          const routed = await traced.generateText({
+            model,
+            system: ROUTER_PROMPT,
+            prompt: message,
+            maxRetries: 0,
+            maxOutputTokens: 4,
+            temperature: 0,
+            experimental_telemetry: telemetry
+          });
+          return /^\s*(YES|是)/i.test(routed.text);
+        } catch {
+          return false;
+        }
+      };
+
+      const answer = async (withTools: boolean) => {
+        const tools = withTools
+          ? buildTools(this, context, events, (e) => emit({ type: "step", ...e }))
+          : {};
+        const hasTools = Object.keys(tools).length > 0;
+        const offered: Record<number, boolean> = {};
+        const result = traced.streamText({
           model,
           system: SYSTEM_PROMPT,
           messages: [...history, userMessage],
@@ -1306,35 +1393,75 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
               previous.every(
                 (r) => (r.output as { already_retrieved?: boolean } | undefined)?.already_retrieved
               );
-            return stepNumber >= MAX_TOOL_STEPS - 1 || onlyRepeats
-              ? { activeTools: [] as never[] }
-              : undefined;
+            const withdraw = stepNumber >= MAX_TOOL_STEPS - 1 || onlyRepeats;
+            offered[stepNumber] = hasTools && !withdraw;
+            return withdraw ? { activeTools: [] as never[] } : undefined;
           },
           maxRetries: 0,
           maxOutputTokens: 2048,
-          experimental_telemetry: this.telemetry(context, "chat")
+          experimental_telemetry: telemetry,
+          onError: () => undefined
         });
-        const blocked = lastBlock(dlpSink);
-        if (blocked) {
-          events.push({ text: "DLP 拦截（云端确认）", kind: "denied" });
-          return { reply: blockedReply, events, dlp: blocked };
+        let text = "";
+        let buffered = "";
+        let step = 0;
+        let leaked = false;
+        let errored = false;
+        for await (const part of result.fullStream as AsyncIterable<{
+          type: string;
+          text?: string;
+          finishReason?: string;
+        }>) {
+          if (part.type === "start-step") {
+            buffered = "";
+          } else if (part.type === "text-delta" && typeof part.text === "string") {
+            if (offered[step]) {
+              buffered += part.text;
+            } else {
+              text += part.text;
+              emit({ type: "delta", text: part.text });
+            }
+          } else if (part.type === "finish-step") {
+            if (offered[step] && buffered) {
+              if (part.finishReason === "tool-calls") {
+              } else if (looksLikeLeakedToolCall(buffered)) {
+                leaked = true;
+              } else {
+                text += buffered;
+                emit({ type: "delta", text: buffered });
+              }
+            }
+            buffered = "";
+            step += 1;
+          } else if (part.type === "error") {
+            errored = true;
+          }
         }
-        reply = result.text.trim();
-        if (!reply) {
-          events.push({ text: "模型未给出文字回答", kind: "denied" });
-          return { reply: "模型没有给出回答，请换一种问法重试。", events };
-        }
-      } catch {
-        const blocked = lastBlock(dlpSink);
-        if (blocked) {
-          events.push({ text: "DLP 拦截（云端确认）", kind: "denied" });
-          return { reply: blockedReply, events, dlp: blocked };
-        }
-        events.push({ text: "模型调用失败", kind: "denied" });
+        return { text, leaked, errored };
+      };
+
+      const useTools = await needsTools();
+      const earlyBlock = blockedOutcome();
+      if (earlyBlock) return earlyBlock;
+      let outcome = await answer(useTools);
+      const blocked = blockedOutcome();
+      if (blocked) return blocked;
+      if (useTools && (outcome.leaked || (!outcome.text.trim() && !outcome.errored))) {
+        outcome = await answer(false);
+        const blockedAgain = blockedOutcome();
+        if (blockedAgain) return blockedAgain;
+      }
+      if (outcome.errored && !outcome.text.trim()) {
+        record({ text: "模型调用失败", kind: "denied" });
         return { reply: "模型调用失败，请稍后重试。", events };
       }
+      const reply = outcome.text.trim();
+      if (!reply) {
+        record({ text: "模型未给出文字回答", kind: "denied" });
+        return { reply: "模型没有给出回答，请换一种问法重试。", events };
+      }
       const flag = [...dlpSink].reverse().find((o) => o.action === "FLAG");
-      if (flag) events.push({ text: "DLP 标记（未拦截，云端确认）", kind: "denied" });
+      if (flag) record({ text: "DLP 标记（未拦截，云端确认）", kind: "denied" });
       this.persistTurn(userMessage, reply);
       return { reply, events, dlp: flag };
     } finally {
@@ -1612,6 +1739,26 @@ async function handleRequest(
       return json({ ...result, requestId: auditContext.requestId }, 404);
     }
     return json({ ...result, requestId: auditContext.requestId });
+  }
+
+  if (url.pathname === "/api/chat/stream" && request.method === "POST") {
+    const parsed = await readJsonObject(request);
+    if (!parsed.ok) return json({ error: parsed.error }, parsed.status);
+    const message = parsed.value.message;
+    if (
+      typeof message !== "string" ||
+      message.trim().length === 0 ||
+      message.length > MAX_MESSAGE_CHARACTERS
+    ) {
+      return json({ error: "invalid_message" }, 400);
+    }
+    const stream = await stub.chatStream(message, auditContext);
+    return new Response(stream, {
+      headers: {
+        ...SECURITY_HEADERS,
+        "content-type": "application/x-ndjson; charset=utf-8"
+      }
+    });
   }
 
   if (url.pathname === "/api/chat" && request.method === "POST") {

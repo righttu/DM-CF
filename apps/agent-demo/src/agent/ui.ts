@@ -520,30 +520,77 @@ async function send() {
   input.value = '';
   addMsg('user', message);
   startTurn('对话：' + (message.length > 24 ? message.slice(0, 24) + '…' : message));
+  const epoch = identityEpoch;
+  let bubble = null;
   try {
-    const r = await api('/api/chat', { message });
-    if (r.stale) { sending = false; return; }
-    const { status, data } = r;
-    if (data && data.events) {
-      for (const e of data.events) addEvent(e.text, e.kind);
-    }
-    if (status === 409) {
-      addMsg('system', '需要先完成 MCP 连接授权。');
-      logEvent('chat', null, 'mcp_required');
-      loadSession();
-    } else if (status === 200 && data && data.reply !== undefined) {
-      addMsg('agent', data.reply);
-      logEvent('chat', null, 'ok');
-      if (data.dlp) {
-        setStatus('dlp-state', '云端确认：' + data.dlp.action, 'ok');
+    const resp = await fetch('/api/chat/stream', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message })
+    });
+    if (!resp.ok || !resp.body) {
+      if (epoch === identityEpoch) {
+        addMsg('system', '请求失败（HTTP ' + resp.status + '）');
+        logEvent('chat', null, 'failed');
       }
     } else {
-      addMsg('system', '请求失败（HTTP ' + status + '）');
-      logEvent('chat', null, 'failed');
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let done = null;
+      const handle = (line) => {
+        if (!line || epoch !== identityEpoch) return;
+        let evt = null;
+        try { evt = JSON.parse(line); } catch { return; }
+        if (evt.type === 'step') {
+          addEvent(evt.text, evt.kind);
+        } else if (evt.type === 'delta') {
+          if (!bubble) {
+            bubble = el('div', 'msg agent', '');
+            chat.appendChild(bubble);
+          }
+          bubble.textContent += evt.text;
+          chat.scrollTop = chat.scrollHeight;
+        } else if (evt.type === 'done' || evt.type === 'error') {
+          done = evt;
+        }
+      };
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        let idx = buffer.indexOf('\\n');
+        while (idx >= 0) {
+          handle(buffer.slice(0, idx));
+          buffer = buffer.slice(idx + 1);
+          idx = buffer.indexOf('\\n');
+        }
+      }
+      buffer += decoder.decode();
+      handle(buffer);
+      if (epoch === identityEpoch) {
+        if (done && done.requestId) document.getElementById('request-id').textContent = done.requestId;
+        if (!done || done.type === 'error') {
+          if (bubble) bubble.remove();
+          addMsg('system', '请求中断，请重试。');
+          logEvent('chat', null, 'failed');
+        } else if (done.mcpRequired) {
+          addMsg('system', '需要先完成 MCP 连接授权。');
+          logEvent('chat', null, 'mcp_required');
+          loadSession();
+        } else {
+          if (bubble) bubble.textContent = done.reply;
+          else if (done.reply) addMsg('agent', done.reply);
+          logEvent('chat', null, 'ok');
+          if (done.dlp) setStatus('dlp-state', '云端确认：' + done.dlp.action, 'ok');
+        }
+      }
     }
   } catch (e) {
-    addMsg('system', '网络错误');
-    logEvent('chat', null, 'network_error');
+    if (epoch === identityEpoch) {
+      addMsg('system', '网络错误');
+      logEvent('chat', null, 'network_error');
+    }
   }
   sending = false;
   sendBtn.disabled = !readyForChat;

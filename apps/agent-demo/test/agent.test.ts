@@ -1168,6 +1168,103 @@ describe("ResearchAgent chat and tools", () => {
     expect(seen.map((x) => x.tools)).toEqual([true, true, false]);
   });
 
+  it("routes non-data questions to a tool-free answer with a tiny classifier call", async () => {
+    const sub = "sub-router";
+    const jwt = await signJwt({ sub, email: ANALYST_EMAIL });
+    await connectAgentMcp({ sub, email: ANALYST_EMAIL });
+    const seen: { tools: boolean; maxTokens?: number }[] = [];
+    __setModelFetchForTests(async (_input, init) => {
+      const body = JSON.parse(init.body) as { tools?: unknown[]; max_tokens?: number };
+      seen.push({ tools: Array.isArray(body.tools) && body.tools.length > 0, maxTokens: body.max_tokens });
+      return textResponse(seen.length === 1 ? "NO" : "我无法获取实时时间。");
+    });
+    const resp = await authedFetch("/api/chat", {
+      jwt,
+      method: "POST",
+      body: { message: "现在几点" }
+    });
+    const data = (await resp.json()) as { reply: string; events: { text: string }[] };
+    expect(data.reply).toBe("我无法获取实时时间。");
+    expect(seen).toHaveLength(2);
+    expect(seen[0].maxTokens).toBe(4);
+    expect(seen[1].tools).toBe(false);
+    expect(data.events.some((e) => e.text.includes("工具调用"))).toBe(false);
+  });
+
+  it("never shows a leaked tool-call JSON as the answer: retries once without tools", async () => {
+    const sub = "sub-leak";
+    const jwt = await signJwt({ sub, email: ANALYST_EMAIL });
+    await connectAgentMcp({ sub, email: ANALYST_EMAIL });
+    const seen: boolean[] = [];
+    __setModelFetchForTests(async (_input, init) => {
+      const body = JSON.parse(init.body) as { tools?: unknown[] };
+      const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
+      seen.push(hasTools);
+      if (hasTools) {
+        return textResponse('{"type": "function", "name": "list_demo_companies", "parameters": {}}');
+      }
+      return textResponse("目前有两家模拟公司。");
+    });
+    const resp = await authedFetch("/api/chat", {
+      jwt,
+      method: "POST",
+      body: { message: "有哪些模拟公司" }
+    });
+    const data = (await resp.json()) as { reply: string };
+    expect(data.reply).toBe("目前有两家模拟公司。");
+    expect(data.reply).not.toContain("parameters");
+    expect(seen).toEqual([true, false]);
+  });
+
+  it("streams chat as NDJSON: step events, text deltas, then a done record", async () => {
+    const sub = "sub-stream";
+    const jwt = await signJwt({ sub, email: ANALYST_EMAIL });
+    await connectAgentMcp({ sub, email: ANALYST_EMAIL });
+    let call = 0;
+    __setModelFetchForTests(async () => {
+      call += 1;
+      if (call === 1) {
+        return toolCallResponse([{ id: "s1", name: "list_demo_companies", args: "{}" }]);
+      }
+      return textResponse("两家模拟公司。");
+    });
+    const resp = await authedFetch("/api/chat/stream", {
+      jwt,
+      method: "POST",
+      body: { message: "有哪些模拟公司" }
+    });
+    expect(resp.status).toBe(200);
+    expect(resp.headers.get("content-type")).toContain("application/x-ndjson");
+    const lines = (await resp.text())
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as { type: string; text?: string; reply?: string; requestId?: string });
+    const types = lines.map((l) => l.type);
+    expect(types).toContain("step");
+    expect(types).toContain("delta");
+    expect(types[types.length - 1]).toBe("done");
+    expect(lines.filter((l) => l.type === "delta").map((l) => l.text).join("")).toBe("两家模拟公司。");
+    const done = lines[lines.length - 1];
+    expect(done.reply).toBe("两家模拟公司。");
+    expect(done.requestId).toMatch(/^[0-9a-f-]{36}$/i);
+
+    const noConnect = await authedFetch("/api/chat/stream", {
+      jwt: await signJwt({ sub: "sub-stream-none", email: ANALYST_EMAIL }),
+      method: "POST",
+      body: { message: "有哪些模拟公司" }
+    });
+    const last = (await noConnect.text()).split("\n").filter(Boolean).map((l) => JSON.parse(l)).pop();
+    expect(last.type).toBe("done");
+    expect(last.mcpRequired).toBe(true);
+
+    const bad = await authedFetch("/api/chat/stream", {
+      jwt,
+      method: "POST",
+      body: { message: "" }
+    });
+    expect(bad.status).toBe(400);
+  });
+
   it("heals a woken connection that is connected but undiscovered without re-authorizing", async () => {
     const sub = "sub-heal";
     const jwt = await signJwt({ sub, email: ANALYST_EMAIL });
