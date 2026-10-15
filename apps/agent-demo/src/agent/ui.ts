@@ -13,11 +13,14 @@ main{flex:1;display:flex;flex-direction:column;padding:20px;gap:14px;min-width:0
 h1{font-size:16px;margin:0}
 h2{font-size:13px;margin:0;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em}
 .badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;background:#1e3a5f;color:#7dd3fc;border:1px solid #2d4a70;margin:2px 2px 2px 0}
+[hidden]{display:none!important}
 .badge.warn{background:#3a2f14;color:#fbbf24;border-color:#5c4a1f}
 .badge.demo{background:#17301f;color:#6ee7b7;border-color:#23543a}
 .badge.ro{background:#2a2140;color:#c4b5fd;border-color:#453a66}
 .card{background:#141f38;border:1px solid #24304d;border-radius:10px;padding:14px}
 .status-line{display:flex;justify-content:space-between;font-size:13px;padding:4px 0;color:#cbd5e1;gap:8px}
+.status-line > span:first-child{min-width:0;overflow-wrap:anywhere}
+.status-line > span:last-child{min-width:0;overflow-wrap:anywhere;text-align:right}
 .status-line .ok{color:#6ee7b7}
 .status-line .pending{color:#fbbf24}
 .status-line .err{color:#fca5a5}
@@ -61,7 +64,11 @@ a{color:#7dd3fc}
     <h2>身份</h2>
     <div class="status-line"><span>邮箱</span><span id="email">—</span></div>
     <div class="status-line"><span>角色</span><span id="role">—</span></div>
+    <div class="status-line"><span>审计身份 ID</span><span id="actor">—</span></div>
+    <div class="status-line"><span>会话 ID</span><span id="conversation-id">—</span></div>
+    <div class="status-line"><span>请求 ID</span><span id="request-id">—</span></div>
     <p class="small" id="identity-note"></p>
+    <button class="ghost" id="logout-btn" disabled>退出 Access 登录</button>
   </div>
   <div class="card">
     <h2>连接状态</h2>
@@ -70,7 +77,23 @@ a{color:#7dd3fc}
     <div class="status-line"><span>DLP</span><span id="dlp-state" class="pending">未验证</span></div>
     <div class="status-line"><span>追踪</span><span id="trace-state" class="pending">—</span></div>
     <button id="connect-btn" disabled>连接 MCP（OAuth 授权）</button>
+    <button class="ghost" id="disconnect-btn" disabled style="margin-top:8px">断开 MCP 连接</button>
     <p class="small" id="connect-hint"></p>
+  </div>
+  <div class="card">
+    <h2>MCP 服务器</h2>
+    <button class="ghost" id="portal-list-btn" disabled>从 Portal 读取列表</button>
+    <button class="ghost" id="portal-manage-btn" disabled style="margin-top:8px">管理/重新授权 MCP</button>
+    <button class="ghost" id="portal-refresh-btn" disabled style="margin-top:8px">重新读取工具目录</button>
+    <p class="small" id="portal-hint"></p>
+    <div id="portal-pending" hidden>
+      <p class="small" id="portal-pending-msg"></p>
+      <a id="portal-accept" class="small" target="_blank" rel="noopener noreferrer">同意并打开授权页</a>
+      <button class="ghost" id="portal-decline" style="margin-left:6px">拒绝</button>
+      <button class="ghost" id="portal-cancel" style="margin-left:6px">取消</button>
+    </div>
+    <a id="portal-url" class="small" target="_blank" rel="noopener noreferrer" hidden>打开 Portal 原生管理页</a>
+    <div id="portal-roster"></div>
   </div>
   <div class="card">
     <h2>演示场景</h2>
@@ -125,23 +148,53 @@ function setStatus(id, text, cls) {
   node.textContent = text;
   node.className = cls || '';
 }
+let currentActorId = boot.user.actorId;
+let currentRole = boot.user.role;
+let currentConversationId = boot.conversationId;
+let portalBusy = false;
+let connectBusy = false;
+let pendingPortalId = null;
+let pollTimer = null;
+let identityEpoch = 0;
+
+function applyIdentity(u) {
+  document.getElementById('email').textContent = u.email;
+  document.getElementById('role').textContent = u.role;
+  document.getElementById('actor').textContent = u.actorId;
+  document.getElementById('role-badge').textContent = u.role === 'analyst' ? 'Analyst' : 'Viewer（只读）';
+  document.getElementById('local-badge').hidden = !u.localSimulation;
+  if (u.localSimulation) {
+    document.getElementById('identity-note').textContent = '本地开发身份模拟已启用；不代表 Cloudflare Access 或 DLP 已生效。';
+  } else {
+    document.getElementById('identity-note').textContent = '当前邮箱来自 Access；Portal/上游可能复用浏览器登录，授权时请核对各自账号。';
+  }
+}
+
 function logEvent(action, tool, status) {
   console.info(JSON.stringify({
     demo_event: true,
-    role: boot.user.role,
+    role: currentRole,
+    actorId: currentActorId,
     action: action,
     tool: tool || null,
     status: status || null,
-    conversationId: boot.conversationId || null
+    conversationId: currentConversationId || null
   }));
 }
 
-document.getElementById('email').textContent = boot.user.email;
-document.getElementById('role').textContent = boot.user.role;
-document.getElementById('role-badge').textContent = boot.user.role === 'analyst' ? 'Analyst' : 'Viewer（只读）';
-if (boot.user.localSimulation) {
-  document.getElementById('local-badge').hidden = false;
-  document.getElementById('identity-note').textContent = '本地开发身份模拟已启用；不代表 Cloudflare Access 或 DLP 已生效。';
+applyIdentity(boot.user);
+document.getElementById('conversation-id').textContent = currentConversationId;
+const logoutBtn = document.getElementById('logout-btn');
+if (boot.setup.accessLogoutUrl) {
+  logoutBtn.disabled = false;
+  logoutBtn.addEventListener('click', () => {
+    if (confirm('此操作会退出本 Zero Trust 组织的所有 Access 应用会话，不仅是 Agent；不会删除聊天历史，也不保证撤销 MCP OAuth 授权。确认退出？')) {
+      window.location.assign(boot.setup.accessLogoutUrl);
+    }
+  });
+} else {
+  logoutBtn.textContent = '未接入真实 Access 退出';
+  logoutBtn.disabled = true;
 }
 for (const m of boot.history) addMsg(m.role === 'user' ? 'user' : 'agent', m.content);
 
@@ -156,16 +209,48 @@ for (const s of boot.scenarios) {
 
 let readyForChat = false;
 function refreshSession(s) {
-  const mcpText = s.mcp.connected ? '已连接' : (s.mcp.state === 'authenticating' ? '待授权（将跳转至授权页）' : (s.mcp.state === 'failed' ? '连接失败' : '未连接'));
+  const user = s.user || boot.user;
+  if (user.actorId !== currentActorId || user.role !== currentRole) {
+    identityEpoch++;
+    currentActorId = user.actorId;
+    currentRole = user.role;
+    chat.replaceChildren();
+    timeline.replaceChildren();
+    setStatus('dlp-state', '未验证', 'pending');
+    document.getElementById('dlp-result').textContent = '';
+    document.getElementById('request-id').textContent = '—';
+    document.getElementById('portal-roster').replaceChildren();
+    const urlLink = document.getElementById('portal-url');
+    urlLink.hidden = true;
+    urlLink.removeAttribute('href');
+    document.getElementById('portal-accept').removeAttribute('href');
+    document.getElementById('portal-pending-msg').textContent = '';
+    document.getElementById('portal-pending').hidden = true;
+    pendingPortalId = null;
+    for (const m of (Array.isArray(s.history) ? s.history : [])) {
+      addMsg(m.role === 'user' ? 'user' : 'agent', m.content);
+    }
+  }
+  applyIdentity(user);
+  if (s.conversationId) {
+    currentConversationId = s.conversationId;
+    document.getElementById('conversation-id').textContent = currentConversationId;
+  }
+  const mcpText = s.mcp.connected ? '已连接' : (s.mcp.state === 'authenticating' ? '待授权（将跳转至授权页）' : (s.mcp.state === 'failed' ? '连接失败' : (s.mcp.state === 'connecting' || s.mcp.state === 'discovering' ? '正在建立连接' : '未连接')));
   setStatus('mcp-state', mcpText, s.mcp.connected ? 'ok' : 'pending');
   setStatus('model-state', s.setup.modelConfigured ? '已配置（未经云端确认）' : '未配置', s.setup.modelConfigured ? 'pending' : 'err');
   document.getElementById('dlp-btn').disabled = !s.setup.modelConfigured || dlpBusy;
   setStatus('trace-state', s.setup.tracingWrapped ? 'AI 调用已包装（storeMessages/Tools 关闭）' : '未启用', 'pending');
   const connectBtn = document.getElementById('connect-btn');
-  connectBtn.disabled = !s.setup.mcpConfigured || s.mcp.connected;
+  connectBtn.disabled = !s.setup.mcpConfigured || s.mcp.connected || connectBusy;
   connectBtn.textContent = s.mcp.connected ? 'MCP 已连接' : '连接 MCP（OAuth 授权）';
+  document.getElementById('disconnect-btn').disabled = s.mcp.state === 'disconnected';
   document.getElementById('connect-hint').textContent =
-    s.setup.mcpConfigured ? (s.mcp.state === 'authenticating' ? '等待授权完成，本页将在同窗口跳转。' : '') : 'MCP_SERVER_URL 未配置';
+    !s.setup.mcpConfigured ? 'MCP_SERVER_URL 未配置'
+    : s.mcp.state === 'authenticating' ? '等待授权完成，本页将在同窗口跳转。'
+    : (s.mcp.state === 'connecting' || s.mcp.state === 'discovering') ? '正在建立连接…'
+    : s.mcp.state === 'failed' ? ('连接失败' + (s.mcp.detail ? '：' + s.mcp.detail : ''))
+    : '';
   const tools = Array.isArray(s.tools) ? s.tools : [];
   const expected = Array.isArray(s.expectedTools) ? s.expectedTools : [];
   document.getElementById('tools-line').textContent =
@@ -177,9 +262,102 @@ function refreshSession(s) {
   document.getElementById('composer-hint').textContent = readyForChat ? '' :
     (!s.setup.modelConfigured && !s.mcp.connected ? '模型网关与 MCP 均未就绪，对话不可用。' :
      !s.setup.modelConfigured ? '模型网关未配置，对话不可用。' : 'MCP 未连接，对话不可用。');
+  const portal = s.portal || {};
+  document.getElementById('portal-list-btn').disabled = !s.mcp.connected || !portal.listAvailable || portalBusy;
+  document.getElementById('portal-manage-btn').disabled = !s.mcp.connected || !portal.manageAvailable || portalBusy;
+  document.getElementById('portal-refresh-btn').disabled = !s.mcp.connected || portalBusy;
+  document.getElementById('portal-hint').textContent =
+    s.mcp.connected ? '启用状态不代表认证或连接状态' : '先连接 Portal';
+  renderPortalPending(portal);
+  if (portalBusy || connectBusy || Boolean(portal.pending) ||
+      ['authenticating', 'connecting', 'discovering'].includes(s.mcp.state)) {
+    ensurePolling();
+  }
+}
+
+function renderRoster(servers, truncated) {
+  const box = document.getElementById('portal-roster');
+  box.replaceChildren();
+  for (const srv of (Array.isArray(servers) ? servers : [])) {
+    const line = el('div', 'status-line');
+    line.appendChild(el('span', '', srv.name + ' (' + srv.id + ')'));
+    line.appendChild(el('span', '', srv.enabled === true ? '已启用' : (srv.enabled === false ? '未启用' : '状态未确认')));
+    box.appendChild(line);
+  }
+  if (truncated) box.appendChild(el('p', 'small', '仅显示前 100 条（已截断）'));
+}
+
+function renderPortalPending(portal) {
+  const box = document.getElementById('portal-pending');
+  if (portal && portal.pending) {
+    pendingPortalId = portal.pending.id;
+    document.getElementById('portal-pending-msg').textContent = portal.pending.message;
+    document.getElementById('portal-accept').href = portal.pending.url;
+    box.hidden = false;
+  } else {
+    pendingPortalId = null;
+    document.getElementById('portal-accept').removeAttribute('href');
+    document.getElementById('portal-pending-msg').textContent = '';
+    box.hidden = true;
+  }
+}
+
+async function portalRespond(action) {
+  if (!pendingPortalId) return;
+  const r = await api('/api/portal/respond', { id: pendingPortalId, action: action });
+  if (r.stale) return;
+  loadSession();
+}
+document.getElementById('portal-accept').addEventListener('click', () => { portalRespond('accept'); });
+document.getElementById('portal-decline').addEventListener('click', () => { portalRespond('decline'); });
+document.getElementById('portal-cancel').addEventListener('click', () => { portalRespond('cancel'); });
+
+async function portalAction(label, path, done) {
+  if (portalBusy) return;
+  portalBusy = true;
+  ensurePolling();
+  try {
+    const r = await api(path, {});
+    if (r.stale) return;
+    const { status, data } = r;
+    const summary = data && data.status ? data.status : ('HTTP ' + status);
+    addEvent(label + ' → ' + summary, data && data.status === 'ok' ? 'ok' : 'denied');
+    logEvent(label, 'mcp', summary);
+    if (done) done(status, data);
+  } finally {
+    portalBusy = false;
+    loadSession();
+  }
+}
+document.getElementById('portal-list-btn').addEventListener('click', () =>
+  portalAction('读取 Portal 服务器列表', '/api/portal/list', (status, data) => {
+    if (data && data.status === 'ok') renderRoster(data.servers, data.truncated);
+  }));
+document.getElementById('portal-manage-btn').addEventListener('click', () =>
+  portalAction('管理/重新授权 MCP', '/api/portal/manage', (status, data) => {
+    const link = document.getElementById('portal-url');
+    if (data && data.status === 'ok' && data.authorizationUrl) {
+      link.href = data.authorizationUrl;
+      link.hidden = false;
+    } else {
+      link.hidden = true;
+    }
+  }));
+document.getElementById('portal-refresh-btn').addEventListener('click', () =>
+  portalAction('重新读取工具目录', '/api/portal/refresh', (status, data) => {
+    if (data && data.status === 'ok') renderRoster(data.servers, data.truncated);
+  }));
+
+function ensurePolling() {
+  if (pollTimer) return;
+  pollTimer = setTimeout(async () => {
+    pollTimer = null;
+    await loadSession();
+  }, 1500);
 }
 
 async function api(path, body) {
+  const epoch = identityEpoch;
   const resp = await fetch(path, {
     method: body === undefined ? 'GET' : 'POST',
     headers: body === undefined ? {} : { 'content-type': 'application/json' },
@@ -187,11 +365,19 @@ async function api(path, body) {
   });
   let data = null;
   try { data = await resp.json(); } catch {}
-  return { status: resp.status, data };
+  if (epoch !== identityEpoch) {
+    return { status: resp.status, data: null, stale: true };
+  }
+  if (data && data.requestId) {
+    document.getElementById('request-id').textContent = data.requestId;
+  }
+  return { status: resp.status, data, stale: false };
 }
 
 async function loadSession() {
-  const { status, data } = await api('/api/session');
+  const r = await api('/api/session');
+  if (r.stale) return;
+  const { status, data } = r;
   if (status === 200 && data) {
     refreshSession(data);
   } else {
@@ -200,27 +386,54 @@ async function loadSession() {
 }
 
 document.getElementById('connect-btn').addEventListener('click', async () => {
-  addEvent('请求 MCP 连接…', '');
-  logEvent('connect', 'mcp', 'requested');
-  const { status, data } = await api('/api/connect', {});
-  if (data && data.authUrl) {
-    addEvent('需要 OAuth 授权，同窗口跳转授权页面', 'ok');
-    logEvent('connect', 'mcp', 'redirecting');
-    window.location.assign(data.authUrl);
-    return;
-  } else if (data && data.status === 'ready') {
-    addEvent('MCP 已连接', 'ok');
-    logEvent('connect', 'mcp', 'ready');
-  } else {
-    addEvent('连接失败（HTTP ' + status + '）', 'denied');
+  if (connectBusy) return;
+  connectBusy = true;
+  ensurePolling();
+  try {
+    addEvent('请求 MCP 连接…', '');
+    logEvent('connect', 'mcp', 'requested');
+    const r = await api('/api/connect', {});
+    if (r.stale) return;
+    const { status, data } = r;
+    if (data && data.authUrl) {
+      addEvent('需要 OAuth 授权，同窗口跳转授权页面', 'ok');
+      logEvent('connect', 'mcp', 'redirecting');
+      window.location.assign(data.authUrl);
+      return;
+    } else if (data && data.status === 'ready') {
+      addEvent('MCP 已连接', 'ok');
+      logEvent('connect', 'mcp', 'ready');
+    } else {
+      addEvent('连接失败（HTTP ' + status + '）', 'denied');
+      logEvent('connect', 'mcp', 'failed');
+    }
+  } catch (e) {
+    addEvent('连接失败（网络错误）', 'denied');
     logEvent('connect', 'mcp', 'failed');
+  } finally {
+    connectBusy = false;
+    loadSession();
   }
+});
+
+document.getElementById('disconnect-btn').addEventListener('click', async () => {
+  if (!confirm('删除此 Agent 的 MCP 连接及本地授权缓存；不删除聊天历史，也不撤销 Portal/上游已有授权。')) return;
+  addEvent('断开 MCP 连接…', '');
+  logEvent('disconnect', 'mcp', 'requested');
+  const r = await api('/api/disconnect', { confirm: true });
+  if (r.stale) return;
+  const { status, data } = r;
+  const ok = status === 200 && data && data.status === 'disconnected';
+  addEvent(ok ? 'MCP 已断开' : '断开失败（HTTP ' + status + '）', ok ? 'ok' : 'denied');
+  logEvent('disconnect', 'mcp', ok ? 'disconnected' : 'failed');
   loadSession();
 });
 
 async function toolTest(tool, args) {
   addEvent('权限测试 ' + tool + ' …', '');
-  const { status, data } = await api('/api/tool-test', { tool, args });
+  const r = await api('/api/tool-test', { tool, args });
+  if (r.stale) return;
+  const { status, data } = r;
   const summary = data && data.status ? data.status : ('HTTP ' + status);
   logEvent('tool-test', tool, summary);
   addEvent(tool + ' → ' + summary + (data && data.detail ? '：' + data.detail : ''), data && data.status === 'ok' ? 'ok' : 'denied');
@@ -236,7 +449,9 @@ document.getElementById('dlp-btn').addEventListener('click', async () => {
   setStatus('dlp-state', '测试中…', 'pending');
   document.getElementById('dlp-result').textContent = '';
   logEvent('dlp-test', null, 'requested');
-  const { status, data } = await api('/api/dlp-test', {});
+  const r = await api('/api/dlp-test', {});
+  if (r.stale) { dlpBusy = false; return; }
+  const { status, data } = r;
   const box = document.getElementById('dlp-result');
   if (data && data.dlp) {
     const d = data.dlp;
@@ -261,7 +476,9 @@ async function send() {
   input.value = '';
   addMsg('user', message);
   try {
-    const { status, data } = await api('/api/chat', { message });
+    const r = await api('/api/chat', { message });
+    if (r.stale) { sending = false; return; }
+    const { status, data } = r;
     if (data && data.events) {
       for (const e of data.events) addEvent(e.text, e.kind);
     }
@@ -295,14 +512,19 @@ loadSession();
 </html>`;
 
 export interface BootstrapData {
-  user: { email: string; role: string; localSimulation: boolean };
+  user: { email: string; role: string; localSimulation: boolean; actorId: string };
   history: { role: string; content: string }[];
   scenarios: readonly { id: string; label: string; message: string }[];
   mcp: { connected: boolean; state: string };
   tools: string[];
   expectedTools: string[];
   conversationId: string;
-  setup: { mcpConfigured: boolean; modelConfigured: boolean; tracingWrapped: boolean };
+  portal?: {
+    listAvailable: boolean;
+    manageAvailable: boolean;
+    pending: { id: string; url: string; message: string; expiresAt: number } | null;
+  };
+  setup: { mcpConfigured: boolean; modelConfigured: boolean; tracingWrapped: boolean; accessLogoutUrl: string | null };
 }
 
 export function renderPage(bootstrap: BootstrapData, nonce: string): string {

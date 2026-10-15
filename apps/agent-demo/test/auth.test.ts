@@ -112,3 +112,27 @@ describe("Access JWT authentication", () => {
     expect(cbUnknown.status).toBe(404);
   });
 });
+
+import { sanitizeDiagnostic } from "../src/shared/access.js";
+
+describe("sanitizeDiagnostic", () => {
+  it("redacts secrets, JWTs, emails, auth URL params, and falls back generic", () => {
+    expect(
+      sanitizeDiagnostic("connect failed token=abcd123 for user@corp.example")
+    ).toBe("connect failed token=[REDACTED] for [EMAIL]");
+    expect(
+      sanitizeDiagnostic("bad header Bearer AAA.BBB.CCC", ["AAA.BBB.CCC"])
+    ).toBe("bad header [REDACTED]");
+    expect(sanitizeDiagnostic(new Error("jwt eyJhbGciOi.xxx.yyy rejected"))).not.toContain(
+      "eyJhbGciOi"
+    );
+    const url = sanitizeDiagnostic(
+      "GET https://portal-demo.righttu.uk/authorize?state=secretstate&code=verysecret"
+    );
+    expect(url).not.toContain("secretstate");
+    expect(url).not.toContain("verysecret");
+    expect(url).toContain("/authorize");
+    expect(sanitizeDiagnostic({ weird: true })).toBe("MCP 连接失败");
+    expect(sanitizeDiagnostic(42)).toBe("MCP 连接失败");
+  });
+});

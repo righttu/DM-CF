@@ -1,7 +1,15 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { captureDlpOutcome, type DlpOutcome } from "../src/agent/dlp.js";
 import { __setModelFetchForTests } from "../src/agent/index.js";
+import { sha256Hex } from "../src/shared/access.js";
 import { ANALYST_EMAIL, authedFetch, connectAgentMcp, signJwt } from "./helpers.js";
+
+function metadataHeader(input: unknown, init: unknown): string | null {
+  const headers = (init as { headers?: HeadersInit } | undefined)?.headers;
+  const fromInit = headers ? new Headers(headers).get("cf-aig-metadata") : null;
+  if (fromInit) return fromInit;
+  return input instanceof Request ? input.headers.get("cf-aig-metadata") : null;
+}
 
 async function collect(resp: Response): Promise<DlpOutcome[]> {
   const sink: DlpOutcome[] = [];
@@ -312,7 +320,9 @@ describe("DLP outcome classification", () => {
       message: "Request content blocked due to DLP policy violations",
       description: "Request content blocked due to DLP policy violations"
     };
-    __setModelFetchForTests(async () => {
+    const metaCalls: (string | null)[] = [];
+    __setModelFetchForTests(async (input, init) => {
+      metaCalls.push(metadataHeader(input, init));
       return new Response(JSON.stringify(body), {
         status: 424,
         headers: { "content-type": "application/json", "cf-aig-log-id": "log-live-424" }
@@ -339,9 +349,23 @@ describe("DLP outcome classification", () => {
     expect(sessionData.history).toHaveLength(0);
 
     const dlpTest = await authedFetch("/api/dlp-test", { jwt, method: "POST", body: {} });
-    const dlpData = (await dlpTest.json()) as { dlp?: { action: string }; error?: string };
+    const dlpData = (await dlpTest.json()) as { dlp?: { action: string }; error?: string; requestId?: string };
     expect(dlpData.dlp?.action).toBe("BLOCK");
     expect(dlpData.error).toBeUndefined();
+    expect(dlpData.requestId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    );
+
+    const dlpMeta = JSON.parse(metaCalls[1]!) as Record<string, string>;
+    expect(Object.keys(dlpMeta).sort()).toEqual(
+      ["action", "actor_id", "conversation_id", "request_id", "role"].sort()
+    );
+    expect(dlpMeta.action).toBe("dlp-test");
+    expect(dlpMeta.actor_id).toBe(await sha256Hex("sub-dlp-424"));
+    expect(dlpMeta.request_id).toBe(dlpData.requestId);
+    expect(JSON.stringify(dlpMeta)).not.toContain("CF_DEMO_SECRET");
+    expect(JSON.stringify(dlpMeta)).not.toContain("@");
+    expect(JSON.stringify(dlpMeta)).not.toContain("test-aig-token");
   });
 
   it("generic gateway errors are not labelled DLP", async () => {

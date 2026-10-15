@@ -1,4 +1,5 @@
 import { Agent, getAgentByName } from "agents";
+import type { ElicitRequest, ElicitResult } from "agents/mcp/client";
 import { wrapAISDK } from "agents/observability/ai";
 import * as ai from "ai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
@@ -9,9 +10,10 @@ import {
   isLocalEnvironment,
   isLoopbackRequest,
   looksLikePlaceholder,
+  sanitizeDiagnostic,
   sha256Hex,
   type AccessEnv,
-  type AccessIdentity,
+  type AuditContext,
   type DemoRole
 } from "../shared/access.js";
 import { readBoundedText } from "../shared/body.js";
@@ -55,10 +57,25 @@ const DEFAULT_MODEL_ID = "qwen3.8-2.4t-a95b";
 const OAUTH_STATE_TTL = 1800;
 const OAUTH_CALLBACK_PATH = "mcp-oauth-callback";
 
+interface PendingPortal {
+  id: string;
+  url: string;
+  message: string;
+  expiresAt: number;
+}
+
 interface AgentStateShape {
   history: { role: "user" | "assistant"; content: string }[];
   conversationId: string;
   lastRole?: DemoRole;
+  pendingPortal?: PendingPortal | null;
+  lastMcpFailure?: string | null;
+}
+
+interface PortalServerRow {
+  id: string;
+  name: string;
+  enabled: boolean | null;
 }
 
 interface ChatEvent {
@@ -104,6 +121,12 @@ async function readJsonObject(
 function configuredOrigin(env: AgentDemoEnv): string | undefined {
   if (!env.PUBLIC_ORIGIN || looksLikePlaceholder(env.PUBLIC_ORIGIN)) return undefined;
   return env.PUBLIC_ORIGIN;
+}
+
+function accessLogoutUrl(env: AgentDemoEnv): string | null {
+  if (isLocalEnvironment(env)) return null;
+  const origin = configuredOrigin(env);
+  return origin ? `${origin}/cdn-cgi/access/logout` : null;
 }
 
 function requestHostAllowed(request: Request, env: AgentDemoEnv): boolean {
@@ -159,6 +182,130 @@ function remoteName(env: AgentDemoEnv, canonical: CanonicalTool): string | null 
   return map[canonical] ?? canonical;
 }
 
+const REQUEST_UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function firstTextBlock(result: unknown): string | null {
+  const content = (result as { content?: unknown })?.content;
+  if (!Array.isArray(content)) return null;
+  const block = content.find(
+    (c) => (c as { type?: string } | null)?.type === "text"
+  ) as { text?: unknown } | undefined;
+  return typeof block?.text === "string" ? block.text : null;
+}
+
+function decodePortalServers(
+  result: unknown
+): { servers: PortalServerRow[]; truncated: boolean } | { error: "invalid_catalog" } {
+  let root: unknown = (result as { structuredContent?: unknown })
+    ?.structuredContent;
+  if (root === undefined) {
+    const text = firstTextBlock(result);
+    if (text === null) return { error: "invalid_catalog" };
+    try {
+      root = JSON.parse(text);
+    } catch {
+      return { error: "invalid_catalog" };
+    }
+  }
+  const list = Array.isArray(root)
+    ? root
+    : root && typeof root === "object"
+      ? (root as { servers?: unknown }).servers
+      : undefined;
+  if (!Array.isArray(list)) return { error: "invalid_catalog" };
+  const rows: PortalServerRow[] = [];
+  for (const entry of list.slice(0, 100)) {
+    if (!entry || typeof entry !== "object") return { error: "invalid_catalog" };
+    const e = entry as {
+      id?: unknown;
+      server_id?: unknown;
+      name?: unknown;
+      toggled?: unknown;
+      enabled?: unknown;
+    };
+    const id =
+      typeof e.id === "string" && e.id.length > 0
+        ? e.id
+        : typeof e.server_id === "string" && e.server_id.length > 0
+          ? e.server_id
+          : null;
+    if (!id || id.length > 128) return { error: "invalid_catalog" };
+    if (typeof e.name !== "string" || e.name.length === 0 || e.name.length > 200) {
+      return { error: "invalid_catalog" };
+    }
+    const enabled =
+      typeof e.toggled === "boolean"
+        ? e.toggled
+        : typeof e.enabled === "boolean"
+          ? e.enabled
+          : null;
+    rows.push({ id, name: e.name, enabled });
+  }
+  return { servers: rows, truncated: list.length > 100 };
+}
+
+function validatePortalManageUrl(raw: string, env: AgentDemoEnv): string | null {
+  if (raw.length > 4096) return null;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.username || url.password) return null;
+  const server = mcpServerUrlAllowed(env);
+  if (!server) return null;
+  let serverOrigin: string;
+  try {
+    serverOrigin = new URL(server).origin;
+  } catch {
+    return null;
+  }
+  if (url.origin !== serverOrigin) return null;
+  if (url.pathname !== "/authorize") return null;
+  if (url.protocol === "https:") return url.toString();
+  if (
+    url.protocol === "http:" &&
+    isLocalEnvironment(env) &&
+    ["localhost", "127.0.0.1", "::1"].includes(url.hostname)
+  ) {
+    return url.toString();
+  }
+  return null;
+}
+
+function decodePortalAuthorizationUrl(
+  result: unknown,
+  env: AgentDemoEnv
+): string | null {
+  const sc = result as {
+    structuredContent?: { url?: unknown; authorization_url?: unknown };
+  };
+  let candidate: unknown =
+    sc?.structuredContent?.url ?? sc?.structuredContent?.authorization_url;
+  if (typeof candidate !== "string") {
+    const text = firstTextBlock(result);
+    if (text !== null) {
+      try {
+        const parsed = JSON.parse(text) as {
+          url?: unknown;
+          authorization_url?: unknown;
+        };
+        candidate = parsed?.url ?? parsed?.authorization_url;
+      } catch {
+      }
+      if (typeof candidate !== "string") {
+        const match = /https?:\/\/[^\s<>"'`)\]]+/.exec(text);
+        if (match) candidate = match[0].replace(/[>*_.,;!?'"`]+$/u, "");
+      }
+    }
+  }
+  return typeof candidate === "string"
+    ? validatePortalManageUrl(candidate, env)
+    : null;
+}
+
 const SINGLE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
 function modelConfigured(env: AgentDemoEnv): boolean {
@@ -174,7 +321,13 @@ function modelConfigured(env: AgentDemoEnv): boolean {
   return SINGLE_SEGMENT.test(ACCOUNT_ID) && SINGLE_SEGMENT.test(GATEWAY_ID);
 }
 
-function buildChatModel(env: AgentDemoEnv, dlpSink: DlpOutcome[]) {
+function buildChatModel(
+  env: AgentDemoEnv,
+  dlpSink: DlpOutcome[],
+  context: AuditContext,
+  conversationId: string,
+  action: "chat" | "dlp-test"
+) {
   if (!modelConfigured(env)) return null;
   const baseURL = `https://gateway.ai.cloudflare.com/v1/${env.ACCOUNT_ID}/${env.GATEWAY_ID}/custom-dashscope/compatible-mode/v1`;
   const innerFetch: ModelFetch = modelFetchOverride ?? fetch.bind(globalThis);
@@ -184,7 +337,14 @@ function buildChatModel(env: AgentDemoEnv, dlpSink: DlpOutcome[]) {
     apiKey: env.DASHSCOPE_API_KEY,
     headers: {
       "cf-aig-authorization": `Bearer ${env.CF_AIG_TOKEN}`,
-      "cf-aig-skip-cache": "true"
+      "cf-aig-skip-cache": "true",
+      "cf-aig-metadata": JSON.stringify({
+        actor_id: context.actorId,
+        conversation_id: conversationId,
+        request_id: context.requestId,
+        role: context.role,
+        action
+      })
     },
     fetch: async (input, init) => {
       const resp = await innerFetch(input, init);
@@ -203,13 +363,13 @@ function buildChatModel(env: AgentDemoEnv, dlpSink: DlpOutcome[]) {
 
 function buildTools(
   agent: ResearchAgent,
-  role: DemoRole,
+  context: AuditContext,
   events: ChatEvent[]
 ): ai.ToolSet {
   const execute = (canonical: CanonicalTool) => async (args: Record<string, unknown>) => {
     events.push({ text: `工具调用 ${canonical}`, kind: "" });
-    const result = await agent.callRemoteTool(canonical, args, role);
-    agent.audit("tool-execute", canonical, result.status, role);
+    const result = await agent.callRemoteTool(canonical, args, context);
+    agent.audit(context, "tool-execute", canonical, result.status);
     if (result.status === "ok") {
       events.push({ text: `工具返回 ${canonical}`, kind: "ok" });
     } else {
@@ -220,7 +380,7 @@ function buildTools(
     }
     return result.payload ?? { error: result.status };
   };
-  const available = new Set(agent.availableCanonical(role));
+  const available = new Set(agent.availableCanonical(context.role));
   const tools: ai.ToolSet = {};
   if (available.has("list_demo_stocks")) {
     tools.list_demo_stocks = ai.tool({
@@ -251,15 +411,131 @@ function buildTools(
 export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
   initialState: AgentStateShape = { history: [], conversationId: "" };
   private busy = false;
+  private portalElicits = new Map<
+    string,
+    {
+      finish: (result: ElicitResult) => void;
+      timer: ReturnType<typeof setTimeout>;
+      abort: () => void;
+      signal?: AbortSignal;
+    }
+  >();
+
+  private livePending(): PendingPortal | null {
+    const pending = this.state.pendingPortal ?? null;
+    if (!pending) return null;
+    if (pending.expiresAt <= Date.now()) {
+      this.portalElicits
+        .get(pending.id)
+        ?.finish({ action: "cancel" } as ElicitResult);
+      if (this.state.pendingPortal) {
+        this.setState({ ...this.state, pendingPortal: null });
+      }
+      return null;
+    }
+    if (!this.portalElicits.has(pending.id)) {
+      this.setState({ ...this.state, pendingPortal: null });
+      return null;
+    }
+    return pending;
+  }
+
+  private cancelOwnPending(): void {
+    const pending = this.state.pendingPortal;
+    if (!pending) return;
+    const entry = this.portalElicits.get(pending.id);
+    if (entry) {
+      entry.finish({ action: "cancel" } as ElicitResult);
+    }
+    if (this.state.pendingPortal) {
+      this.setState({ ...this.state, pendingPortal: null });
+    }
+  }
 
   onStart(): void {
     const origin = configuredOrigin(this.env) ?? "";
-    if (origin) {
-      this.mcp.configureOAuthCallback({
-        successRedirect: origin,
-        errorRedirect: origin
-      });
+    this.mcp.configureOAuthCallback({
+      customHandler: (result) => {
+        if (!result.authSuccess) {
+          this.setState({
+            ...this.state,
+            lastMcpFailure: this.diagnostic(result.authError)
+          });
+          console.info(
+            JSON.stringify({
+              event: "mcp_audit",
+              action: "connect",
+              tool: "unknown",
+              status: "oauth_callback_failed",
+              actorId: this.name ?? "unknown"
+            })
+          );
+        }
+        if (!origin) {
+          return json({ error: "oauth_callback_failed" }, 400);
+        }
+        return new Response(null, {
+          status: 302,
+          headers: { location: origin }
+        });
+      }
+    });
+    this.mcp.configureElicitationHandlers({
+      url: (request, serverId, signal) =>
+        this.queuePortalUrl(request, serverId, signal)
+    });
+    const pending = this.state.pendingPortal;
+    if (
+      pending &&
+      (pending.expiresAt <= Date.now() || !this.portalElicits.has(pending.id))
+    ) {
+      this.setState({ ...this.state, pendingPortal: null });
     }
+  }
+
+  private queuePortalUrl(
+    request: ElicitRequest,
+    serverId: string,
+    signal?: AbortSignal
+  ): Promise<ElicitResult> {
+    const declined = Promise.resolve({ action: "decline" } as ElicitResult);
+    if (signal?.aborted) {
+      return Promise.resolve({ action: "cancel" } as ElicitResult);
+    }
+    if (serverId !== "research") return declined;
+    const params = (request as {
+      params?: { mode?: string; url?: unknown; message?: unknown };
+    })?.params;
+    if (params?.mode !== "url" || typeof params.url !== "string") return declined;
+    const url = validatePortalManageUrl(params.url, this.env);
+    if (!url) return declined;
+    if (this.state.pendingPortal) return declined;
+    const id = crypto.randomUUID();
+    const message =
+      typeof params.message === "string" && params.message.length > 0
+        ? params.message.slice(0, 400)
+        : "Portal 请求授权";
+    this.setState({
+      ...this.state,
+      pendingPortal: { id, url, message, expiresAt: Date.now() + 55_000 }
+    });
+    return new Promise<ElicitResult>((resolve) => {
+      const finish = (result: ElicitResult) => {
+        const entry = this.portalElicits.get(id);
+        if (!entry) return;
+        clearTimeout(entry.timer);
+        entry.signal?.removeEventListener("abort", entry.abort);
+        this.portalElicits.delete(id);
+        if (this.state.pendingPortal?.id === id) {
+          this.setState({ ...this.state, pendingPortal: null });
+        }
+        resolve(result);
+      };
+      const abort = () => finish({ action: "cancel" } as ElicitResult);
+      const timer = setTimeout(abort, 55_000);
+      this.portalElicits.set(id, { finish, timer, abort, signal });
+      signal?.addEventListener("abort", abort, { once: true });
+    });
   }
 
   async onRequest(request: Request): Promise<Response> {
@@ -287,10 +563,12 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
 
   private syncRole(role: DemoRole): void {
     if (this.state.lastRole !== role) {
+      if (this.state.lastRole !== undefined) this.cancelOwnPending();
       this.setState({
         history: [],
         conversationId: crypto.randomUUID(),
-        lastRole: role
+        lastRole: role,
+        pendingPortal: null
       });
     }
   }
@@ -307,7 +585,12 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     return this.getMcpServers().servers?.["research"];
   }
 
-  mcpStatus(): { connected: boolean; state: string; error: string | null } {
+  mcpStatus(): {
+    connected: boolean;
+    state: string;
+    error: string | null;
+    detail: string | null;
+  } {
     const entry = this.researchRegistration();
     const state = entry?.state != null ? String(entry.state) : "disconnected";
     const url = mcpServerUrlAllowed(this.env);
@@ -315,8 +598,16 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     return {
       connected: state === "ready" && urlMatches,
       state: !entry || urlMatches ? state : "stale",
-      error: entry?.error ? "mcp_error" : null
+      error: entry?.error ? "mcp_error" : null,
+      detail: entry?.error ? this.diagnostic(entry.error) : null
     };
+  }
+
+  private diagnostic(cause: unknown): string {
+    return sanitizeDiagnostic(cause, [
+      this.env.DASHSCOPE_API_KEY,
+      this.env.CF_AIG_TOKEN
+    ]);
   }
 
   availableCanonical(role: DemoRole): string[] {
@@ -332,56 +623,291 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
 
   async getSessionData(role: DemoRole) {
     this.syncRole(role);
+    const names = this.discoveredRemoteNames();
+    const mcp = this.mcpStatus();
+    const connected = mcp.connected;
     return {
       history: this.state.history,
       conversationId: this.ensureConversationId(),
-      mcp: this.mcpStatus(),
+      mcp: {
+        ...mcp,
+        detail: mcp.detail ?? this.state.lastMcpFailure ?? null
+      },
       tools: this.availableCanonical(role),
       expectedTools:
-        role === "analyst" ? [...CANONICAL_TOOLS] : ["list_demo_stocks", "get_latest_analysis"]
+        role === "analyst" ? [...CANONICAL_TOOLS] : ["list_demo_stocks", "get_latest_analysis"],
+      portal: {
+        listAvailable: connected && names.has("portal_list_servers"),
+        manageAvailable: connected && names.has("portal_toggle_servers"),
+        pending: this.livePending()
+      }
     };
   }
 
-  async connectMcp(): Promise<{ status: string; authUrl?: string; state?: string }> {
+  private clearMcpFailure(): void {
+    if (this.state.lastMcpFailure) {
+      this.setState({ ...this.state, lastMcpFailure: null });
+    }
+  }
+
+  async connectMcp(
+    context: AuditContext
+  ): Promise<{
+    status: string;
+    authUrl?: string;
+    state?: string;
+    error?: string;
+    detail?: string;
+  }> {
+    this.syncRole(context.role);
+    const finish = <T extends { status: string }>(result: T): T => {
+      this.audit(context, "connect", "research", result.status, "mcp_audit");
+      return result;
+    };
+    const failedResult = (cause: unknown) =>
+      finish({
+        status: "failed",
+        error: "mcp_connect_failed",
+        detail: this.diagnostic(cause)
+      });
+    const authResult = (authUrl: string | undefined) => {
+      let state: string | undefined;
+      try {
+        state = authUrl
+          ? (new URL(authUrl).searchParams.get("state") ?? undefined)
+          : undefined;
+      } catch {
+        state = undefined;
+      }
+      if (!authUrl || !state) {
+        return failedResult("missing_authorization_url");
+      }
+      return finish({ status: "authenticating", authUrl, state });
+    };
     const url = mcpServerUrlAllowed(this.env);
-    if (!url) return { status: "unconfigured" };
+    if (!url) return finish({ status: "unconfigured" });
     const origin = configuredOrigin(this.env);
     if (!origin && !(isLocalEnvironment(this.env))) {
-      return { status: "unconfigured" };
+      return finish({ status: "unconfigured" });
     }
     const callbackHost =
       origin ??
       (isLocalEnvironment(this.env) ? "http://localhost:8787" : "");
     const existing = this.mcpStatus();
-    if (existing.connected) return { status: "ready" };
+    if (existing.connected) {
+      this.clearMcpFailure();
+      return finish({ status: "ready" });
+    }
     const registered = this.researchRegistration();
+    if (registered && registered.server_url === url) {
+      switch (existing.state) {
+        case "connecting":
+        case "discovering":
+          return finish({ status: "connecting" });
+        case "failed":
+          try {
+            const reconnect = (await this.mcp.connectToServer("research")) as {
+              state: string;
+              authUrl?: string;
+              error?: string;
+            };
+            if (reconnect.state === "authenticating" && reconnect.authUrl) {
+              return authResult(reconnect.authUrl);
+            }
+            if (reconnect.state === "connected") {
+              let discovered: { success?: boolean; error?: unknown } | undefined;
+              try {
+                discovered = (await this.mcp.discoverIfConnected(
+                  "research"
+                )) as { success?: boolean; error?: unknown } | undefined;
+              } catch (e) {
+                return failedResult(e);
+              }
+              if (discovered?.success) {
+                this.clearMcpFailure();
+                return finish({ status: "ready" });
+              }
+              return failedResult(discovered?.error);
+            }
+            if (
+              reconnect.state === "connecting" ||
+              reconnect.state === "discovering"
+            ) {
+              return finish({ status: "connecting" });
+            }
+            return failedResult(reconnect.error);
+          } catch (e) {
+            return failedResult(e);
+          }
+      }
+    }
     if (registered && registered.server_url !== url) {
       await this.removeMcpServer("research");
     }
-    const result = await this.addMcpServer("research", url, {
-      id: "research",
-      callbackHost,
-      callbackPath: OAUTH_CALLBACK_PATH
-    });
-    if (result.state === "authenticating") {
-      const authUrl = result.authUrl;
-      let state: string | undefined;
-      try {
-        state = new URL(authUrl).searchParams.get("state") ?? undefined;
-      } catch {
-        state = undefined;
+    try {
+      const result = await this.addMcpServer("research", url, {
+        id: "research",
+        callbackHost,
+        callbackPath: OAUTH_CALLBACK_PATH
+      });
+      if (result.state === "authenticating") {
+        return authResult(result.authUrl);
       }
-      return { status: "authenticating", authUrl, state };
+      this.clearMcpFailure();
+      return finish({ status: "ready" });
+    } catch (e) {
+      return failedResult(e);
     }
-    return { status: "ready" };
+  }
+
+  async disconnectMcp(
+    context: AuditContext
+  ): Promise<{ status: "disconnected" }> {
+    this.cancelOwnPending();
+    if (this.researchRegistration()) {
+      await this.removeMcpServer("research");
+    }
+    this.audit(context, "disconnect", "research", "disconnected", "mcp_audit");
+    return { status: "disconnected" };
+  }
+
+  private portalMeta(context: AuditContext): Record<string, string> {
+    return {
+      "uk.righttu.demo/request_id": context.requestId,
+      "uk.righttu.demo/conversation_id": this.ensureConversationId()
+    };
+  }
+
+  async listPortalServers(context: AuditContext): Promise<
+    | { status: "requires_connect" | "unsupported" | "error" }
+    | { status: "ok"; servers: PortalServerRow[]; truncated: boolean }
+  > {
+    if (!this.mcpStatus().connected) return { status: "requires_connect" };
+    if (!this.discoveredRemoteNames().has("portal_list_servers")) {
+      return { status: "unsupported" };
+    }
+    let result: unknown;
+    try {
+      result = await this.mcp.callTool({
+        serverId: "research",
+        name: "portal_list_servers",
+        arguments: {},
+        _meta: this.portalMeta(context)
+      });
+    } catch {
+      this.audit(context, "portal-list", "research", "error", "mcp_audit");
+      return { status: "error" };
+    }
+    let decoded: ReturnType<typeof decodePortalServers>;
+    try {
+      decoded = (result as { isError?: boolean })?.isError
+        ? { error: "invalid_catalog" }
+        : decodePortalServers(result);
+    } catch {
+      decoded = { error: "invalid_catalog" };
+    }
+    if ("error" in decoded) {
+      this.audit(context, "portal-list", "research", "error", "mcp_audit");
+      return { status: "error" };
+    }
+    this.audit(context, "portal-list", "research", "ok", "mcp_audit");
+    return {
+      status: "ok",
+      servers: decoded.servers,
+      truncated: decoded.truncated
+    };
+  }
+
+  async managePortalServers(context: AuditContext): Promise<
+    | { status: "requires_connect" | "unsupported" | "error" }
+    | { status: "ok"; authorizationUrl: string }
+  > {
+    this.syncRole(context.role);
+    if (!this.mcpStatus().connected) return { status: "requires_connect" };
+    if (!this.discoveredRemoteNames().has("portal_toggle_servers")) {
+      return { status: "unsupported" };
+    }
+    let result: unknown;
+    try {
+      result = await this.mcp.callTool({
+        serverId: "research",
+        name: "portal_toggle_servers",
+        arguments: {},
+        _meta: this.portalMeta(context)
+      });
+    } catch {
+      this.audit(context, "portal-manage", "research", "error", "mcp_audit");
+      return { status: "error" };
+    }
+    const url = (result as { isError?: boolean })?.isError
+      ? null
+      : decodePortalAuthorizationUrl(result, this.env);
+    if (!url) {
+      this.audit(context, "portal-manage", "research", "error", "mcp_audit");
+      return { status: "error" };
+    }
+    this.audit(context, "portal-manage", "research", "ok", "mcp_audit");
+    return { status: "ok", authorizationUrl: url };
+  }
+
+  async refreshPortal(context: AuditContext): Promise<
+    | { status: "requires_connect" | "unsupported" | "error" }
+    | { status: "ok"; servers: PortalServerRow[]; truncated: boolean }
+  > {
+    if (!this.mcpStatus().connected) return { status: "requires_connect" };
+    let discovered: { success?: boolean; error?: unknown } | undefined;
+    try {
+      discovered = (await this.mcp.discoverIfConnected("research")) as
+        | { success?: boolean; error?: unknown }
+        | undefined;
+    } catch {
+      this.audit(context, "portal-refresh", "research", "error", "mcp_audit");
+      return { status: "error" };
+    }
+    if (!discovered?.success) {
+      this.audit(context, "portal-refresh", "research", "error", "mcp_audit");
+      return { status: "error" };
+    }
+    const listed = await this.listPortalServers(context);
+    this.audit(
+      context,
+      "portal-refresh",
+      "research",
+      listed.status,
+      "mcp_audit"
+    );
+    return listed;
+  }
+
+  async respondPortalRequest(
+    id: unknown,
+    action: unknown,
+    context: AuditContext
+  ): Promise<{ status: "resolved" | "invalid" | "not_found" }> {
+    if (
+      typeof action !== "string" ||
+      !["accept", "decline", "cancel"].includes(action) ||
+      typeof id !== "string" ||
+      !REQUEST_UUID_PATTERN.test(id)
+    ) {
+      return { status: "invalid" };
+    }
+    const pending = this.livePending();
+    const entry = pending ? this.portalElicits.get(pending.id) : undefined;
+    if (!pending || pending.id !== id || !entry) {
+      return { status: "not_found" };
+    }
+    entry.finish({ action } as ElicitResult);
+    this.audit(context, "portal-respond", "research", action, "mcp_audit");
+    return { status: "resolved" };
   }
 
   async callRemoteTool(
     canonical: CanonicalTool,
     args: Record<string, unknown>,
-    role: DemoRole
+    context: AuditContext
   ): Promise<{ status: "ok" | "denied" | "unavailable" | "error"; detail?: string; payload?: unknown }> {
-    if (role !== "analyst" && canonical === "read_research_document") {
+    if (context.role !== "analyst" && canonical === "read_research_document") {
       return { status: "denied", detail: "viewer 无权访问研究文档" };
     }
     if (!CANONICAL_TOOLS.includes(canonical)) {
@@ -398,7 +924,8 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
       const result = (await this.mcp.callTool({
         serverId: "research",
         name: remote,
-        arguments: args
+        arguments: args,
+        _meta: this.portalMeta(context)
       })) as {
         isError?: boolean;
         structuredContent?: unknown;
@@ -444,15 +971,24 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
       : null;
   }
 
-  audit(action: string, tool: string, status: string, role: DemoRole): void {
+  audit(
+    context: AuditContext,
+    action: string,
+    tool: string,
+    status: string,
+    event: "tool_audit" | "mcp_audit" = "tool_audit"
+  ): void {
     const canonical = CANONICAL_TOOLS.includes(tool as CanonicalTool) ? tool : "unknown";
     console.info(
       JSON.stringify({
-        event: "tool_audit",
+        event,
         action,
         tool: canonical,
         status,
-        role,
+        role: context.role,
+        actorId: context.actorId,
+        requestId: context.requestId,
+        identitySource: context.identitySource,
         conversationId: this.ensureConversationId()
       })
     );
@@ -461,45 +997,48 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
   async toolTest(
     tool: string,
     args: Record<string, unknown>,
-    role: DemoRole
+    context: AuditContext
   ): Promise<{ status: string; detail?: string; result?: unknown }> {
     if (!CANONICAL_TOOLS.includes(tool as CanonicalTool)) {
-      this.audit("tool-test", tool, "denied", role);
+      this.audit(context, "tool-test", tool, "denied");
       return { status: "denied", detail: "unknown_tool" };
     }
-    if ((tool as CanonicalTool) === "read_research_document" && role !== "analyst") {
-      this.audit("tool-test", tool, "denied", role);
+    if ((tool as CanonicalTool) === "read_research_document" && context.role !== "analyst") {
+      this.audit(context, "tool-test", tool, "denied");
       return { status: "denied", detail: "viewer 无权访问研究文档" };
     }
     const validated = this.validateToolArgs(tool as CanonicalTool, args);
     if (validated === null) {
-      this.audit("tool-test", tool, "invalid_args", role);
+      this.audit(context, "tool-test", tool, "invalid_args");
       return { status: "invalid_args", detail: "参数未通过本地校验" };
     }
-    const outcome = await this.callRemoteTool(tool as CanonicalTool, validated, role);
-    this.audit("tool-test", tool, outcome.status, role);
+    const outcome = await this.callRemoteTool(tool as CanonicalTool, validated, context);
+    this.audit(context, "tool-test", tool, outcome.status);
     if (outcome.status === "ok") return { status: "ok", result: outcome.payload };
     return { status: outcome.status, detail: outcome.detail };
   }
 
-  private telemetry(role: DemoRole, action: string) {
+  private telemetry(context: AuditContext, action: string) {
     return {
       isEnabled: true,
       functionId: "stock-research-demo",
       metadata: {
         agentId: "research-agent",
         conversationId: this.ensureConversationId(),
-        role,
-        action
+        role: context.role,
+        action,
+        actorId: context.actorId,
+        requestId: context.requestId,
+        identitySource: context.identitySource
       }
     };
   }
 
   async chat(
     message: string,
-    identity: AccessIdentity
+    context: AuditContext
   ): Promise<{ reply: string; events: ChatEvent[]; dlp?: DlpOutcome; mcpRequired?: boolean }> {
-    this.syncRole(identity.role);
+    this.syncRole(context.role);
     if (this.busy) {
       return { reply: "", events: [{ text: "上一次对话仍在进行中", kind: "denied" }] };
     }
@@ -513,14 +1052,20 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     const events: ChatEvent[] = [];
     const dlpSink: DlpOutcome[] = [];
     try {
-      const model = buildChatModel(this.env, dlpSink);
+      const model = buildChatModel(
+        this.env,
+        dlpSink,
+        context,
+        this.ensureConversationId(),
+        "chat"
+      );
       if (!model) {
         return { reply: "模型网关未配置，演示无法调用模型。", events };
       }
       const history = this.state.history.slice(-MAX_HISTORY_MESSAGES);
       const userMessage = { role: "user" as const, content: message };
       const traced = wrapAISDK(ai, { storeMessages: false, storeTools: false });
-      const tools = buildTools(this, identity.role, events);
+      const tools = buildTools(this, context, events);
       const blockedReply =
         "该请求被 AI Gateway DLP 策略拦截（云端确认），未返回模型内容。";
       let reply: string;
@@ -533,7 +1078,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
           stopWhen: ai.stepCountIs(MAX_TOOL_STEPS),
           maxRetries: 0,
           maxOutputTokens: 2048,
-          experimental_telemetry: this.telemetry(identity.role, "chat")
+          experimental_telemetry: this.telemetry(context, "chat")
         });
         const blocked = lastBlock(dlpSink);
         if (blocked) {
@@ -572,10 +1117,16 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
   }
 
   async dlpTest(
-    role: DemoRole
+    context: AuditContext
   ): Promise<{ dlp?: DlpOutcome; reply?: string; error?: string }> {
     const dlpSink: DlpOutcome[] = [];
-    const model = buildChatModel(this.env, dlpSink);
+    const model = buildChatModel(
+      this.env,
+      dlpSink,
+      context,
+      this.ensureConversationId(),
+      "dlp-test"
+    );
     if (!model) return { error: "模型网关未配置" };
     const scenario = DEMO_SCENARIOS.find((s) => s.id === "dlp");
     const traced = wrapAISDK(ai, { storeMessages: false, storeTools: false });
@@ -586,15 +1137,22 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
         prompt: scenario?.message ?? "CF_DEMO_SECRET_9274",
         maxRetries: 0,
         maxOutputTokens: 2048,
-        experimental_telemetry: this.telemetry(role, "dlp-test")
+        experimental_telemetry: this.telemetry(context, "dlp-test")
       });
       const outcome =
         lastBlock(dlpSink) ??
         [...dlpSink].reverse().find((o) => o.action === "FLAG") ??
         { action: "NONE" as const, detail: "model_returned" };
+      this.audit(
+        context,
+        "dlp-test",
+        "dlp-test",
+        outcome.action === "BLOCK" ? "block" : outcome.action === "FLAG" ? "flag" : "none"
+      );
       return { dlp: outcome, reply: outcome.action === "NONE" ? result.text : undefined };
     } catch {
       const blocked = lastBlock(dlpSink);
+      this.audit(context, "dlp-test", "dlp-test", blocked ? "block" : "error");
       if (blocked) return { dlp: blocked };
       return { error: "模型调用失败（未识别为 DLP 事件）" };
     }
@@ -615,6 +1173,16 @@ async function handleRequest(
     return json({ error: "unauthorized" }, 401);
   }
   const doName = await sha256Hex(identity.sub);
+  const auditContext: AuditContext = {
+    actorId: doName,
+    role: identity.role,
+    requestId: crypto.randomUUID(),
+    identitySource: identity.localSimulation
+      ? "local_simulation"
+      : isLocalEnvironment(env)
+        ? "local_jwt"
+        : "access"
+  };
 
   if (url.pathname === `/${OAUTH_CALLBACK_PATH}` && request.method === "GET") {
     const state = url.searchParams.get("state") ?? "";
@@ -637,7 +1205,8 @@ async function handleRequest(
           user: {
             email: identity.email,
             role: identity.role,
-            localSimulation: identity.localSimulation
+            localSimulation: identity.localSimulation,
+            actorId: doName
           },
           history: session.history,
           scenarios: DEMO_SCENARIOS,
@@ -645,10 +1214,12 @@ async function handleRequest(
           tools: session.tools,
           expectedTools: session.expectedTools,
           conversationId: session.conversationId,
+          portal: session.portal,
           setup: {
             mcpConfigured: mcpServerUrlAllowed(env) !== null,
             modelConfigured: modelConfigured(env),
-            tracingWrapped: true
+            tracingWrapped: true,
+            accessLogoutUrl: accessLogoutUrl(env)
           }
         },
         nonce
@@ -669,17 +1240,20 @@ async function handleRequest(
       user: {
         email: identity.email,
         role: identity.role,
-        localSimulation: identity.localSimulation
+        localSimulation: identity.localSimulation,
+        actorId: doName
       },
       history: session.history,
       conversationId: session.conversationId,
       mcp: session.mcp,
       tools: session.tools,
       expectedTools: session.expectedTools,
+      portal: session.portal,
       setup: {
         mcpConfigured: mcpServerUrlAllowed(env) !== null,
         modelConfigured: modelConfigured(env),
-        tracingWrapped: true
+        tracingWrapped: true,
+        accessLogoutUrl: accessLogoutUrl(env)
       }
     });
   }
@@ -703,13 +1277,64 @@ async function handleRequest(
   if (url.pathname === "/api/connect" && request.method === "POST") {
     const parsed = await readJsonObject(request);
     if (!parsed.ok) return json({ error: parsed.error }, parsed.status);
-    const result = await stub.connectMcp();
+    const result = await stub.connectMcp(auditContext);
     if (result.status === "authenticating" && result.state) {
       await env.CALLBACK_KV.put(`oauth-state:${result.state}`, doName, {
         expirationTtl: OAUTH_STATE_TTL
       });
     }
-    return json({ status: result.status, authUrl: result.authUrl });
+    return json(
+      { ...result, requestId: auditContext.requestId },
+      result.status === "failed" ? 502 : 200
+    );
+  }
+
+  if (url.pathname === "/api/disconnect" && request.method === "POST") {
+    const parsed = await readJsonObject(request);
+    if (!parsed.ok) return json({ error: parsed.error }, parsed.status);
+    if (parsed.value.confirm !== true) {
+      return json({ error: "confirmation_required" }, 400);
+    }
+    const result = await stub.disconnectMcp(auditContext);
+    return json({ ...result, requestId: auditContext.requestId });
+  }
+
+  if (url.pathname === "/api/portal/list" && request.method === "POST") {
+    const parsed = await readJsonObject(request);
+    if (!parsed.ok) return json({ error: parsed.error }, parsed.status);
+    const result = await stub.listPortalServers(auditContext);
+    return portalResultJson(result, auditContext.requestId);
+  }
+
+  if (url.pathname === "/api/portal/manage" && request.method === "POST") {
+    const parsed = await readJsonObject(request);
+    if (!parsed.ok) return json({ error: parsed.error }, parsed.status);
+    const result = await stub.managePortalServers(auditContext);
+    return portalResultJson(result, auditContext.requestId);
+  }
+
+  if (url.pathname === "/api/portal/refresh" && request.method === "POST") {
+    const parsed = await readJsonObject(request);
+    if (!parsed.ok) return json({ error: parsed.error }, parsed.status);
+    const result = await stub.refreshPortal(auditContext);
+    return portalResultJson(result, auditContext.requestId);
+  }
+
+  if (url.pathname === "/api/portal/respond" && request.method === "POST") {
+    const parsed = await readJsonObject(request);
+    if (!parsed.ok) return json({ error: parsed.error }, parsed.status);
+    const result = await stub.respondPortalRequest(
+      parsed.value.id,
+      parsed.value.action,
+      auditContext
+    );
+    if (result.status === "invalid") {
+      return json({ ...result, requestId: auditContext.requestId }, 400);
+    }
+    if (result.status === "not_found") {
+      return json({ ...result, requestId: auditContext.requestId }, 404);
+    }
+    return json({ ...result, requestId: auditContext.requestId });
   }
 
   if (url.pathname === "/api/chat" && request.method === "POST") {
@@ -723,11 +1348,18 @@ async function handleRequest(
     ) {
       return json({ error: "invalid_message" }, 400);
     }
-    const result = await stub.chat(message, identity);
+    const result = await stub.chat(message, auditContext);
     if (result.mcpRequired) {
-      return json({ error: "mcp_not_connected", status: "requires_connect" }, 409);
+      return json(
+        {
+          error: "mcp_not_connected",
+          status: "requires_connect",
+          requestId: auditContext.requestId
+        },
+        409
+      );
     }
-    return json(result);
+    return json({ ...result, requestId: auditContext.requestId });
   }
 
   if (url.pathname === "/api/tool-test" && request.method === "POST") {
@@ -746,21 +1378,36 @@ async function handleRequest(
           : null;
     if (args === null) return json({ error: "invalid_args" }, 400);
     const result: { status: string; detail?: string; result?: unknown } =
-      await stub.toolTest(tool, args, identity.role);
+      await stub.toolTest(tool, args, auditContext);
     if (result.status === "invalid_args") {
-      return json(result, 400);
+      return json({ ...result, requestId: auditContext.requestId }, 400);
     }
-    return json(result);
+    return json({ ...result, requestId: auditContext.requestId });
   }
 
   if (url.pathname === "/api/dlp-test" && request.method === "POST") {
     const parsed = await readJsonObject(request);
     if (!parsed.ok) return json({ error: parsed.error }, parsed.status);
-    const result = await stub.dlpTest(identity.role);
-    return json(result);
+    const result = await stub.dlpTest(auditContext);
+    return json({ ...result, requestId: auditContext.requestId });
   }
 
   return json({ error: "not_found" }, 404);
+}
+
+function portalResultJson(
+  result: { status: string },
+  requestId: string
+): Response {
+  const status =
+    result.status === "requires_connect"
+      ? 409
+      : result.status === "unsupported"
+        ? 404
+        : result.status === "error"
+          ? 502
+          : 200;
+  return json({ ...result, requestId }, status);
 }
 
 export default {

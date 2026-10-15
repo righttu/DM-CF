@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { checkMcpScope } from "../src/mcp/index.js";
+import { sha256Hex } from "../src/shared/access.js";
 import {
   MCP_AUD,
   VIEWER_EMAIL,
@@ -216,6 +217,10 @@ describe("MCP OAuth + tools", () => {
     expect(getResp.headers.get("cache-control")).toContain("no-store");
     expect(getResp.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
     const html = await getResp.text();
+    expect(html).toContain("当前上游授权身份");
+    expect(html).toContain(ANALYST_EMAIL);
+    expect(html).toContain("analyst");
+    expect(html).toContain("复用 Access 登录");
     const handle = /name="handle" value="([^"]+)"/.exec(html)?.[1]!;
     const cookies = mergeCookieHeader(getSetCookies(getResp));
 
@@ -376,10 +381,58 @@ describe("MCP OAuth + tools", () => {
     expect(toolNames).toContain("get_latest_analysis");
     expect(toolNames).not.toContain("read_research_document");
 
-    const stocksResp = await rpc("tools/call", { name: "list_demo_stocks", arguments: {} }, 3);
+    const stocksReqId = crypto.randomUUID();
+    const stocksConvId = crypto.randomUUID();
+    const stocksResp = await rpc("tools/call", {
+      name: "list_demo_stocks",
+      arguments: {},
+      _meta: {
+        "uk.righttu.demo/request_id": stocksReqId,
+        "uk.righttu.demo/conversation_id": stocksConvId,
+        actorId: "forged-actor",
+        role: "analyst"
+      }
+    }, 3);
     const stocksPayload = JSON.parse(((stocksResp.body.result as { content?: { text?: string }[] })?.content?.[0].text) ?? "{}");
     expect(stocksPayload.stocks).toHaveLength(2);
     expect(stocksPayload.is_demo).toBe(true);
+    const stocksAudit = (
+      stocksResp.body.result as {
+        _meta?: Record<
+          string,
+          { actorId: string; role: string; requestId: string; conversationId: string | null }
+        >;
+      }
+    )?._meta?.["uk.righttu.demo/audit"];
+    expect(stocksAudit?.actorId).toBe(await sha256Hex("sub-flow-v"));
+    expect(stocksAudit?.role).toBe("viewer");
+    expect(stocksAudit?.requestId).toBe(stocksReqId);
+    expect(stocksAudit?.conversationId).toBe(stocksConvId);
+
+    const badMetaResp = await rpc("tools/call", {
+      name: "list_demo_stocks",
+      arguments: {},
+      _meta: {
+        "uk.righttu.demo/request_id": "x".repeat(500),
+        "uk.righttu.demo/conversation_id": "Bearer a.b.c",
+        actorId: "forged",
+        email: "forged@example.com"
+      }
+    }, 11);
+    const badAudit = (
+      badMetaResp.body.result as {
+        _meta?: Record<
+          string,
+          { actorId: string; role: string; requestId: string; conversationId: string | null }
+        >;
+      }
+    )?._meta?.["uk.righttu.demo/audit"];
+    expect(badAudit?.requestId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    );
+    expect(badAudit?.requestId).not.toBe("x".repeat(500));
+    expect(badAudit?.conversationId).toBeNull();
+    expect(badAudit?.actorId).toBe(await sha256Hex("sub-flow-v"));
 
     const latestResp = await rpc(
       "tools/call",
@@ -402,7 +455,7 @@ describe("MCP OAuth + tools", () => {
 
     const guessedDoc = await rpc(
       "tools/call",
-      { name: "read_research_document", arguments: { document_id: "research-note-a" } },
+      { name: "read_research_document", arguments: { document_id: "research-note-a" }, _meta: { actorId: "spoof" } },
       6
     );
     expect(JSON.stringify(guessedDoc.body)).not.toContain("客户集中风险");

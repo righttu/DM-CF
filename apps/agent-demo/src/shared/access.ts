@@ -10,6 +10,13 @@ export interface AccessIdentity {
   localSimulation: boolean;
 }
 
+export interface AuditContext {
+  actorId: string;
+  role: DemoRole;
+  requestId: string;
+  identitySource: "access" | "local_jwt" | "local_simulation";
+}
+
 export interface AccessEnv {
   TEAM_DOMAIN?: string;
   ANALYST_EMAILS?: string;
@@ -177,4 +184,43 @@ export function checkBrowserOrigin(
   } catch {
     return false;
   }
+}
+
+export function sanitizeDiagnostic(
+  error: unknown,
+  secrets: readonly (string | undefined)[] = []
+): string {
+  let text: string;
+  if (typeof error === "string") {
+    text = error;
+  } else if (error instanceof Error && typeof error.message === "string") {
+    text = error.message;
+  } else {
+    return "MCP 连接失败";
+  }
+  for (const secret of secrets) {
+    if (typeof secret === "string" && secret.length > 0) {
+      text = text.split(secret).join("[REDACTED]");
+    }
+  }
+  text = text.replace(/https?:\/\/[^\s"'<>`)\]]+/giu, (match) => {
+    try {
+      const u = new URL(match);
+      return u.origin + u.pathname;
+    } catch {
+      return "[REDACTED]";
+    }
+  });
+  text = text.replace(
+    /[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,
+    "[REDACTED]"
+  );
+  text = text.replace(/Bearer\s+\S+/gi, "[REDACTED]");
+  text = text.replace(
+    /\b(token|secret|api_key|password|authorization|state|code_verifier|client_secret|authorization_code|code)\b(["']?\s*[:=]\s*["']?)[^\s&"',}\]]+/gi,
+    "$1$2[REDACTED]"
+  );
+  text = text.replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, "[EMAIL]");
+  text = text.replace(/[A-Za-z0-9_-]{32,}/g, "[REDACTED]");
+  return text.slice(0, 400);
 }

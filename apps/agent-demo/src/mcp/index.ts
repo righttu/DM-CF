@@ -12,7 +12,8 @@ import {
   looksLikePlaceholder,
   resolveRole,
   sha256Hex,
-  type AccessEnv
+  type AccessEnv,
+  type DemoRole
 } from "../shared/access.js";
 import { readBoundedText } from "../shared/body.js";
 import {
@@ -125,9 +126,13 @@ function consentPage(options: {
   clientName: string;
   redirectHost: string;
   scopes: string[];
+  email: string;
+  role: DemoRole;
 }): string {
   const clientName = escapeHtml(options.clientName);
   const redirectHost = escapeHtml(options.redirectHost);
+  const email = escapeHtml(options.email);
+  const role = escapeHtml(options.role);
   const scopes = options.scopes.map((s) => `<li>${escapeHtml(s)}</li>`).join("");
   return `<!doctype html>
 <html lang="zh-CN">
@@ -152,6 +157,8 @@ button{flex:1;padding:10px 0;border-radius:8px;border:none;font-size:14px;cursor
 <h1>MCP 访问授权（演示环境）</h1>
 <p>应用 <strong>${clientName}</strong> 请求访问隔离的模拟研究数据。</p>
 <p>令牌将发送到：<strong>${redirectHost}</strong></p>
+<p>当前上游授权身份：<strong>${email}</strong>（角色：${role}）</p>
+<p>当前浏览器可能复用 Access 登录；切换 Agent 登录不会改变已有的上游授权，授权前请核对上方账号。</p>
 <p>请求的权限范围：</p>
 <ul>${scopes}</ul>
 <form method="post">
@@ -196,7 +203,9 @@ async function handleAuthorizeGet(request: Request, env: McpEnv): Promise<Respon
       handle: transaction.handle,
       clientName: description.clientName,
       redirectHost: description.redirectHost,
-      scopes: description.scope
+      scopes: description.scope,
+      email: identity.email,
+      role: identity.role
     }),
     { headers }
   );
@@ -279,7 +288,60 @@ function mergeHeaders(
   return headers;
 }
 
-function buildMcpServer(env: McpEnv, email: string): McpServer {
+interface McpPrincipal {
+  actorId: string;
+  role: DemoRole;
+}
+
+const AUDIT_UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function metaUuid(meta: unknown, key: string): string | null {
+  if (!meta || typeof meta !== "object") return null;
+  const value = (meta as Record<string, unknown>)[key];
+  return typeof value === "string" && AUDIT_UUID_PATTERN.test(value) ? value : null;
+}
+
+function auditIds(meta: unknown): {
+  requestId: string;
+  conversationId: string | null;
+  correlationSource: "client_meta" | "server_generated";
+} {
+  const requestId = metaUuid(meta, "uk.righttu.demo/request_id");
+  return {
+    requestId: requestId ?? crypto.randomUUID(),
+    conversationId: metaUuid(meta, "uk.righttu.demo/conversation_id"),
+    correlationSource: requestId ? "client_meta" : "server_generated"
+  };
+}
+
+function mcpToolAudit(
+  principal: McpPrincipal,
+  tool: string,
+  status: string,
+  ids: ReturnType<typeof auditIds>
+): void {
+  console.info(
+    JSON.stringify({
+      event: "mcp_tool_audit",
+      action: "tools/call",
+      tool,
+      status,
+      actorId: principal.actorId,
+      role: principal.role,
+      requestId: ids.requestId,
+      conversationId: ids.conversationId,
+      correlationSource: ids.correlationSource
+    })
+  );
+}
+
+type ToolTextResult = {
+  isError?: boolean;
+  content: { type: "text"; text: string }[];
+};
+
+function buildMcpServer(env: McpEnv, email: string, principal: McpPrincipal): McpServer {
   const db: DemoDb = env.DEMO_DB;
   const server = new McpServer({
     name: "demo-research-mcp",
@@ -289,18 +351,46 @@ function buildMcpServer(env: McpEnv, email: string): McpServer {
   const text = (value: unknown) =>
     ({ content: [{ type: "text" as const, text: JSON.stringify(value) }] });
 
+  const call = async (
+    toolName: string,
+    ctx: unknown,
+    run: () => Promise<ToolTextResult>
+  ): Promise<ToolTextResult & { _meta?: Record<string, unknown> }> => {
+    const meta = (ctx as { mcpReq?: { _meta?: unknown } } | undefined)?.mcpReq?._meta;
+    const ids = auditIds(meta);
+    try {
+      const result = await run();
+      mcpToolAudit(principal, toolName, result.isError ? "denied" : "ok", ids);
+      return {
+        ...result,
+        _meta: {
+          "uk.righttu.demo/audit": {
+            actorId: principal.actorId,
+            role: principal.role,
+            requestId: ids.requestId,
+            conversationId: ids.conversationId
+          }
+        }
+      };
+    } catch (error) {
+      mcpToolAudit(principal, toolName, "error", ids);
+      throw error;
+    }
+  };
+
   server.registerTool(
     "list_demo_stocks",
     {
       description: TOOL_DESCRIPTIONS.list_demo_stocks,
       inputSchema: z.object({})
     },
-    async () => {
-      if (!resolveRole(env, email)) {
-        return { isError: true, ...text({ error: "permission_denied" }) };
-      }
-      return text(await listDemoStocks(db));
-    }
+    async (_args, ctx) =>
+      call("list_demo_stocks", ctx, async () => {
+        if (!resolveRole(env, email)) {
+          return { isError: true, ...text({ error: "permission_denied" }) };
+        }
+        return text(await listDemoStocks(db));
+      })
   );
 
   server.registerTool(
@@ -309,12 +399,13 @@ function buildMcpServer(env: McpEnv, email: string): McpServer {
       description: TOOL_DESCRIPTIONS.get_latest_analysis,
       inputSchema: z.object({ stock_id: z.enum(STOCK_IDS) })
     },
-    async ({ stock_id }) => {
-      if (!resolveRole(env, email)) {
-        return { isError: true, ...text({ error: "permission_denied" }) };
-      }
-      return text(await getLatestAnalysis(db, stock_id));
-    }
+    async ({ stock_id }, ctx) =>
+      call("get_latest_analysis", ctx, async () => {
+        if (!resolveRole(env, email)) {
+          return { isError: true, ...text({ error: "permission_denied" }) };
+        }
+        return text(await getLatestAnalysis(db, stock_id));
+      })
   );
 
   if (resolveRole(env, email) === "analyst") {
@@ -324,12 +415,13 @@ function buildMcpServer(env: McpEnv, email: string): McpServer {
         description: TOOL_DESCRIPTIONS.read_research_document,
         inputSchema: z.object({ document_id: z.enum(DOCUMENT_IDS) })
       },
-      async ({ document_id }) => {
-        if (resolveRole(env, email) !== "analyst") {
-          return { isError: true, ...text({ error: "permission_denied" }) };
-        }
-        return text(await readResearchDocument(db, document_id));
-      }
+      async ({ document_id }, ctx) =>
+        call("read_research_document", ctx, async () => {
+          if (resolveRole(env, email) !== "analyst") {
+            return { isError: true, ...text({ error: "permission_denied" }) };
+          }
+          return text(await readResearchDocument(db, document_id));
+        })
     );
   }
 
@@ -368,9 +460,16 @@ async function handleMcpApi(
     return jsonResponse({ error: "origin_not_allowed" }, 403);
   }
   const email = typeof props?.email === "string" ? props.email : "";
-  if (!resolveRole(env, email)) {
+  const role = resolveRole(env, email);
+  if (!role) {
     return jsonResponse({ error: "forbidden" }, 403);
   }
+  const principal: McpPrincipal = {
+    actorId: await sha256Hex(
+      typeof props?.sub === "string" && props.sub.length > 0 ? props.sub : auth.userId
+    ),
+    role
+  };
   const allowedOriginHostnames = (env.ALLOWED_ORIGINS ?? "")
     .split(",")
     .map((o) => o.trim())
@@ -396,7 +495,8 @@ async function handleMcpApi(
         env,
         typeof mcpCtx.authInfo?.extra?.email === "string"
           ? mcpCtx.authInfo.extra.email
-          : email
+          : email,
+        principal
       ),
     {
       route: "/mcp",
