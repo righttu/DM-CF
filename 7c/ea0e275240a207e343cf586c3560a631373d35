@@ -1,0 +1,21 @@
+apps/agent-demo/src/agent/index.ts
+  s_fec12f0ba27945::t_9299310c2701dd 588-655,1355-1357
+apps/agent-demo/src/agent/ui.ts
+  s_fec12f0ba27945::t_27b06d43cf3081 409-410
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7cea0e275240a207e343cf586c3560a631373d35",
+  "prompts": {},
+  "sessions": {
+    "s_fec12f0ba27945": {
+      "agent_id": {
+        "tool": "devin",
+        "id": "s_fec12f0ba27945",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
