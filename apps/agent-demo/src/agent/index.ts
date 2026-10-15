@@ -604,10 +604,17 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
   }
 
   private diagnostic(cause: unknown): string {
-    return sanitizeDiagnostic(cause, [
+    const rec = (cause && typeof cause === "object" ? cause : {}) as {
+      code?: unknown;
+      status?: unknown;
+    };
+    const status =
+      typeof rec.code === "number" ? rec.code : typeof rec.status === "number" ? rec.status : null;
+    const text = sanitizeDiagnostic(cause, [
       this.env.DASHSCOPE_API_KEY,
       this.env.CF_AIG_TOKEN
     ]);
+    return status === null ? text : `[HTTP ${status}] ${text}`;
   }
 
   availableCanonical(role: DemoRole): string[] {
