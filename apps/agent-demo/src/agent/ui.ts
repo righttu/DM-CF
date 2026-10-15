@@ -36,7 +36,12 @@ button.scenario:hover:not(:disabled){background:#24365c}
 .msg.system{align-self:center;background:#22160b;color:#fbbf24;font-size:12px;border:1px solid #5c4a1f}
 #composer{display:flex;gap:10px}
 #input{flex:1;background:#0f172a;border:1px solid #2d4166;border-radius:8px;color:#e2e8f0;padding:10px;font-size:14px;resize:none;height:52px;font-family:inherit;min-width:0}
-#timeline{display:flex;flex-direction:column;gap:6px;font-size:12px}
+#timeline{display:flex;flex-direction:column;gap:6px;font-size:12px;max-height:240px;overflow-y:auto}
+details.turn{background:#0b1426;border:1px solid #1f2b47;border-radius:6px;padding:4px 8px}
+details.turn>summary{cursor:pointer;color:#cbd5e1;padding:2px 0;list-style-position:inside}
+.turn-body{display:flex;flex-direction:column;gap:4px;margin-top:6px}
+.card-head{display:flex;justify-content:space-between;align-items:center}
+.card-head button{padding:2px 10px;font-size:12px}
 .event{background:#0f172a;border-left:3px solid #2d4a70;padding:6px 10px;border-radius:4px;color:#94a3b8;word-break:break-all}
 .event.denied{border-left-color:#f87171;color:#fca5a5}
 .event.ok{border-left-color:#34d399;color:#6ee7b7}
@@ -114,7 +119,7 @@ a{color:#7dd3fc}
 </aside>
 <main>
   <div id="chat"></div>
-  <div class="card"><h2>执行事件</h2><div id="timeline"></div></div>
+  <div class="card"><div class="card-head"><h2>执行步骤</h2><button class="ghost" id="clear-timeline" type="button">清空</button></div><div id="timeline"></div></div>
   <div id="composer">
     <textarea id="input" placeholder="询问模拟报告……" maxlength="4000" disabled></textarea>
     <button id="send" disabled>发送</button>
@@ -140,8 +145,34 @@ function addMsg(cls, text) {
   chat.appendChild(el('div', 'msg ' + cls, text));
   chat.scrollTop = chat.scrollHeight;
 }
+let currentTurn = null;
+function startTurn(label) {
+  if (currentTurn) currentTurn.details.open = false;
+  const details = document.createElement('details');
+  details.className = 'turn';
+  details.open = true;
+  const body = el('div', 'turn-body');
+  details.append(el('summary', '', new Date().toLocaleTimeString() + ' · ' + label), body);
+  timeline.appendChild(details);
+  currentTurn = { details, body, last: null };
+  timeline.scrollTop = timeline.scrollHeight;
+}
 function addEvent(text, kind) {
-  timeline.appendChild(el('div', 'event ' + (kind || ''), text));
+  const k = kind || '';
+  const turn = currentTurn;
+  if (turn && turn.last && turn.last.text === text && turn.last.kind === k) {
+    turn.last.count += 1;
+    turn.last.node.textContent = text + ' ×' + turn.last.count;
+  } else {
+    const node = el('div', 'event ' + k, text);
+    (turn ? turn.body : timeline).appendChild(node);
+    if (turn) turn.last = { text, kind: k, count: 1, node };
+  }
+  timeline.scrollTop = timeline.scrollHeight;
+}
+function clearTimeline() {
+  timeline.replaceChildren();
+  currentTurn = null;
 }
 function setStatus(id, text, cls) {
   const node = document.getElementById(id);
@@ -215,7 +246,7 @@ function refreshSession(s) {
     currentActorId = user.actorId;
     currentRole = user.role;
     chat.replaceChildren();
-    timeline.replaceChildren();
+    clearTimeline();
     setStatus('dlp-state', '未验证', 'pending');
     document.getElementById('dlp-result').textContent = '';
     document.getElementById('request-id').textContent = '—';
@@ -317,6 +348,7 @@ async function portalAction(label, path, done) {
   if (portalBusy) return;
   portalBusy = true;
   ensurePolling();
+  startTurn(label);
   try {
     const r = await api(path, {});
     if (r.stale) return;
@@ -395,6 +427,7 @@ document.getElementById('connect-btn').addEventListener('click', async () => {
   connectBusy = true;
   ensurePolling();
   try {
+    startTurn('连接 MCP');
     addEvent('请求 MCP 连接…', '');
     logEvent('connect', 'mcp', 'requested');
     const r = await api('/api/connect', {});
@@ -425,6 +458,7 @@ document.getElementById('connect-btn').addEventListener('click', async () => {
 
 document.getElementById('disconnect-btn').addEventListener('click', async () => {
   if (!confirm('删除此 Agent 的 MCP 连接及本地授权缓存；不删除聊天历史，也不撤销 Portal/上游已有授权。')) return;
+  startTurn('断开 MCP');
   addEvent('断开 MCP 连接…', '');
   logEvent('disconnect', 'mcp', 'requested');
   const r = await api('/api/disconnect', { confirm: true });
@@ -437,6 +471,7 @@ document.getElementById('disconnect-btn').addEventListener('click', async () => 
 });
 
 async function toolTest(tool, args) {
+  startTurn('权限测试 ' + tool);
   addEvent('权限测试 ' + tool + ' …', '');
   const r = await api('/api/tool-test', { tool, args });
   if (r.stale) return;
@@ -452,6 +487,7 @@ let dlpBusy = false;
 document.getElementById('dlp-btn').addEventListener('click', async () => {
   if (dlpBusy) return;
   dlpBusy = true;
+  startTurn('DLP 测试');
   document.getElementById('dlp-btn').disabled = true;
   setStatus('dlp-state', '测试中…', 'pending');
   document.getElementById('dlp-result').textContent = '';
@@ -474,6 +510,7 @@ document.getElementById('dlp-btn').addEventListener('click', async () => {
   loadSession();
 });
 
+document.getElementById('clear-timeline').addEventListener('click', clearTimeline);
 let sending = false;
 async function send() {
   const message = input.value.trim();
@@ -482,6 +519,7 @@ async function send() {
   sendBtn.disabled = true;
   input.value = '';
   addMsg('user', message);
+  startTurn('对话：' + (message.length > 24 ? message.slice(0, 24) + '…' : message));
   try {
     const r = await api('/api/chat', { message });
     if (r.stale) { sending = false; return; }

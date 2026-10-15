@@ -423,9 +423,15 @@ function buildTools(
   context: AuditContext,
   events: ChatEvent[]
 ): ai.ToolSet {
+  const seen = new Map<string, unknown>();
   const execute = (canonical: CanonicalTool) => async (args: Record<string, unknown>) => {
+    const key = `${canonical}:${JSON.stringify(args)}`;
+    if (seen.has(key)) {
+      return { already_retrieved: true, result: seen.get(key) };
+    }
     events.push({ text: `工具调用 ${canonical}`, kind: "" });
     const result = await agent.callRemoteTool(canonical, args, context);
+    if (result.status === "ok") seen.set(key, result.payload);
     agent.audit(context, "tool-execute", canonical, result.status);
     if (result.status === "ok") {
       events.push({ text: `工具返回 ${canonical}`, kind: "ok" });
@@ -1276,6 +1282,8 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
           messages: [...history, userMessage],
           tools,
           stopWhen: ai.stepCountIs(MAX_TOOL_STEPS),
+          prepareStep: ({ stepNumber }: { stepNumber: number }) =>
+            stepNumber >= MAX_TOOL_STEPS - 1 ? { toolChoice: "none" as const } : undefined,
           maxRetries: 0,
           maxOutputTokens: 2048,
           experimental_telemetry: this.telemetry(context, "chat")
@@ -1285,7 +1293,11 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
           events.push({ text: "DLP 拦截（云端确认）", kind: "denied" });
           return { reply: blockedReply, events, dlp: blocked };
         }
-        reply = result.text;
+        reply = result.text.trim();
+        if (!reply) {
+          events.push({ text: "模型未给出文字回答", kind: "denied" });
+          return { reply: "模型没有给出回答，请换一种问法重试。", events };
+        }
       } catch {
         const blocked = lastBlock(dlpSink);
         if (blocked) {

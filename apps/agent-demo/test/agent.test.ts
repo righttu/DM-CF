@@ -1094,6 +1094,41 @@ describe("ResearchAgent chat and tools", () => {
     }
   });
 
+  it("caps a tool loop: forces a text answer on the last step, dedupes repeats, never stores an empty reply", async () => {
+    const sub = "sub-loop";
+    const jwt = await signJwt({ sub, email: ANALYST_EMAIL });
+    await connectAgentMcp({ sub, email: ANALYST_EMAIL });
+    const toolChoices: unknown[] = [];
+    let calls = 0;
+    __setModelFetchForTests(async (_input, init) => {
+      calls += 1;
+      const body = JSON.parse(init.body) as { tool_choice?: unknown };
+      toolChoices.push(body.tool_choice);
+      if (body.tool_choice === "none") return textResponse("");
+      return toolCallResponse([{ id: `c${calls}`, name: "list_demo_companies", args: "{}" }]);
+    });
+    const resp = await authedFetch("/api/chat", {
+      jwt,
+      method: "POST",
+      body: { message: "hi" }
+    });
+    expect(resp.status).toBe(200);
+    const data = (await resp.json()) as {
+      reply: string;
+      events: { text: string }[];
+    };
+    expect(calls).toBeLessThanOrEqual(4);
+    expect(toolChoices[toolChoices.length - 1]).toBe("none");
+    expect(data.reply).toContain("没有给出回答");
+    const started = data.events.filter((e) => e.text === "工具调用 list_demo_companies");
+    expect(started).toHaveLength(1);
+    const session = (await (await authedFetch("/api/session", { jwt })).json()) as {
+      history: { role: string; content: string }[];
+    };
+    expect(session.history.some((m) => m.content.trim() === "")).toBe(false);
+    expect(session.history).toHaveLength(0);
+  });
+
   it("heals a woken connection that is connected but undiscovered without re-authorizing", async () => {
     const sub = "sub-heal";
     const jwt = await signJwt({ sub, email: ANALYST_EMAIL });
