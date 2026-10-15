@@ -404,7 +404,7 @@ document.getElementById('connect-btn').addEventListener('click', async () => {
       addEvent('MCP 已连接', 'ok');
       logEvent('connect', 'mcp', 'ready');
     } else {
-      addEvent('连接失败（HTTP ' + status + '）', 'denied');
+      addEvent('连接失败（HTTP ' + status + '）' + (data && data.detail ? '：' + data.detail : '') + (data && data.requestId ? ' [请求 ID ' + data.requestId + ']' : ''), 'denied');
       logEvent('connect', 'mcp', 'failed');
     }
   } catch (e) {
