@@ -578,17 +578,35 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
   private async healMcp(): Promise<boolean> {
     const conn = this.mcp.mcpConnections["research"];
     if (!conn) return false;
+    let step = "reconnect";
     try {
       conn.clearResumedSession();
-      const reconnect = (await this.mcp.connectToServer("research")) as { state: string };
-      if (reconnect.state !== "connected") return false;
+      const reconnect = (await this.mcp.connectToServer("research")) as {
+        state: string;
+        error?: unknown;
+      };
+      if (reconnect.state !== "connected") {
+        return this.healFailed(step, `state=${reconnect.state}${reconnect.error ? " " + this.diagnostic(reconnect.error) : ""}`);
+      }
+      step = "discover";
       const discovered = (await this.mcp.discoverIfConnected("research")) as
-        | { success?: boolean }
+        | { success?: boolean; error?: unknown }
         | undefined;
-      return discovered?.success === true;
-    } catch {
-      return false;
+      if (discovered?.success === true) {
+        this.clearMcpFailure();
+        return true;
+      }
+      return this.healFailed(step, this.diagnostic(discovered?.error ?? "no_result"));
+    } catch (e) {
+      return this.healFailed(step, this.diagnostic(e));
     }
+  }
+
+  private healFailed(step: string, detail: string): false {
+    const text = `自愈失败（${step}）：${detail}`;
+    console.error(JSON.stringify({ event: "mcp_heal_failed", step, detail }));
+    this.setState({ ...this.state, lastMcpFailure: text.slice(0, 400) });
+    return false;
   }
 
   private async ensureMcpReady(): Promise<void> {
