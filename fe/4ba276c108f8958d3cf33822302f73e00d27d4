@@ -1,0 +1,19 @@
+apps/agent-demo/src/agent/index.ts
+  s_02649a17b7b371::t_afd2540c534c89 607-613,617
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "fe4ba276c108f8958d3cf33822302f73e00d27d4",
+  "prompts": {},
+  "sessions": {
+    "s_02649a17b7b371": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "calm-noun",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
