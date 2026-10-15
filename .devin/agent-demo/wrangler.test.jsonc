@@ -5,11 +5,13 @@
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
-      { "name": "ResearchAgent", "class_name": "ResearchAgent" }
+      { "name": "ResearchAgent", "class_name": "ResearchAgent" },
+      { "name": "CONSENT_TRANSACTIONS", "class_name": "ConsentTransaction" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["ResearchAgent"] }
+    { "tag": "v1", "new_sqlite_classes": ["ResearchAgent"] },
+    { "tag": "v1-consent", "new_sqlite_classes": ["ConsentTransaction"] }
   ],
   "d1_databases": [
     {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { env, runInDurableObject } from "cloudflare:test";
 import { checkMcpScope } from "../src/mcp/index.js";
 import { sha256Hex } from "../src/shared/access.js";
 import {
@@ -507,6 +508,182 @@ describe("MCP OAuth + tools", () => {
       body: JSON.stringify({ jsonrpc: "2.0", id: 10, method: "tools/list", params: {} })
     });
     expect(hostAlias.status).toBe(403);
+  });
+
+  it("stores consent transactions in the per-handle DO, not OAUTH_KV, and survives CONSENT_KV failure", async () => {
+    const { clientId, redirectUri } = await registerClient();
+    const jwt = await signJwt({ sub: "sub-do-store", email: ANALYST_EMAIL, aud: MCP_AUD });
+    const txnPuts: string[] = [];
+    const kvs = env as unknown as { OAUTH_KV: KVNamespace; CONSENT_KV: KVNamespace };
+    const origPut = kvs.OAUTH_KV.put.bind(kvs.OAUTH_KV);
+    const origKvGet = kvs.CONSENT_KV.get;
+    kvs.OAUTH_KV.put = ((key: string, value: string, options?: unknown) => {
+      if (/^transaction:/.test(key)) txnPuts.push(key);
+      return origPut(key, value, options as never);
+    }) as KVNamespace["put"];
+    kvs.CONSENT_KV.get = (() => {
+      throw new Error("CONSENT_KV must not be used");
+    }) as KVNamespace["get"];
+    try {
+      const getResp = await runAuthorizeGet(jwt, clientId, redirectUri);
+      expect(getResp.status).toBe(200);
+      const html = await getResp.text();
+      const handle = /name="handle" value="([^"]+)"/.exec(html)?.[1]!;
+      const cookies = mergeCookieHeader(getSetCookies(getResp));
+      const hash = await sha256Hex(handle);
+      const ns = (env as unknown as { CONSENT_TRANSACTIONS: DurableObjectNamespace })
+        .CONSENT_TRANSACTIONS;
+      const stub = ns.get(ns.idFromName(hash));
+      const blob = await runInDurableObject(stub as never, (instance) =>
+        (instance as unknown as { ctx: { storage: DurableObjectStorage } }).ctx.storage.get("blob")
+      );
+      expect(typeof blob).toBe("string");
+      expect(txnPuts).toHaveLength(0);
+      const approved = await mcpFetch("/authorize", {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          cookie: cookies,
+          "cf-access-jwt-assertion": jwt,
+          origin: "http://localhost"
+        },
+        body: `handle=${encodeURIComponent(handle)}&decision=approve`
+      });
+      expect(approved.status).toBe(302);
+      expect(approved.headers.get("location") ?? "").toContain("code=");
+      expect(txnPuts).toHaveLength(0);
+    } finally {
+      kvs.OAUTH_KV.put = origPut;
+      kvs.CONSENT_KV.get = origKvGet;
+    }
+  });
+
+  it("returns distinct errors for wrong subject vs missing handle; wrong cookie does not consume", async () => {
+    const { clientId, redirectUri } = await registerClient();
+    const jwtA = await signJwt({ sub: "sub-do-a", email: ANALYST_EMAIL, aud: MCP_AUD });
+    const jwtB = await signJwt({ sub: "sub-do-b", email: ANALYST_EMAIL, aud: MCP_AUD });
+    const getResp = await runAuthorizeGet(jwtA, clientId, redirectUri);
+    const html = await getResp.text();
+    const handle = /name="handle" value="([^"]+)"/.exec(html)?.[1]!;
+    const cookies = mergeCookieHeader(getSetCookies(getResp));
+    const post = (extra: Record<string, string>, body: string) =>
+      mcpFetch("/authorize", {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          cookie: cookies,
+          origin: "http://localhost",
+          ...extra
+        },
+        body
+      });
+    const swapped = await post(
+      { "cf-access-jwt-assertion": jwtB },
+      `handle=${encodeURIComponent(handle)}&decision=approve`
+    );
+    expect(swapped.status).toBe(403);
+    expect(((await swapped.json()) as { error: string }).error).toBe("consent_subject_mismatch");
+    const random = await post(
+      { "cf-access-jwt-assertion": jwtA },
+      `handle=${encodeURIComponent("does-not-exist-handle")}&decision=approve`
+    );
+    expect(random.status).toBe(403);
+    expect(((await random.json()) as { error: string }).error).toBe("consent_expired_or_used");
+    const wrongCookie = await mcpFetch("/authorize", {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        cookie: "__Host-consent=forged",
+        "cf-access-jwt-assertion": jwtA,
+        origin: "http://localhost"
+      },
+      body: `handle=${encodeURIComponent(handle)}&decision=approve`
+    });
+    expect(wrongCookie.status).toBe(403);
+    const approved = await post(
+      { "cf-access-jwt-assertion": jwtA },
+      `handle=${encodeURIComponent(handle)}&decision=approve`
+    );
+    expect(approved.status).toBe(302);
+    expect(approved.headers.get("location") ?? "").toContain("code=");
+  });
+
+  it("serializes concurrent decisions on one handle and keeps separate handles independent", async () => {
+    const { clientId, redirectUri } = await registerClient();
+    const jwt = await signJwt({ sub: "sub-do-race", email: ANALYST_EMAIL, aud: MCP_AUD });
+    const begin = async () => {
+      const getResp = await runAuthorizeGet(jwt, clientId, redirectUri);
+      const html = await getResp.text();
+      return {
+        handle: /name="handle" value="([^"]+)"/.exec(html)?.[1]!,
+        cookies: mergeCookieHeader(getSetCookies(getResp))
+      };
+    };
+    const post = (h: string, c: string, decision: string) =>
+      mcpFetch("/authorize", {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          cookie: c,
+          "cf-access-jwt-assertion": jwt,
+          origin: "http://localhost"
+        },
+        body: `handle=${encodeURIComponent(h)}&decision=${decision}`
+      });
+    const first = await begin();
+    const [r1, r2] = await Promise.all([
+      post(first.handle, first.cookies, "approve"),
+      post(first.handle, first.cookies, "approve")
+    ]);
+    expect([r1.status, r2.status].sort()).toEqual([302, 403]);
+    const second = await begin();
+    const [d1, d2] = await Promise.all([
+      post(second.handle, second.cookies, "approve"),
+      post(second.handle, second.cookies, "deny")
+    ]);
+    expect([d1.status, d2.status].sort()).toEqual([302, 403]);
+    const third = await begin();
+    const fourth = await begin();
+    const [i1, i2] = await Promise.all([
+      post(third.handle, third.cookies, "approve"),
+      post(fourth.handle, fourth.cookies, "approve")
+    ]);
+    expect(i1.status).toBe(302);
+    expect(i2.status).toBe(302);
+    expect(third.handle).not.toBe(fourth.handle);
+  });
+
+  it("rejects expired transactions stored in the DO", async () => {
+    const { clientId, redirectUri } = await registerClient();
+    const jwt = await signJwt({ sub: "sub-do-ttl", email: ANALYST_EMAIL, aud: MCP_AUD });
+    const getResp = await runAuthorizeGet(jwt, clientId, redirectUri);
+    const html = await getResp.text();
+    const handle = /name="handle" value="([^"]+)"/.exec(html)?.[1]!;
+    const cookies = mergeCookieHeader(getSetCookies(getResp));
+    const hash = await sha256Hex(handle);
+    const ns = (env as unknown as { CONSENT_TRANSACTIONS: DurableObjectNamespace })
+      .CONSENT_TRANSACTIONS;
+    const stub = ns.get(ns.idFromName(hash));
+    await runInDurableObject(stub as never, (instance) =>
+      (instance as unknown as { ctx: { storage: DurableObjectStorage } }).ctx.storage.put(
+        "expiresAt",
+        Date.now() - 1000
+      )
+    );
+    const resp = await mcpFetch("/authorize", {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        cookie: cookies,
+        "cf-access-jwt-assertion": jwt,
+        origin: "http://localhost"
+      },
+      body: `handle=${encodeURIComponent(handle)}&decision=approve`
+    });
+    expect(resp.status).toBe(403);
+    const body = await resp.text();
+    expect((JSON.parse(body) as { error: string }).error).toBe("consent_expired_or_used");
+    expect(body).not.toContain("sub-do-ttl");
   });
 
   it("scope check enforces mcp:read", () => {

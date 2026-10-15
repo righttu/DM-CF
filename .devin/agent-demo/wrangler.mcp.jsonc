@@ -13,6 +13,14 @@
     "enabled": true,
     "traces": { "enabled": true }
   },
+  "durable_objects": {
+    "bindings": [
+      { "name": "CONSENT_TRANSACTIONS", "class_name": "ConsentTransaction" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1-consent", "new_sqlite_classes": ["ConsentTransaction"] }
+  ],
   "d1_databases": [
     {
       "binding": "DEMO_DB",
@@ -34,6 +42,14 @@
   },
   "env": {
     "local": {
+      "durable_objects": {
+        "bindings": [
+          { "name": "CONSENT_TRANSACTIONS", "class_name": "ConsentTransaction" }
+        ]
+      },
+      "migrations": [
+        { "tag": "v1-consent", "new_sqlite_classes": ["ConsentTransaction"] }
+      ],
       "d1_databases": [
         {
           "binding": "DEMO_DB",

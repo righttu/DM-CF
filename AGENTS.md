@@ -74,7 +74,7 @@ Portal Managed OAuth and strict frontend callback are enabled. MCP server visibi
 
 ## Consent browser compatibility (2026-10-15)
 
-Current test VM SSH target is `righttu@192.168.1.227` (previous hotspot address no longer used). Successful MCP consent HTML must use `Referrer-Policy: same-origin`; Chrome sends literal `Origin: null` for native form POSTs served with `no-referrer`. Keep `no-referrer` on other responses and continue rejecting opaque or foreign Origin values. Browser reproduction captures are in `test/evidence/probes/origin-referrer-repro-2026-10-15.json`; do not relax CSRF or the origin allowlist to work around this header interaction.
+Current test VM SSH target is `righttu@192.168.64.3` (same ED25519 host key as the earlier `192.168.1.227`; older addresses no longer used). Successful MCP consent HTML must use `Referrer-Policy: same-origin`; Chrome sends literal `Origin: null` for native form POSTs served with `no-referrer`. Keep `no-referrer` on other responses and continue rejecting opaque or foreign Origin values. Browser reproduction captures are in `test/evidence/probes/origin-referrer-repro-2026-10-15.json`; do not relax CSRF or the origin allowlist to work around this header interaction.
 
 ## Account controls, Portal management, and audit correlation
 
@@ -87,3 +87,7 @@ Audit `actorId` is SHA-256 of the verified subject, retaining existing per-user 
 Failed MCP connections retry via SDK `connectToServer` without clearing credentials. Authenticating connections retain SDK nonce-expiry checks. OAuth callback errors redirect without raw error queries; protected status responses expose only sanitized diagnostics. Initial live Agent-to-Portal failure and the complete cloud identity/Tracing flow remain unverified until the user retries. Read-only tails are not reliable when VM egress times out; never save raw Worker tail events, and never treat an empty capture as proof of success.
 
 Verification artifacts: `test/evidence/final-npm-test.log`, `final-check.log`, `final-check-build.log`, `ui-hidden-badge.log`, and `browser-verify.log`. Browser checks use actual rendered UI with local fixture responses, not real Cloudflare authorization.
+
+## Consent transactions (Durable Object)
+
+MCP consent no longer uses `CONSENT_KV`. Each authorization handle maps to one `ConsentTransaction` SQLite Durable Object (`CONSENT_TRANSACTIONS`, migration `v1-consent`), named by SHA-256 of the handle. Only the library's `transaction:<hash>` keys are redirected there (via a KV proxy); tokens/grants/clients stay in `OAUTH_KV`. The DO stores the library's encrypted record plus the verified identity (`sub`, issuer, audience), serializes decisions with `blockConcurrencyWhile`, and consumes the record before issuing a code (approve/deny races yield exactly one 302). Errors are distinct: `consent_expired_or_used` (missing/expired/used) vs `consent_subject_mismatch` (different identity, record not consumed) vs `consent_invalid_or_used` (library cookie/handle validation). The binding fails closed (503) if absent. `CONSENT_KV` remains bound but unused. Not yet verified live against Cloudflare Access/Portal.

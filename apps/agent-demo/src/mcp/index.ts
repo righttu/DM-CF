@@ -1,3 +1,4 @@
+import { DurableObject } from "cloudflare:workers";
 import OAuthProvider, {
   getOAuthApi,
   insufficientScope,
@@ -28,6 +29,7 @@ interface McpEnv extends AccessEnv {
   DEMO_DB: D1Database;
   OAUTH_KV: KVNamespace;
   CONSENT_KV: KVNamespace;
+  CONSENT_TRANSACTIONS: DurableObjectNamespace<ConsentTransaction>;
   MCP_AUTHORIZE_ACCESS_AUD?: string;
   PUBLIC_MCP_ORIGIN?: string;
   ALLOWED_ORIGINS?: string;
@@ -35,6 +37,256 @@ interface McpEnv extends AccessEnv {
 
 const CONSENT_TTL_SECONDS = 600;
 const DEMO_SCOPE = "mcp:read";
+const MAX_HANDLE_LENGTH = 256;
+const TXN_KEY = /^transaction:([a-f0-9]{64})$/;
+const TXN_STORAGE_KEYS = ["blob", "expiresAt", "identity", "consumed"];
+
+interface ConsentIdentity {
+  sub: string;
+  issuer: string;
+  audience: string;
+}
+
+interface LocalConsentTxn {
+  hash: string;
+  storage: DurableObjectStorage;
+}
+
+async function txnGet(
+  env: McpEnv,
+  local: LocalConsentTxn | undefined,
+  hash: string
+): Promise<string | null> {
+  if (local) {
+    if (hash !== local.hash) return null;
+    const blob = await local.storage.get<string>("blob");
+    const expiresAt = await local.storage.get<number>("expiresAt");
+    if (typeof blob !== "string" || typeof expiresAt !== "number") return null;
+    return expiresAt > Date.now() ? blob : null;
+  }
+  return env.CONSENT_TRANSACTIONS.get(env.CONSENT_TRANSACTIONS.idFromName(hash)).readEncrypted();
+}
+
+async function txnPut(
+  env: McpEnv,
+  local: LocalConsentTxn | undefined,
+  hash: string,
+  value: string,
+  options?: { expirationTtl?: number }
+): Promise<void> {
+  if (options?.expirationTtl !== CONSENT_TTL_SECONDS) {
+    throw new Error("consent_txn_ttl");
+  }
+  if (local) {
+    if (hash !== local.hash) throw new Error("consent_txn_wrong_owner");
+    await local.storage.put({ blob: value, expiresAt: Date.now() + CONSENT_TTL_SECONDS * 1000 });
+    return;
+  }
+  await env.CONSENT_TRANSACTIONS.get(env.CONSENT_TRANSACTIONS.idFromName(hash)).writeEncrypted(
+    value,
+    CONSENT_TTL_SECONDS
+  );
+}
+
+async function txnDelete(
+  env: McpEnv,
+  local: LocalConsentTxn | undefined,
+  hash: string
+): Promise<void> {
+  if (local) {
+    if (hash !== local.hash) return;
+    await local.storage.delete("blob");
+    await local.storage.put("consumed", true);
+    return;
+  }
+  await env.CONSENT_TRANSACTIONS.get(env.CONSENT_TRANSACTIONS.idFromName(hash)).deleteEncrypted();
+}
+
+function consentOAuthEnv(env: McpEnv, local?: LocalConsentTxn): McpEnv {
+  const kv = env.OAUTH_KV;
+  const proxied = new Proxy(kv, {
+    get(target, prop, receiver) {
+      if (prop === "get") {
+        return (key: string, options?: unknown) => {
+          const m = TXN_KEY.exec(key);
+          return m ? txnGet(env, local, m[1]) : target.get(key, options as never);
+        };
+      }
+      if (prop === "put") {
+        return (key: string, value: string, options?: unknown) => {
+          const m = TXN_KEY.exec(key);
+          return m
+            ? txnPut(env, local, m[1], value, options as { expirationTtl?: number })
+            : target.put(key, value, options as never);
+        };
+      }
+      if (prop === "delete") {
+        return (key: string) => {
+          const m = TXN_KEY.exec(key);
+          return m ? txnDelete(env, local, m[1]) : target.delete(key);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+  return { ...env, OAUTH_KV: proxied as KVNamespace };
+}
+
+export class ConsentTransaction extends DurableObject<McpEnv> {
+  async writeEncrypted(value: string, expirationTtl: number): Promise<void> {
+    if (expirationTtl !== CONSENT_TTL_SECONDS) throw new Error("consent_txn_ttl");
+    if ((await this.ctx.storage.get<boolean>("consumed")) === true) {
+      throw new Error("consent_txn_consumed");
+    }
+    const expiresAt = Date.now() + expirationTtl * 1000;
+    await this.ctx.storage.put({ blob: value, expiresAt });
+    await this.ctx.storage.setAlarm(expiresAt);
+  }
+
+  async readEncrypted(): Promise<string | null> {
+    const blob = await this.ctx.storage.get<string>("blob");
+    const expiresAt = await this.ctx.storage.get<number>("expiresAt");
+    if (typeof blob !== "string" || typeof expiresAt !== "number") return null;
+    return expiresAt > Date.now() ? blob : null;
+  }
+
+  async deleteEncrypted(): Promise<void> {
+    await this.ctx.storage.delete("blob");
+    await this.ctx.storage.put("consumed", true);
+  }
+
+  async bindIdentity(identity: ConsentIdentity): Promise<void> {
+    if (
+      !identity ||
+      typeof identity.sub !== "string" ||
+      typeof identity.issuer !== "string" ||
+      typeof identity.audience !== "string"
+    ) {
+      throw new Error("consent_txn_identity");
+    }
+    if ((await this.readEncrypted()) === null) throw new Error("consent_txn_expired");
+    if ((await this.ctx.storage.get("identity")) !== undefined) {
+      throw new Error("consent_txn_bound");
+    }
+    await this.ctx.storage.put("identity", {
+      sub: identity.sub,
+      issuer: identity.issuer,
+      audience: identity.audience
+    });
+  }
+
+  async alarm(): Promise<void> {
+    await this.ctx.storage.delete(TXN_STORAGE_KEYS);
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const env = this.env;
+    const url = new URL(request.url);
+    if (url.pathname !== "/authorize" || request.method !== "POST") {
+      return jsonResponse({ error: "not_found" }, 404);
+    }
+    const canonical = env.PUBLIC_MCP_ORIGIN ?? "";
+    try {
+      if (new URL(request.url).origin !== new URL(canonical).origin) {
+        return jsonResponse({ error: "host_not_allowed" }, 403);
+      }
+    } catch {
+      return jsonResponse({ error: "host_not_allowed" }, 403);
+    }
+    if (!originAllowed(request, env)) {
+      return jsonResponse({ error: "origin_not_allowed" }, 403);
+    }
+    const identity = await authenticate(request, env, env.MCP_AUTHORIZE_ACCESS_AUD);
+    if (!identity) {
+      return jsonResponse({ error: "access_denied", message: "未通过身份验证" }, 401);
+    }
+    const contentType = (request.headers.get("content-type") ?? "")
+      .split(";")[0]
+      .trim()
+      .toLowerCase();
+    if (contentType !== "application/x-www-form-urlencoded") {
+      return jsonResponse({ error: "unsupported_media_type" }, 415);
+    }
+    const bounded = await readBoundedText(request);
+    if (bounded.status !== 200) {
+      return jsonResponse({ error: "body_too_large" }, 413);
+    }
+    const form = new URLSearchParams(bounded.text);
+    const handle = form.get("handle");
+    const decision = form.get("decision");
+    if (
+      typeof handle !== "string" ||
+      handle.length === 0 ||
+      handle.length > MAX_HANDLE_LENGTH
+    ) {
+      return jsonResponse({ error: "invalid_request" }, 400);
+    }
+    if (decision !== "approve" && decision !== "deny") {
+      return jsonResponse({ error: "invalid_decision" }, 400);
+    }
+    const hash = await sha256Hex(handle);
+    if (
+      env.CONSENT_TRANSACTIONS.idFromName(hash).toString() !== this.ctx.id.toString()
+    ) {
+      return jsonResponse({ error: "consent_expired_or_used" }, 403);
+    }
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const consumed = await this.ctx.storage.get<boolean>("consumed");
+      const blob = await this.readEncrypted();
+      const bound = await this.ctx.storage.get<ConsentIdentity>("identity");
+      if (consumed === true || blob === null || !bound) {
+        return jsonResponse({ error: "consent_expired_or_used" }, 403);
+      }
+      if (
+        bound.sub !== identity.sub ||
+        bound.issuer !== (env.TEAM_DOMAIN ?? "") ||
+        bound.audience !== (env.MCP_AUTHORIZE_ACCESS_AUD ?? "")
+      ) {
+        return jsonResponse({ error: "consent_subject_mismatch" }, 403);
+      }
+      const localApi = getOAuthApi(
+        providerOptions(env),
+        consentOAuthEnv(env, { hash, storage: this.ctx.storage })
+      );
+      if (decision === "deny") {
+        try {
+          const denied = await localApi.denyConsent(request, handle, {
+            description: "User denied the request"
+          });
+          return new Response(null, {
+            status: 302,
+            headers: mergeHeaders({ location: denied.redirectTo }, denied.headers)
+          });
+        } catch {
+          return jsonResponse({ error: "consent_invalid_or_used" }, 403);
+        }
+      }
+      let approved;
+      try {
+        approved = await localApi.approveConsent(request, handle, { scope: [DEMO_SCOPE] });
+      } catch {
+        return jsonResponse({ error: "consent_invalid_or_used" }, 403);
+      }
+      let redirectTo: string;
+      try {
+        ({ redirectTo } = await oauthApi(env).completeAuthorization({
+          request: approved.request,
+          userId: encodeURIComponent(identity.sub),
+          scope: [DEMO_SCOPE],
+          props: { sub: identity.sub, email: identity.email },
+          metadata: { demo: true }
+        }));
+      } catch {
+        return jsonResponse({ error: "authorization_failed" }, 400);
+      }
+      return new Response(null, {
+        status: 302,
+        headers: mergeHeaders({ location: redirectTo }, approved.headers)
+      });
+    });
+  }
+}
 
 function escapeHtml(value: string): string {
   return value
@@ -178,7 +430,10 @@ async function handleAuthorizeGet(request: Request, env: McpEnv): Promise<Respon
   if (!identity) {
     return jsonResponse({ error: "access_denied", message: "未通过身份验证" }, 401);
   }
-  const api = oauthApi(env);
+  if (!env.CONSENT_TRANSACTIONS) {
+    return jsonResponse({ error: "mcp_misconfigured" }, 503);
+  }
+  const api = getOAuthApi(providerOptions(env), consentOAuthEnv(env));
   let authRequest;
   try {
     authRequest = await api.parseAuthRequest(request);
@@ -187,9 +442,11 @@ async function handleAuthorizeGet(request: Request, env: McpEnv): Promise<Respon
   }
   const description = await api.describeConsent(authRequest);
   const transaction = await api.beginConsent(authRequest);
-  const handleKey = `consent:${await sha256Hex(transaction.handle)}`;
-  await env.CONSENT_KV.put(handleKey, identity.sub, {
-    expirationTtl: CONSENT_TTL_SECONDS
+  const hash = await sha256Hex(transaction.handle);
+  await env.CONSENT_TRANSACTIONS.get(env.CONSENT_TRANSACTIONS.idFromName(hash)).bindIdentity({
+    sub: identity.sub,
+    issuer: env.TEAM_DOMAIN ?? "",
+    audience: env.MCP_AUTHORIZE_ACCESS_AUD ?? ""
   });
   const headers = new Headers(transaction.headers);
   headers.set("content-type", "text/html; charset=utf-8");
@@ -233,50 +490,29 @@ async function handleAuthorizePost(request: Request, env: McpEnv): Promise<Respo
   const form = new URLSearchParams(bounded.text);
   const handle = form.get("handle");
   const decision = form.get("decision");
-  if (typeof handle !== "string" || handle.length === 0) {
+  if (
+    typeof handle !== "string" ||
+    handle.length === 0 ||
+    handle.length > MAX_HANDLE_LENGTH
+  ) {
     return jsonResponse({ error: "invalid_request" }, 400);
   }
   if (decision !== "approve" && decision !== "deny") {
     return jsonResponse({ error: "invalid_decision" }, 400);
   }
-  const api = oauthApi(env);
-  const handleKey = `consent:${await sha256Hex(handle)}`;
-  const boundSubject = await env.CONSENT_KV.get(handleKey);
-  if (boundSubject === null || boundSubject !== identity.sub) {
-    return jsonResponse({ error: "consent_subject_mismatch" }, 403);
+  if (!env.CONSENT_TRANSACTIONS) {
+    return jsonResponse({ error: "mcp_misconfigured" }, 503);
   }
-  await env.CONSENT_KV.delete(handleKey);
-  if (decision === "deny") {
-    const denied = await api.denyConsent(request, handle, {
-      description: "User denied the request"
-    });
-    return new Response(null, {
-      status: 302,
-      headers: mergeHeaders({ location: denied.redirectTo }, denied.headers)
-    });
-  }
-  let approved;
-  try {
-    approved = await api.approveConsent(request, handle, { scope: [DEMO_SCOPE] });
-  } catch {
-    return jsonResponse({ error: "consent_invalid_or_used" }, 403);
-  }
-  let redirectTo: string;
-  try {
-    ({ redirectTo } = await api.completeAuthorization({
-      request: approved.request,
-      userId: encodeURIComponent(identity.sub),
-      scope: [DEMO_SCOPE],
-      props: { sub: identity.sub, email: identity.email },
-      metadata: { demo: true }
-    }));
-  } catch {
-    return jsonResponse({ error: "authorization_failed" }, 400);
-  }
-  return new Response(null, {
-    status: 302,
-    headers: mergeHeaders({ location: redirectTo }, approved.headers)
-  });
+  const hash = await sha256Hex(handle);
+  const stub = env.CONSENT_TRANSACTIONS.get(env.CONSENT_TRANSACTIONS.idFromName(hash));
+  return stub.fetch(
+    new Request(request.url, {
+      method: "POST",
+      headers: request.headers,
+      body: bounded.text,
+      redirect: "manual"
+    })
+  );
 }
 
 function mergeHeaders(

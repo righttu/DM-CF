@@ -44,6 +44,9 @@ export default defineConfig({
               OAUTH_KV: "test-oauth-kv",
               CONSENT_KV: "test-consent-kv"
             },
+            durableObjects: {
+              CONSENT_TRANSACTIONS: "ConsentTransaction"
+            },
             bindings: {
               ENVIRONMENT: "local",
               TEAM_DOMAIN: "https://team.example.test",

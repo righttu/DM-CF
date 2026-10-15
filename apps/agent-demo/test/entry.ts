@@ -1,7 +1,7 @@
 import agentWorker, { ResearchAgent } from "../src/agent/index.js";
-import mcpWorker from "../src/mcp/index.js";
+import mcpWorker, { ConsentTransaction } from "../src/mcp/index.js";
 
-export { ResearchAgent };
+export { ResearchAgent, ConsentTransaction };
 
 const MCP_PATHS = ["/mcp", "/authorize", "/token", "/register", "/.well-known"];
 

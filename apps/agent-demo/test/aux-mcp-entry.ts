@@ -1,4 +1,6 @@
-import provider from "../src/mcp/index.js";
+import provider, { ConsentTransaction } from "../src/mcp/index.js";
+
+export { ConsentTransaction };
 
 export default {
   fetch(request: Request, env: never, ctx: ExecutionContext): Promise<Response> {
