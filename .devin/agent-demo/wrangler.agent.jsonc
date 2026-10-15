@@ -33,7 +33,7 @@
     "MCP_TOOL_NAMES_JSON": "{\"list_demo_companies\":\"research-demo_list_demo_companies\",\"get_latest_analysis\":\"research-demo_get_latest_analysis\",\"read_research_document\":\"research-demo_read_research_document\"}",
     "ACCOUNT_ID": "ebc4f70211dc33165a239c6018da8e2d",
     "GATEWAY_ID": "agent-demo",
-    "MODEL_ID": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    "MODEL_ID": "@cf/zai-org/glm-5.3-flash",
     "ENVIRONMENT": "production"
   },
   "env": {
@@ -56,7 +56,7 @@
         "MCP_TOOL_NAMES_JSON": "{}",
         "ACCOUNT_ID": "REPLACE_ME_ACCOUNT_ID",
         "GATEWAY_ID": "REPLACE_ME_GATEWAY_ID",
-        "MODEL_ID": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        "MODEL_ID": "@cf/zai-org/glm-5.3-flash",
         "ANALYST_EMAILS": "analyst@local.test",
         "VIEWER_EMAILS": "viewer@local.test",
         "LOCAL_DEV_IDENTITY_ENABLED": "true",

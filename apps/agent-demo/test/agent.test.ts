@@ -211,7 +211,7 @@ describe("ResearchAgent chat and tools", () => {
     expect(JSON.stringify(meta)).not.toContain("Bearer");
     expect(JSON.stringify(meta)).not.toContain("test-aig-token");
     expect(call).toBe(2);
-    expect(requests[0].url).toBe("workers-ai://@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+    expect(requests[0].url).toBe("workers-ai://@cf/zai-org/glm-5.3-flash");
     expect(requests[0].gatewayId).toBe("test-gateway");
     const first = requests[0].body;
     expect((first.messages as { role: string; content?: unknown }[])[0].role).toBe("system");
@@ -1132,26 +1132,15 @@ describe("ResearchAgent chat and tools", () => {
     expect(session.history).toHaveLength(0);
   });
 
-  it("offers no tools for small talk and stops after repeated identical tool calls", async () => {
-    const sub = "sub-smalltalk";
+  it("stops offering tools after repeated identical tool calls and uses the model's own judgement for small talk", async () => {
+    const sub = "sub-repeat";
     const jwt = await signJwt({ sub, email: ANALYST_EMAIL });
     await connectAgentMcp({ sub, email: ANALYST_EMAIL });
-    const seen: { tools: boolean }[] = [];
-    __setModelFetchForTests(async (_input, init) => {
-      const body = JSON.parse(init.body) as { tools?: unknown[] };
-      seen.push({ tools: Array.isArray(body.tools) && body.tools.length > 0 });
-      return textResponse("你好！有什么可以帮你的？");
-    });
-    const hi = await authedFetch("/api/chat", { jwt, method: "POST", body: { message: "hi" } });
-    const hiData = (await hi.json()) as { reply: string };
-    expect(hiData.reply).toContain("你好");
-    expect(seen).toEqual([{ tools: false }]);
-
-    seen.length = 0;
+    const seen: boolean[] = [];
     let call = 0;
     __setModelFetchForTests(async (_input, init) => {
       const body = JSON.parse(init.body) as { tools?: unknown[] };
-      seen.push({ tools: Array.isArray(body.tools) && body.tools.length > 0 });
+      seen.push(Array.isArray(body.tools) && body.tools.length > 0);
       call += 1;
       if (call <= 2) {
         return toolCallResponse([{ id: `r${call}`, name: "list_demo_companies", args: "{}" }]);
@@ -1165,55 +1154,30 @@ describe("ResearchAgent chat and tools", () => {
     });
     const qData = (await q.json()) as { reply: string };
     expect(qData.reply).toBe("最终回答");
-    expect(seen.map((x) => x.tools)).toEqual([true, true, false]);
-  });
+    expect(seen).toEqual([true, true, false]);
 
-  it("routes non-data questions to a tool-free answer with a tiny classifier call", async () => {
-    const sub = "sub-router";
-    const jwt = await signJwt({ sub, email: ANALYST_EMAIL });
-    await connectAgentMcp({ sub, email: ANALYST_EMAIL });
-    const seen: { tools: boolean; maxTokens?: number }[] = [];
-    __setModelFetchForTests(async (_input, init) => {
-      const body = JSON.parse(init.body) as { tools?: unknown[]; max_tokens?: number };
-      seen.push({ tools: Array.isArray(body.tools) && body.tools.length > 0, maxTokens: body.max_tokens });
-      return textResponse(seen.length === 1 ? "NO" : "我无法获取实时时间。");
-    });
-    const resp = await authedFetch("/api/chat", {
-      jwt,
-      method: "POST",
-      body: { message: "现在几点" }
-    });
-    const data = (await resp.json()) as { reply: string; events: { text: string }[] };
-    expect(data.reply).toBe("我无法获取实时时间。");
-    expect(seen).toHaveLength(2);
-    expect(seen[0].maxTokens).toBe(4);
-    expect(seen[1].tools).toBe(false);
-    expect(data.events.some((e) => e.text.includes("工具调用"))).toBe(false);
-  });
-
-  it("never shows a leaked tool-call JSON as the answer: retries once without tools", async () => {
-    const sub = "sub-leak";
-    const jwt = await signJwt({ sub, email: ANALYST_EMAIL });
-    await connectAgentMcp({ sub, email: ANALYST_EMAIL });
-    const seen: boolean[] = [];
+    seen.length = 0;
     __setModelFetchForTests(async (_input, init) => {
       const body = JSON.parse(init.body) as { tools?: unknown[] };
-      const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
-      seen.push(hasTools);
-      if (hasTools) {
-        return textResponse('{"type": "function", "name": "list_demo_companies", "parameters": {}}');
-      }
-      return textResponse("目前有两家模拟公司。");
+      seen.push(Array.isArray(body.tools) && body.tools.length > 0);
+      return textResponse("你好！");
     });
-    const resp = await authedFetch("/api/chat", {
-      jwt,
-      method: "POST",
-      body: { message: "有哪些模拟公司" }
+    const hi = await authedFetch("/api/chat", { jwt, method: "POST", body: { message: "hi" } });
+    expect(((await hi.json()) as { reply: string }).reply).toBe("你好！");
+    expect(seen).toEqual([true]);
+  });
+
+  it("passes per-model reasoning settings to the binding", async () => {
+    const sub = "sub-settings";
+    const jwt = await signJwt({ sub, email: ANALYST_EMAIL });
+    await connectAgentMcp({ sub, email: ANALYST_EMAIL });
+    const inputs: Record<string, unknown>[] = [];
+    __setModelFetchForTests(async (_input, init) => {
+      inputs.push(JSON.parse(init.body) as Record<string, unknown>);
+      return textResponse("好的");
     });
-    const data = (await resp.json()) as { reply: string };
-    expect(data.reply).toBe("目前有两家模拟公司。");
-    expect(data.reply).not.toContain("parameters");
-    expect(seen).toEqual([true, false]);
+    await authedFetch("/api/chat", { jwt, method: "POST", body: { message: "有哪些模拟公司" } });
+    expect(inputs[0].reasoning_effort).toBe("low");
   });
 
   it("streams chat as NDJSON: step events, text deltas, then a done record", async () => {

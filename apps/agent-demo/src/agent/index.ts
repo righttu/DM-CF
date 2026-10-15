@@ -56,7 +56,16 @@ export function __setModelBindingForTests(impl: ModelBinding | undefined): void 
 }
 
 // const DEFAULT_MODEL_ID = "qwen3.8-2.4t-a95b";
-const DEFAULT_MODEL_ID = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+// const DEFAULT_MODEL_ID = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+const DEFAULT_MODEL_ID = "@cf/zai-org/glm-5.3-flash";
+
+const MODEL_SETTINGS: Record<
+  string,
+  { reasoning_effort?: "low" | "medium" | "high" | null; chat_template_kwargs?: Record<string, unknown> }
+> = {
+  "@cf/zai-org/glm-5.3-flash": { reasoning_effort: "low" },
+  "@cf/moonshotai/kimi-k2.6": { chat_template_kwargs: { thinking: false } }
+};
 const OAUTH_STATE_TTL = 1800;
 const OAUTH_CALLBACK_PATH = "mcp-oauth-callback";
 
@@ -420,13 +429,8 @@ function buildChatModel(
       }
     }
   });
-  return workersai((env.MODEL_ID || DEFAULT_MODEL_ID) as never);
-}
-
-const SMALL_TALK = /^(hi|hello|hey|thanks?|thank you|ok|你好|您好|嗨|哈喽|在吗|谢谢|多谢|好的|再见)[\s!！。.?？~]*$/i;
-
-function isSmallTalk(message: string): boolean {
-  return SMALL_TALK.test(message.trim());
+  const modelId = env.MODEL_ID || DEFAULT_MODEL_ID;
+  return workersai(modelId as never, (MODEL_SETTINGS[modelId] ?? {}) as never);
 }
 
 type ChatSignal =
@@ -440,16 +444,7 @@ interface ChatOutcome {
   mcpRequired?: boolean;
 }
 
-const TOOL_HINT =
-  /DEMO\d|research-|报告|公司|文档|研究|比较|分析|权限|工具|查询|读取|资料|备忘录|来源|analyst|viewer|tool/i;
-const ROUTER_PROMPT =
-  "你是意图分类器。判断用户的最新问题是否需要查询模拟公司报告或研究文档数据库（涉及公司、报告、研究文档、DEMO001/DEMO002、比较分析等）。只回答 YES 或 NO，不要输出其他内容。时间、日期、闲聊、常识问题一律回答 NO。";
 const BLOCKED_REPLY = "该请求被 AI Gateway DLP 策略拦截（云端确认），未返回模型内容。";
-
-function looksLikeLeakedToolCall(text: string): boolean {
-  const t = text.trim().replace(/^[\s[\]'"]+/, "");
-  return t.startsWith("{") && /"name"\s*:/.test(t) && /"(parameters|arguments)"\s*:/.test(t);
-}
 
 function buildTools(
   agent: ResearchAgent,
@@ -1349,113 +1344,61 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
         return { reply: BLOCKED_REPLY, events, dlp: blocked };
       };
 
-      const needsTools = async (): Promise<boolean> => {
-        if (isSmallTalk(message)) return false;
-        if (TOOL_HINT.test(message)) return true;
-        try {
-          const routed = await traced.generateText({
-            model,
-            system: ROUTER_PROMPT,
-            prompt: message,
-            maxRetries: 0,
-            maxOutputTokens: 4,
-            temperature: 0,
-            experimental_telemetry: telemetry
-          });
-          return /^\s*(YES|是)/i.test(routed.text);
-        } catch {
-          return false;
+      const tools = buildTools(this, context, events, (e) => emit({ type: "step", ...e }));
+      const result = traced.streamText({
+        model,
+        system: SYSTEM_PROMPT,
+        messages: [...history, userMessage],
+        tools,
+        stopWhen: ai.stepCountIs(MAX_TOOL_STEPS),
+        prepareStep: ({
+          stepNumber,
+          steps
+        }: {
+          stepNumber: number;
+          steps: { toolResults?: { output?: unknown }[] }[];
+        }) => {
+          const previous = steps[steps.length - 1]?.toolResults ?? [];
+          const onlyRepeats =
+            previous.length > 0 &&
+            previous.every(
+              (r) => (r.output as { already_retrieved?: boolean } | undefined)?.already_retrieved
+            );
+          return stepNumber >= MAX_TOOL_STEPS - 1 || onlyRepeats
+            ? { activeTools: [] as never[] }
+            : undefined;
+        },
+        maxRetries: 0,
+        maxOutputTokens: 2048,
+        experimental_telemetry: telemetry,
+        onError: () => undefined
+      });
+      let text = "";
+      let errored = false;
+      let stepHasText = false;
+      for await (const part of result.fullStream as AsyncIterable<{
+        type: string;
+        text?: string;
+      }>) {
+        if (part.type === "start-step") {
+          stepHasText = false;
+        } else if (part.type === "text-delta" && typeof part.text === "string") {
+          let delta = part.text;
+          if (!stepHasText && text.length > 0) delta = `\n\n${delta}`;
+          stepHasText = true;
+          text += delta;
+          emit({ type: "delta", text: delta });
+        } else if (part.type === "error") {
+          errored = true;
         }
-      };
-
-      const answer = async (withTools: boolean) => {
-        const tools = withTools
-          ? buildTools(this, context, events, (e) => emit({ type: "step", ...e }))
-          : {};
-        const hasTools = Object.keys(tools).length > 0;
-        const offered: Record<number, boolean> = {};
-        const result = traced.streamText({
-          model,
-          system: SYSTEM_PROMPT,
-          messages: [...history, userMessage],
-          tools,
-          stopWhen: ai.stepCountIs(MAX_TOOL_STEPS),
-          prepareStep: ({
-            stepNumber,
-            steps
-          }: {
-            stepNumber: number;
-            steps: { toolResults?: { output?: unknown }[] }[];
-          }) => {
-            const previous = steps[steps.length - 1]?.toolResults ?? [];
-            const onlyRepeats =
-              previous.length > 0 &&
-              previous.every(
-                (r) => (r.output as { already_retrieved?: boolean } | undefined)?.already_retrieved
-              );
-            const withdraw = stepNumber >= MAX_TOOL_STEPS - 1 || onlyRepeats;
-            offered[stepNumber] = hasTools && !withdraw;
-            return withdraw ? { activeTools: [] as never[] } : undefined;
-          },
-          maxRetries: 0,
-          maxOutputTokens: 2048,
-          experimental_telemetry: telemetry,
-          onError: () => undefined
-        });
-        let text = "";
-        let buffered = "";
-        let step = 0;
-        let leaked = false;
-        let errored = false;
-        for await (const part of result.fullStream as AsyncIterable<{
-          type: string;
-          text?: string;
-          finishReason?: string;
-        }>) {
-          if (part.type === "start-step") {
-            buffered = "";
-          } else if (part.type === "text-delta" && typeof part.text === "string") {
-            if (offered[step]) {
-              buffered += part.text;
-            } else {
-              text += part.text;
-              emit({ type: "delta", text: part.text });
-            }
-          } else if (part.type === "finish-step") {
-            if (offered[step] && buffered) {
-              if (part.finishReason === "tool-calls") {
-              } else if (looksLikeLeakedToolCall(buffered)) {
-                leaked = true;
-              } else {
-                text += buffered;
-                emit({ type: "delta", text: buffered });
-              }
-            }
-            buffered = "";
-            step += 1;
-          } else if (part.type === "error") {
-            errored = true;
-          }
-        }
-        return { text, leaked, errored };
-      };
-
-      const useTools = await needsTools();
-      const earlyBlock = blockedOutcome();
-      if (earlyBlock) return earlyBlock;
-      let outcome = await answer(useTools);
+      }
       const blocked = blockedOutcome();
       if (blocked) return blocked;
-      if (useTools && (outcome.leaked || (!outcome.text.trim() && !outcome.errored))) {
-        outcome = await answer(false);
-        const blockedAgain = blockedOutcome();
-        if (blockedAgain) return blockedAgain;
-      }
-      if (outcome.errored && !outcome.text.trim()) {
+      if (errored && !text.trim()) {
         record({ text: "模型调用失败", kind: "denied" });
         return { reply: "模型调用失败，请稍后重试。", events };
       }
-      const reply = outcome.text.trim();
+      const reply = text.trim();
       if (!reply) {
         record({ text: "模型未给出文字回答", kind: "denied" });
         return { reply: "模型没有给出回答，请换一种问法重试。", events };
