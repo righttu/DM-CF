@@ -384,6 +384,11 @@ function buildChatModel(
     get(target, prop) {
       if (prop === "run") {
         return async (...args: unknown[]) => {
+          const inputs = args[1] as { tools?: unknown[]; tool_choice?: unknown } | undefined;
+          if (inputs && Array.isArray(inputs.tools) && inputs.tools.length === 0) {
+            delete inputs.tools;
+            delete inputs.tool_choice;
+          }
           try {
             return await target.run(...args);
           } catch (error) {
@@ -416,6 +421,12 @@ function buildChatModel(
     }
   });
   return workersai((env.MODEL_ID || DEFAULT_MODEL_ID) as never);
+}
+
+const SMALL_TALK = /^(hi|hello|hey|thanks?|thank you|ok|你好|您好|嗨|哈喽|在吗|谢谢|多谢|好的|再见)[\s!！。.?？~]*$/i;
+
+function isSmallTalk(message: string): boolean {
+  return SMALL_TALK.test(message.trim());
 }
 
 function buildTools(
@@ -1271,7 +1282,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
       const history = this.state.history.slice(-MAX_HISTORY_MESSAGES);
       const userMessage = { role: "user" as const, content: message };
       const traced = wrapAISDK(ai, { storeMessages: false, storeTools: false });
-      const tools = buildTools(this, context, events);
+      const tools = isSmallTalk(message) ? {} : buildTools(this, context, events);
       const blockedReply =
         "该请求被 AI Gateway DLP 策略拦截（云端确认），未返回模型内容。";
       let reply: string;
@@ -1282,8 +1293,23 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
           messages: [...history, userMessage],
           tools,
           stopWhen: ai.stepCountIs(MAX_TOOL_STEPS),
-          prepareStep: ({ stepNumber }: { stepNumber: number }) =>
-            stepNumber >= MAX_TOOL_STEPS - 1 ? { toolChoice: "none" as const } : undefined,
+          prepareStep: ({
+            stepNumber,
+            steps
+          }: {
+            stepNumber: number;
+            steps: { toolResults?: { output?: unknown }[] }[];
+          }) => {
+            const previous = steps[steps.length - 1]?.toolResults ?? [];
+            const onlyRepeats =
+              previous.length > 0 &&
+              previous.every(
+                (r) => (r.output as { already_retrieved?: boolean } | undefined)?.already_retrieved
+              );
+            return stepNumber >= MAX_TOOL_STEPS - 1 || onlyRepeats
+              ? { activeTools: [] as never[] }
+              : undefined;
+          },
           maxRetries: 0,
           maxOutputTokens: 2048,
           experimental_telemetry: this.telemetry(context, "chat")

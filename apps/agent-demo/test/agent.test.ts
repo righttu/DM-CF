@@ -314,7 +314,7 @@ describe("ResearchAgent chat and tools", () => {
     expect(listData.status).toBe("ok");
     expect(listData.result?.companies).toHaveLength(2);
 
-    await authedFetch("/api/chat", { jwt, method: "POST", body: { message: "hi" } });
+    await authedFetch("/api/chat", { jwt, method: "POST", body: { message: "有哪些模拟公司" } });
     const offered = (requests[0]?.body.tools ?? []).map((t) => t.function?.name);
     expect(offered).not.toContain("read_research_document");
     expect(offered).toContain("list_demo_companies");
@@ -326,7 +326,7 @@ describe("ResearchAgent chat and tools", () => {
     const resp = await authedFetch("/api/chat", {
       jwt,
       method: "POST",
-      body: { message: "hi" }
+      body: { message: "有哪些模拟公司" }
     });
     expect(resp.status).toBe(409);
     const data = (await resp.json()) as { error: string };
@@ -366,7 +366,7 @@ describe("ResearchAgent chat and tools", () => {
       jwt,
       method: "POST",
       headers: { "content-length": "99999" },
-      body: { message: "hi" }
+      body: { message: "有哪些模拟公司" }
     });
     expect(declared.status).toBe(413);
 
@@ -381,7 +381,7 @@ describe("ResearchAgent chat and tools", () => {
       jwt,
       method: "POST",
       headers: { "content-type": "text/plain" },
-      body: { message: "hi" } as unknown as BodyInit
+      body: { message: "有哪些模拟公司" } as unknown as BodyInit
     });
     expect(wrongType.status).toBe(415);
 
@@ -627,7 +627,7 @@ describe("ResearchAgent chat and tools", () => {
     const chat = await authedFetch("/api/chat", {
       jwt,
       method: "POST",
-      body: { message: "hi" }
+      body: { message: "有哪些模拟公司" }
     });
     expect(chat.status).toBe(200);
     const before = await authedFetch("/api/session", { jwt });
@@ -658,7 +658,7 @@ describe("ResearchAgent chat and tools", () => {
     const chatAfter = await authedFetch("/api/chat", {
       jwt,
       method: "POST",
-      body: { message: "hi" }
+      body: { message: "有哪些模拟公司" }
     });
     expect(chatAfter.status).toBe(409);
   });
@@ -733,7 +733,7 @@ describe("ResearchAgent chat and tools", () => {
       requests.push({ body: JSON.parse(String(init?.body ?? "{}")) });
       return textResponse("ok");
     });
-    await authedFetch("/api/chat", { jwt, method: "POST", body: { message: "hi" } });
+    await authedFetch("/api/chat", { jwt, method: "POST", body: { message: "有哪些模拟公司" } });
     const offered = (requests[0]?.body.tools ?? []).map((t) => t.function?.name);
     expect(offered).not.toContain("portal_list_servers");
     expect(offered).not.toContain("portal_toggle_servers");
@@ -1094,23 +1094,25 @@ describe("ResearchAgent chat and tools", () => {
     }
   });
 
-  it("caps a tool loop: forces a text answer on the last step, dedupes repeats, never stores an empty reply", async () => {
+  it("caps a tool loop: withdraws tools on the last step, dedupes repeats, never stores an empty reply", async () => {
     const sub = "sub-loop";
     const jwt = await signJwt({ sub, email: ANALYST_EMAIL });
     await connectAgentMcp({ sub, email: ANALYST_EMAIL });
     const toolChoices: unknown[] = [];
+    let lastHadTools = true;
     let calls = 0;
     __setModelFetchForTests(async (_input, init) => {
       calls += 1;
-      const body = JSON.parse(init.body) as { tool_choice?: unknown };
+      const body = JSON.parse(init.body) as { tool_choice?: unknown; tools?: unknown[] };
       toolChoices.push(body.tool_choice);
-      if (body.tool_choice === "none") return textResponse("");
+      lastHadTools = Array.isArray(body.tools) && body.tools.length > 0;
+      if (!lastHadTools) return textResponse("");
       return toolCallResponse([{ id: `c${calls}`, name: "list_demo_companies", args: "{}" }]);
     });
     const resp = await authedFetch("/api/chat", {
       jwt,
       method: "POST",
-      body: { message: "hi" }
+      body: { message: "有哪些模拟公司" }
     });
     expect(resp.status).toBe(200);
     const data = (await resp.json()) as {
@@ -1118,7 +1120,8 @@ describe("ResearchAgent chat and tools", () => {
       events: { text: string }[];
     };
     expect(calls).toBeLessThanOrEqual(4);
-    expect(toolChoices[toolChoices.length - 1]).toBe("none");
+    expect(toolChoices[toolChoices.length - 1]).toBeUndefined();
+    expect(lastHadTools).toBe(false);
     expect(data.reply).toContain("没有给出回答");
     const started = data.events.filter((e) => e.text === "工具调用 list_demo_companies");
     expect(started).toHaveLength(1);
@@ -1127,6 +1130,42 @@ describe("ResearchAgent chat and tools", () => {
     };
     expect(session.history.some((m) => m.content.trim() === "")).toBe(false);
     expect(session.history).toHaveLength(0);
+  });
+
+  it("offers no tools for small talk and stops after repeated identical tool calls", async () => {
+    const sub = "sub-smalltalk";
+    const jwt = await signJwt({ sub, email: ANALYST_EMAIL });
+    await connectAgentMcp({ sub, email: ANALYST_EMAIL });
+    const seen: { tools: boolean }[] = [];
+    __setModelFetchForTests(async (_input, init) => {
+      const body = JSON.parse(init.body) as { tools?: unknown[] };
+      seen.push({ tools: Array.isArray(body.tools) && body.tools.length > 0 });
+      return textResponse("你好！有什么可以帮你的？");
+    });
+    const hi = await authedFetch("/api/chat", { jwt, method: "POST", body: { message: "hi" } });
+    const hiData = (await hi.json()) as { reply: string };
+    expect(hiData.reply).toContain("你好");
+    expect(seen).toEqual([{ tools: false }]);
+
+    seen.length = 0;
+    let call = 0;
+    __setModelFetchForTests(async (_input, init) => {
+      const body = JSON.parse(init.body) as { tools?: unknown[] };
+      seen.push({ tools: Array.isArray(body.tools) && body.tools.length > 0 });
+      call += 1;
+      if (call <= 2) {
+        return toolCallResponse([{ id: `r${call}`, name: "list_demo_companies", args: "{}" }]);
+      }
+      return textResponse("最终回答");
+    });
+    const q = await authedFetch("/api/chat", {
+      jwt,
+      method: "POST",
+      body: { message: "有哪些模拟公司" }
+    });
+    const qData = (await q.json()) as { reply: string };
+    expect(qData.reply).toBe("最终回答");
+    expect(seen.map((x) => x.tools)).toEqual([true, true, false]);
   });
 
   it("heals a woken connection that is connected but undiscovered without re-authorizing", async () => {
