@@ -325,6 +325,10 @@ async function portalAction(label, path, done) {
     addEvent(label + ' → ' + summary, data && data.status === 'ok' ? 'ok' : 'denied');
     logEvent(label, 'mcp', summary);
     if (done) done(status, data);
+    if (data && data.status === 'error') {
+      const d = await api('/api/diag/portal?mode=stored', {});
+      if (!d.stale && d.data) addEvent('Portal 探测（使用已存令牌）：' + JSON.stringify(d.data), '');
+    }
   } finally {
     portalBusy = false;
     loadSession();

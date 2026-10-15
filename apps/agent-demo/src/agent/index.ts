@@ -727,7 +727,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
           signal: AbortSignal.timeout(10000)
         });
         sessionId = resp.headers.get("mcp-session-id") ?? sessionId;
-        const text = (await resp.text()).slice(0, 300);
+        const text = (await resp.text()).slice(0, label === "portal_list_servers" ? 700 : 300);
         steps.push({
           label,
           status: resp.status,
@@ -753,6 +753,12 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     if (ok >= 200 && ok < 300) {
       await send("initialized", { jsonrpc: "2.0", method: "notifications/initialized" });
       await send("tools/list", { jsonrpc: "2.0", id: 2, method: "tools/list" });
+      await send("portal_list_servers", {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "portal_list_servers", arguments: {} }
+      });
     }
     return { ...summary, steps };
   }
