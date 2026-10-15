@@ -81,3 +81,27 @@ export async function captureDlpOutcome(
 export function lastBlock(sink: DlpOutcome[]): DlpOutcome | undefined {
   return [...sink].reverse().find((o) => o.action === "BLOCK");
 }
+
+export function captureDlpFromError(
+  error: unknown,
+  sink: DlpOutcome[],
+  logId?: string | null
+): void {
+  const rec = (error && typeof error === "object" ? error : {}) as { code?: unknown };
+  const codes: number[] = [];
+  if (typeof rec.code === "number") codes.push(rec.code);
+  if (typeof rec.code === "string") codes.push(Number.parseInt(rec.code, 10));
+  const message =
+    error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  for (const match of message.matchAll(/\b(\d{3,5})\s*:/g)) {
+    codes.push(Number.parseInt(match[1], 10));
+  }
+  const code = codes.find((c) => c === 2029 || c === 2030);
+  if (code !== undefined) {
+    sink.push({
+      action: "BLOCK",
+      logId: logId ?? undefined,
+      detail: `error_${code}_gateway`
+    });
+  }
+}

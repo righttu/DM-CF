@@ -2,7 +2,8 @@ import { Agent, getAgentByName } from "agents";
 import type { ElicitRequest, ElicitResult } from "agents/mcp/client";
 import { wrapAISDK } from "agents/observability/ai";
 import * as ai from "ai";
-import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+// import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 import {
   authenticate,
@@ -18,7 +19,7 @@ import {
 } from "../shared/access.js";
 import { readBoundedText } from "../shared/body.js";
 import { CANONICAL_TOOLS, type CanonicalTool } from "../shared/demo-tools.js";
-import { captureDlpOutcome, lastBlock, type DlpOutcome } from "./dlp.js";
+import { captureDlpFromError, lastBlock, type DlpOutcome } from "./dlp.js";
 import { renderPage } from "./ui.js";
 import {
   DEMO_SCENARIOS,
@@ -41,19 +42,21 @@ interface AgentDemoEnv extends AccessEnv {
   ACCOUNT_ID?: string;
   GATEWAY_ID?: string;
   MODEL_ID?: string;
+  AI?: Ai;
   DASHSCOPE_API_KEY?: string;
   CF_AIG_TOKEN?: string;
 }
 
-type ModelFetch = typeof fetch;
+type ModelBinding = { run: (...args: unknown[]) => Promise<unknown> };
 
-let modelFetchOverride: ModelFetch | undefined;
+let modelBindingOverride: ModelBinding | undefined;
 
-export function __setModelFetchForTests(impl: ModelFetch | undefined): void {
-  modelFetchOverride = impl;
+export function __setModelBindingForTests(impl: ModelBinding | undefined): void {
+  modelBindingOverride = impl;
 }
 
-const DEFAULT_MODEL_ID = "qwen3.8-2.4t-a95b";
+// const DEFAULT_MODEL_ID = "qwen3.8-2.4t-a95b";
+const DEFAULT_MODEL_ID = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const OAUTH_STATE_TTL = 1800;
 const OAUTH_CALLBACK_PATH = "mcp-oauth-callback";
 
@@ -308,18 +311,65 @@ function decodePortalAuthorizationUrl(
 
 const SINGLE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
+// function modelConfigured(env: AgentDemoEnv): boolean {
+//   const { ACCOUNT_ID, GATEWAY_ID, DASHSCOPE_API_KEY, CF_AIG_TOKEN } = env;
+//   if (!ACCOUNT_ID || !GATEWAY_ID || !DASHSCOPE_API_KEY || !CF_AIG_TOKEN) return false;
+//   if (
+//     [ACCOUNT_ID, GATEWAY_ID, DASHSCOPE_API_KEY, CF_AIG_TOKEN].some((v) =>
+//       looksLikePlaceholder(v)
+//     )
+//   ) {
+//     return false;
+//   }
+//   return SINGLE_SEGMENT.test(ACCOUNT_ID) && SINGLE_SEGMENT.test(GATEWAY_ID);
+// }
+
 function modelConfigured(env: AgentDemoEnv): boolean {
-  const { ACCOUNT_ID, GATEWAY_ID, DASHSCOPE_API_KEY, CF_AIG_TOKEN } = env;
-  if (!ACCOUNT_ID || !GATEWAY_ID || !DASHSCOPE_API_KEY || !CF_AIG_TOKEN) return false;
-  if (
-    [ACCOUNT_ID, GATEWAY_ID, DASHSCOPE_API_KEY, CF_AIG_TOKEN].some((v) =>
-      looksLikePlaceholder(v)
-    )
-  ) {
-    return false;
-  }
-  return SINGLE_SEGMENT.test(ACCOUNT_ID) && SINGLE_SEGMENT.test(GATEWAY_ID);
+  const { GATEWAY_ID } = env;
+  if (!modelBindingOverride && !env.AI) return false;
+  if (!GATEWAY_ID || looksLikePlaceholder(GATEWAY_ID)) return false;
+  return SINGLE_SEGMENT.test(GATEWAY_ID);
 }
+
+// function buildChatModel(
+//   env: AgentDemoEnv,
+//   dlpSink: DlpOutcome[],
+//   context: AuditContext,
+//   conversationId: string,
+//   action: "chat" | "dlp-test"
+// ) {
+//   if (!modelConfigured(env)) return null;
+//   const baseURL = `https://gateway.ai.cloudflare.com/v1/${env.ACCOUNT_ID}/${env.GATEWAY_ID}/custom-dashscope/compatible-mode/v1`;
+//   const innerFetch: ModelFetch = modelFetchOverride ?? fetch.bind(globalThis);
+//   const provider = createOpenAICompatible({
+//     name: "dashscope",
+//     baseURL,
+//     apiKey: env.DASHSCOPE_API_KEY,
+//     headers: {
+//       "cf-aig-authorization": `Bearer ${env.CF_AIG_TOKEN}`,
+//       "cf-aig-skip-cache": "true",
+//       "cf-aig-metadata": JSON.stringify({
+//         actor_id: context.actorId,
+//         conversation_id: conversationId,
+//         request_id: context.requestId,
+//         role: context.role,
+//         action
+//       })
+//     },
+//     fetch: async (input, init) => {
+//       const resp = await innerFetch(input, init);
+//       try {
+//         await captureDlpOutcome(resp.clone(), dlpSink);
+//       } catch {
+//       }
+//       if (lastBlock(dlpSink)) {
+//         throw new Error("dlp_blocked");
+//       }
+//       return resp;
+//     }
+//   });
+//   return provider.chatModel((env.MODEL_ID || DEFAULT_MODEL_ID) as never);
+// }
 
 function buildChatModel(
   env: AgentDemoEnv,
@@ -329,36 +379,43 @@ function buildChatModel(
   action: "chat" | "dlp-test"
 ) {
   if (!modelConfigured(env)) return null;
-  const baseURL = `https://gateway.ai.cloudflare.com/v1/${env.ACCOUNT_ID}/${env.GATEWAY_ID}/custom-dashscope/compatible-mode/v1`;
-  const innerFetch: ModelFetch = modelFetchOverride ?? fetch.bind(globalThis);
-  const provider = createOpenAICompatible({
-    name: "dashscope",
-    baseURL,
-    apiKey: env.DASHSCOPE_API_KEY,
-    headers: {
-      "cf-aig-authorization": `Bearer ${env.CF_AIG_TOKEN}`,
-      "cf-aig-skip-cache": "true",
-      "cf-aig-metadata": JSON.stringify({
+  const base = (modelBindingOverride ?? env.AI) as unknown as ModelBinding;
+  const binding = new Proxy(base, {
+    get(target, prop) {
+      if (prop === "run") {
+        return async (...args: unknown[]) => {
+          try {
+            return await target.run(...args);
+          } catch (error) {
+            captureDlpFromError(
+              error,
+              dlpSink,
+              (target as { aiGatewayLogId?: string | null }).aiGatewayLogId
+            );
+            if (lastBlock(dlpSink)) throw new Error("dlp_blocked");
+            throw error;
+          }
+        };
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  }) as unknown as Ai;
+  const workersai = createWorkersAI({
+    binding,
+    gateway: {
+      id: env.GATEWAY_ID as string,
+      skipCache: true,
+      metadata: {
         actor_id: context.actorId,
         conversation_id: conversationId,
         request_id: context.requestId,
         role: context.role,
         action
-      })
-    },
-    fetch: async (input, init) => {
-      const resp = await innerFetch(input, init);
-      try {
-        await captureDlpOutcome(resp.clone(), dlpSink);
-      } catch {
       }
-      if (lastBlock(dlpSink)) {
-        throw new Error("dlp_blocked");
-      }
-      return resp;
     }
   });
-  return provider.chatModel((env.MODEL_ID || DEFAULT_MODEL_ID) as never);
+  return workersai((env.MODEL_ID || DEFAULT_MODEL_ID) as never);
 }
 
 function buildTools(

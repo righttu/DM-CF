@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
 import { Agent, getAgentByName } from "agents";
 import { MCPClientManager } from "agents/mcp/client";
-import { __setModelFetchForTests } from "../src/agent/index.js";
+import { setModelFake as __setModelFetchForTests } from "./model-fake.js";
 import { sha256Hex } from "../src/shared/access.js";
 import { SYSTEM_PROMPT } from "../src/research-policy.js";
 import {
@@ -157,7 +157,7 @@ function metadataHeader(input: unknown, init: unknown): string | null {
 }
 
 describe("ResearchAgent chat and tools", () => {
-  it("mocked Qwen invokes both report tools over real MCP then returns final text", async () => {
+  it("mocked Workers AI invokes both report tools over real MCP then returns final text", async () => {
     const jwt = await signJwt({ sub: "sub-chat-1", email: ANALYST_EMAIL });
     await connectAgentMcp({ sub: "sub-chat-1", email: ANALYST_EMAIL });
 
@@ -165,14 +165,16 @@ describe("ResearchAgent chat and tools", () => {
       url: string;
       body: { messages?: unknown[]; tools?: { function?: { name: string } }[] };
       metadata: string | null;
+      gatewayId: string | null;
     }[] = [];
     let call = 0;
     __setModelFetchForTests(async (input, init) => {
-      const url = typeof input === "string" ? input : input instanceof Request ? input.url : String(input);
+      const url = input;
       requests.push({
         url,
         body: JSON.parse(String(init?.body ?? "{}")),
-        metadata: metadataHeader(input, init)
+        metadata: metadataHeader(input, init),
+        gatewayId: init.headers["x-gateway-id"] ?? null
       });
       call += 1;
       if (call === 1) {
@@ -209,8 +211,8 @@ describe("ResearchAgent chat and tools", () => {
     expect(JSON.stringify(meta)).not.toContain("Bearer");
     expect(JSON.stringify(meta)).not.toContain("test-aig-token");
     expect(call).toBe(2);
-    expect(requests[0].url).toContain("gateway.ai.cloudflare.com");
-    expect(requests[0].url).toContain("custom-dashscope");
+    expect(requests[0].url).toBe("workers-ai://@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+    expect(requests[0].gatewayId).toBe("test-gateway");
     const first = requests[0].body;
     expect((first.messages as { role: string; content?: unknown }[])[0].role).toBe("system");
     expect((first.messages as { role: string; content?: unknown }[])[0].content).toBe(SYSTEM_PROMPT);

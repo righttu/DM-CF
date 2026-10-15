@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { captureDlpOutcome, type DlpOutcome } from "../src/agent/dlp.js";
-import { __setModelFetchForTests } from "../src/agent/index.js";
+import { setModelFake as __setModelFetchForTests } from "./model-fake.js";
 import { sha256Hex } from "../src/shared/access.js";
 import { ANALYST_EMAIL, authedFetch, connectAgentMcp, signJwt } from "./helpers.js";
 
