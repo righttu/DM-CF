@@ -585,6 +585,74 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     return this.getMcpServers().servers?.["research"];
   }
 
+  async diagnoseMcp(): Promise<Record<string, unknown>> {
+    const target = mcpServerUrlAllowed(this.env);
+    if (!target) return { error: "unconfigured" };
+    const secrets = [this.env.DASHSCOPE_API_KEY, this.env.CF_AIG_TOKEN];
+    const keys = [
+      ...(await this.ctx.storage.list({ prefix: `/${this.name}/research/` })).keys()
+    ];
+    const tokenKey = keys.find((k) => k.endsWith("/token"));
+    const stored = tokenKey
+      ? await this.ctx.storage.get<{ access_token?: string }>(tokenKey)
+      : undefined;
+    const accessToken = stored?.access_token;
+    const summary = {
+      storedKeys: keys.length,
+      hasToken: !!accessToken,
+      hasClientInfo: keys.some((k) => k.includes("/client_info/")),
+      registration: this.researchRegistration()?.state ?? null
+    };
+    if (!accessToken) return { ...summary, steps: [] };
+    secrets.push(accessToken);
+    const base: Record<string, string> = {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      authorization: `Bearer ${accessToken}`
+    };
+    const steps: unknown[] = [];
+    let sessionId: string | null = null;
+    const send = async (label: string, body: unknown) => {
+      try {
+        const headers = { ...base, ...(sessionId ? { "mcp-session-id": sessionId } : {}) };
+        const resp = await fetch(target, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          redirect: "manual",
+          signal: AbortSignal.timeout(10000)
+        });
+        sessionId = resp.headers.get("mcp-session-id") ?? sessionId;
+        const text = (await resp.text()).slice(0, 300);
+        steps.push({
+          label,
+          status: resp.status,
+          contentType: resp.headers.get("content-type"),
+          body: sanitizeDiagnostic(text, secrets)
+        });
+        return resp.status;
+      } catch (e) {
+        steps.push({ label, error: sanitizeDiagnostic(e, secrets) });
+        return 0;
+      }
+    };
+    const ok = await send("initialize", {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "diag", version: "1" }
+      }
+    });
+    if (ok >= 200 && ok < 300) {
+      await send("initialized", { jsonrpc: "2.0", method: "notifications/initialized" });
+      await send("tools/list", { jsonrpc: "2.0", id: 2, method: "tools/list" });
+    }
+    return { ...summary, steps };
+  }
+
   mcpStatus(): {
     connected: boolean;
     state: string;
@@ -1284,6 +1352,9 @@ async function handleRequest(
   if (url.pathname === "/api/diag/portal" && request.method === "POST") {
     const target = mcpServerUrlAllowed(env);
     if (!target) return json({ error: "unconfigured" }, 400);
+    if (new URL(request.url).searchParams.get("mode") === "stored") {
+      return json(await stub.diagnoseMcp());
+    }
     try {
       const resp = await fetch(target, {
         method: "POST",
