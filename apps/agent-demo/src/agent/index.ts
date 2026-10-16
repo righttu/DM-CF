@@ -1385,9 +1385,10 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
   private telemetry(context: AuditContext, action: string) {
     return {
       isEnabled: true,
-      functionId: "research-demo",
+      functionId: "abc-research-agent",
       metadata: {
-        agentId: "research-agent",
+        agentId: context.userEmail ?? context.actorId,
+        "user.id": context.userEmail ?? context.actorId,
         conversationId: this.ensureConversationId(),
         role: context.role,
         action,

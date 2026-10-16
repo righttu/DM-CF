@@ -1288,6 +1288,33 @@ describe("ResearchAgent chat and tools", () => {
     await slow;
   });
 
+  it("tags Agent tracing with a shared agent name, per-user agent id and a readable user.id", async () => {
+    const sub = "sub-trace-id";
+    const stub = await agentStub(sub);
+    const telemetry = await runInDurableObject(stub as never, (instance) =>
+      (instance as unknown as {
+        telemetry(
+          context: { actorId: string; userEmail: string; role: string; requestId: string; identitySource: string },
+          action: string
+        ): { functionId: string; metadata: Record<string, string> };
+      }).telemetry(
+        {
+          actorId: "hash-1",
+          userEmail: ANALYST_EMAIL,
+          role: "analyst",
+          requestId: "00000000-0000-4000-8000-000000000000",
+          identitySource: "access"
+        },
+        "chat"
+      )
+    );
+    expect(telemetry.functionId).toBe("abc-research-agent");
+    expect(telemetry.metadata.agentId).toBe(ANALYST_EMAIL);
+    expect(telemetry.metadata["user.id"]).toBe(ANALYST_EMAIL);
+    expect(telemetry.metadata.actorId).toBe("hash-1");
+    expect(JSON.stringify(telemetry)).not.toMatch(/Bearer|token/i);
+  });
+
   it("heals a woken connection that is connected but undiscovered without re-authorizing", async () => {
     const sub = "sub-heal";
     const jwt = await signJwt({ sub, email: ANALYST_EMAIL });
