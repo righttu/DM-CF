@@ -1,0 +1,23 @@
+AGENTS.md
+  s_02649a17b7b371::t_b8e944be9f1f0f 128-131
+apps/agent-demo/src/agent/index.ts
+  s_02649a17b7b371::t_f34bd4b0633b20 1388,1390-1391
+apps/agent-demo/test/agent.test.ts
+  s_02649a17b7b371::t_a62f79447149c9 1291-1317
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7de71db137ca535135909886b096aec1d9b43c17",
+  "prompts": {},
+  "sessions": {
+    "s_02649a17b7b371": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "calm-noun",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
