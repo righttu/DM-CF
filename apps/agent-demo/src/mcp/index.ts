@@ -391,11 +391,13 @@ function consentPage(options: {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>授权确认</title>
+<title>ABC MCP 授权确认</title>
 <style>
 body{font-family:system-ui,-apple-system,"PingFang SC",sans-serif;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
 .card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:32px;max-width:420px;width:90%}
-h1{font-size:18px;margin:0 0 16px}
+h1{font-size:18px;margin:0}
+.brand{display:flex;align-items:center;gap:12px;margin:0 0 16px}
+.logo{width:44px;height:44px;min-width:44px;border-radius:50%;background:#1d4ed8;color:#fff;font-weight:700;font-size:15px;display:flex;align-items:center;justify-content:center}
 p{font-size:14px;line-height:1.6;color:#cbd5e1}
 ul{background:#0f172a;border-radius:8px;padding:12px 12px 12px 28px;font-size:13px}
 .actions{display:flex;gap:12px;margin-top:20px}
@@ -406,7 +408,7 @@ button{flex:1;padding:10px 0;border-radius:8px;border:none;font-size:14px;cursor
 </head>
 <body>
 <div class="card">
-<h1>MCP 访问授权（演示环境）</h1>
+<div class="brand"><div class="logo">ABC</div><h1>ABC MCP 访问授权</h1></div>
 <p>应用 <strong>${clientName}</strong> 请求访问隔离的模拟研究数据。</p>
 <p>令牌将发送到：<strong>${redirectHost}</strong></p>
 <p>当前上游授权身份：<strong>${email}</strong>（角色：${role}）</p>

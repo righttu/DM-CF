@@ -3,7 +3,7 @@ const PAGE_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>安全投研演示 Agent</title>
+<title>ABC 投研 Agent</title>
 <style>
 :root{color-scheme:dark}
 *{box-sizing:border-box}
@@ -11,6 +11,8 @@ body{margin:0;font-family:system-ui,-apple-system,"PingFang SC",sans-serif;backg
 aside{width:280px;min-width:280px;background:#111a2e;border-right:1px solid #24304d;padding:20px;display:flex;flex-direction:column;gap:14px;overflow-y:auto}
 main{flex:1;display:flex;flex-direction:column;padding:20px;gap:14px;min-width:0;min-height:0}
 h1{font-size:16px;margin:0}
+.brand{display:flex;align-items:center;gap:10px}
+.logo{width:40px;height:40px;min-width:40px;border-radius:50%;background:#1d4ed8;color:#fff;font-weight:700;font-size:14px;letter-spacing:.02em;display:flex;align-items:center;justify-content:center}
 h2{font-size:13px;margin:0;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em}
 .badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;background:#1e3a5f;color:#7dd3fc;border:1px solid #2d4a70;margin:2px 2px 2px 0}
 [hidden]{display:none!important}
@@ -64,7 +66,7 @@ a{color:#7dd3fc}
 </head>
 <body>
 <aside>
-  <h1>安全投研演示</h1>
+  <div class="brand"><div class="logo">ABC</div><h1>ABC 投研 Agent</h1></div>
   <div>
     <span class="badge demo">合成数据</span>
     <span class="badge ro">只读</span>
