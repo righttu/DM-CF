@@ -138,6 +138,41 @@ function queuePortalOn(
   );
 }
 
+type PortalCallable = {
+  callPortalTool(
+    name: string,
+    args: Record<string, unknown>,
+    context: {
+      actorId: string;
+      userEmail: string;
+      role: "analyst" | "viewer";
+      requestId: string;
+      identitySource: string;
+    }
+  ): Promise<{ status: string; detail?: string; payload?: unknown }>;
+};
+
+function callPortalOn(
+  stub: unknown,
+  name: string,
+  args: Record<string, unknown>,
+  role: "analyst" | "viewer" = "analyst"
+): Promise<{ status: string; detail?: string; payload?: unknown }> {
+  return runInDurableObject(stub as never, (instance) =>
+    (instance as unknown as PortalCallable).callPortalTool(name, args, {
+      actorId: "actor-test",
+      userEmail: "analyst@example.com",
+      role,
+      requestId: crypto.randomUUID(),
+      identitySource: "local_jwt"
+    })
+  );
+}
+
+function flatTools(data: { servers?: { tools: string[] }[] }): string[] {
+  return (data.servers ?? []).flatMap((g) => g.tools);
+}
+
 async function sessionPortal(jwt: string) {
   const resp = await authedFetch("/api/session", { jwt });
   const data = (await resp.json()) as {
@@ -259,12 +294,10 @@ describe("ResearchAgent chat and tools", () => {
 
     const spy = vi.spyOn(console, "info").mockImplementation(() => {});
     try {
-      const resp = await authedFetch("/api/tool-test", {
+      const resp = await authedFetch("/api/connect", {
         jwt: jwtA,
         method: "POST",
         body: {
-          tool: "list_demo_companies",
-          args: {},
           actorId: "spoofed-actor",
           requestId: "spoofed-request",
           role: "admin"
@@ -275,7 +308,7 @@ describe("ResearchAgent chat and tools", () => {
       expect(data.requestId).not.toBe("spoofed-request");
       const records = spy.mock.calls
         .map((c) => String(c[0]))
-        .filter((s) => s.includes("tool_audit"))
+        .filter((s) => s.includes("mcp_audit"))
         .map((s) => JSON.parse(s) as Record<string, unknown>);
       const rec = records.at(-1)!;
       expect(rec.actorId).toBe(await sha256Hex("sub-actor-a"));
@@ -286,7 +319,7 @@ describe("ResearchAgent chat and tools", () => {
     }
   });
 
-  it("viewer is denied the document tool while connected, and never offered it", async () => {
+  it("viewer never sees the document tool: unadvertised upstream and denied locally", async () => {
     const jwt = await signJwt({ sub: "sub-chat-v", email: VIEWER_EMAIL });
     await connectAgentMcp({ sub: "sub-chat-v", email: VIEWER_EMAIL });
 
@@ -296,22 +329,26 @@ describe("ResearchAgent chat and tools", () => {
       return textResponse("ok");
     });
 
-    const deny = await authedFetch("/api/tool-test", {
-      jwt,
-      method: "POST",
-      body: { tool: "read_research_document", args: { document_id: "research-note-a" } }
-    });
-    const denyData = (await deny.json()) as { status: string };
-    expect(denyData.status).toBe("denied");
+    const session = (await (
+      await authedFetch("/api/session", { jwt })
+    ).json()) as { servers?: { tools: string[] }[] };
+    const tools = flatTools(session);
+    expect(tools).toContain("list_demo_companies");
+    expect(tools).toContain("get_latest_analysis");
+    expect(tools).not.toContain("read_research_document");
 
-    const list = await authedFetch("/api/tool-test", {
-      jwt,
-      method: "POST",
-      body: { tool: "list_demo_companies", args: {} }
-    });
-    const listData = (await list.json()) as { status: string; result?: { companies?: unknown[] } };
-    expect(listData.status).toBe("ok");
-    expect(listData.result?.companies).toHaveLength(2);
+    const stub = await agentStub("sub-chat-v");
+    const deny = await callPortalOn(
+      stub,
+      "read_research_document",
+      { document_id: "research-note-a" },
+      "viewer"
+    );
+    expect(deny.status).toBe("denied");
+
+    const list = await callPortalOn(stub, "list_demo_companies", {}, "viewer");
+    expect(list.status).toBe("ok");
+    expect((list.payload as { companies?: unknown[] }).companies).toHaveLength(2);
 
     await authedFetch("/api/chat", { jwt, method: "POST", body: { message: "有哪些模拟公司" } });
     const offered = (requests[0]?.body.tools ?? []).map((t) => t.function?.name);
@@ -332,29 +369,64 @@ describe("ResearchAgent chat and tools", () => {
     expect(data.error).toBe("mcp_not_connected");
   });
 
-  it("portal-namespaced mapping with absent remote names fails closed", async () => {
+  it("namespaced discovered names attribute to the right server and unknown names fail closed", async () => {
     const jwt = await signJwt({ sub: "sub-portal", email: ANALYST_EMAIL });
     await connectAgentMcp({ sub: "sub-portal", email: ANALYST_EMAIL });
-    const e = env as { MCP_TOOL_NAMES_JSON?: string };
-    const original = e.MCP_TOOL_NAMES_JSON;
-    e.MCP_TOOL_NAMES_JSON = JSON.stringify({
-      get_latest_analysis: "portal.research.get_latest_analysis"
-    });
+    const origList = MCPClientManager.prototype.listTools;
+    vi.spyOn(MCPClientManager.prototype, "listTools").mockImplementation(
+      function (this: unknown, options: unknown) {
+        const tools = (origList as (...a: unknown[]) => { name?: string }[]).call(
+          this,
+          options
+        );
+        return [
+          ...tools.filter((t) => t.name !== "get_latest_analysis"),
+          { name: "research-demo_get_latest_analysis", description: "via portal" },
+          { name: "abc-quant_get_signals", description: "quant" },
+          { name: "bad name!" },
+          { name: "portal_hidden" }
+        ];
+      } as never
+    );
     try {
-      const test = await authedFetch("/api/tool-test", {
-        jwt,
-        method: "POST",
-        body: { tool: "get_latest_analysis", args: { company_id: "DEMO001" } }
-      });
-      const testData = (await test.json()) as { status: string };
-      expect(testData.status).toBe("unavailable");
+      const session = (await (
+        await authedFetch("/api/session", { jwt })
+      ).json()) as {
+        servers: { id: string; label: string; tools: string[] }[];
+        suggestions: { title: string; message: string }[];
+        modelId: string;
+      };
+      const research = session.servers.find((g) => g.id === "research-demo");
+      expect(research?.label).toBe("Research MCP-S");
+      expect(research?.tools).toContain("research-demo_get_latest_analysis");
+      const quant = session.servers.find((g) => g.id === "abc-quant");
+      expect(quant?.label).toBe("Quant MCP-S");
+      expect(quant?.tools).toEqual(["abc-quant_get_signals"]);
+      const generic = session.servers.find((g) => g.id === "");
+      expect(generic?.label).toBe("MCP");
+      expect(generic?.tools).toContain("list_demo_companies");
+      expect(flatTools(session)).not.toContain("bad name!");
+      expect(flatTools(session)).not.toContain("portal_hidden");
+      expect(session.suggestions.length).toBeGreaterThan(0);
+      expect(session.modelId).toContain("@cf/");
 
-      const session = await authedFetch("/api/session", { jwt });
-      const sessionData = (await session.json()) as { tools: string[] };
-      expect(sessionData.tools).not.toContain("get_latest_analysis");
-      expect(sessionData.tools).toContain("list_demo_companies");
+      const requests: { body: { tools?: { function?: { name: string } }[] } }[] = [];
+      __setModelFetchForTests(async (_input, init) => {
+        requests.push({ body: JSON.parse(String(init?.body ?? "{}")) });
+        return textResponse("ok");
+      });
+      await authedFetch("/api/chat", { jwt, method: "POST", body: { message: "有哪些模拟公司" } });
+      const offered = (requests[0]?.body.tools ?? []).map((t) => t.function?.name);
+      expect(offered).toContain("research-demo_get_latest_analysis");
+      expect(offered).toContain("abc-quant_get_signals");
+      expect(offered).not.toContain("portal_hidden");
+      expect(offered).not.toContain("bad name!");
+
+      const stub = await agentStub("sub-portal");
+      const unknown = await callPortalOn(stub, "portal.research.get_latest_analysis", {});
+      expect(unknown.status).toBe("denied");
     } finally {
-      e.MCP_TOOL_NAMES_JSON = original;
+      vi.restoreAllMocks();
     }
   });
 
@@ -399,40 +471,30 @@ describe("ResearchAgent chat and tools", () => {
     expect(blank.status).toBe(400);
   });
 
-  it("validates tool-test args locally before any remote call", async () => {
+  it("callPortalTool refuses names the upstream never advertised", async () => {
     const jwt = await signJwt({ sub: "sub-args", email: ANALYST_EMAIL });
     await connectAgentMcp({ sub: "sub-args", email: ANALYST_EMAIL });
+    const stub = await agentStub("sub-args");
 
-    const injected = await authedFetch("/api/tool-test", {
-      jwt,
-      method: "POST",
-      body: { tool: "get_latest_analysis", args: { company_id: "DEMO001' OR '1'='1" } }
-    });
-    expect(injected.status).toBe(400);
-    const injectedData = (await injected.json()) as { status: string };
-    expect(injectedData.status).toBe("invalid_args");
+    for (const name of [
+      "run_sql",
+      "portal_list_servers",
+      "portal_toggle_servers",
+      "not a tool",
+      "../escape",
+      "list_demo_companies_extra"
+    ]) {
+      const out = await callPortalOn(stub, name, {});
+      expect(out.status).toBe("denied");
+    }
 
-    const extra = await authedFetch("/api/tool-test", {
-      jwt,
-      method: "POST",
-      body: { tool: "get_latest_analysis", args: { company_id: "DEMO001", extra: "x" } }
-    });
-    expect(extra.status).toBe(400);
+    const spy = vi.spyOn(MCPClientManager.prototype, "callTool");
+    const denied = await callPortalOn(stub, "run_sql", {});
+    expect(denied.status).toBe("denied");
+    expect(spy).not.toHaveBeenCalled();
 
-    const unknownId = await authedFetch("/api/tool-test", {
-      jwt,
-      method: "POST",
-      body: { tool: "read_research_document", args: { document_id: "../../etc/passwd" } }
-    });
-    expect(unknownId.status).toBe(400);
-
-    const unknownTool = await authedFetch("/api/tool-test", {
-      jwt,
-      method: "POST",
-      body: { tool: "run_sql", args: {} }
-    });
-    const unknownData = (await unknownTool.json()) as { status: string };
-    expect(unknownData.status).toBe("denied");
+    const ok = await callPortalOn(stub, "list_demo_companies", {});
+    expect(ok.status).toBe("ok");
   });
 
   it("clears history and rotates conversationId on role downgrade", async () => {
@@ -473,13 +535,14 @@ describe("ResearchAgent chat and tools", () => {
       const html = await page.text();
       expect(html).not.toContain("CANARY_ANALYST_REPLY_9931");
 
-      const doc = await authedFetch("/api/tool-test", {
-        jwt,
-        method: "POST",
-        body: { tool: "read_research_document", args: { document_id: "research-note-a" } }
-      });
-      const docData = (await doc.json()) as { status: string };
-      expect(docData.status).toBe("denied");
+      const viewerSess = (await (
+        await authedFetch("/api/session", { jwt })
+      ).json()) as {
+        user: { role: string };
+        suggestions: { title: string; message: string }[];
+      };
+      expect(viewerSess.user.role).toBe("viewer");
+      expect(viewerSess.suggestions.length).toBeGreaterThan(0);
 
       const requests: { body: { messages?: unknown[] } }[] = [];
       __setModelFetchForTests(async (_input, init) => {
@@ -516,13 +579,13 @@ describe("ResearchAgent chat and tools", () => {
       expect(sessionData.mcp.connected).toBe(false);
       expect(sessionData.mcp.state).toBe("stale");
 
-      const test = await authedFetch("/api/tool-test", {
+      const test = await authedFetch("/api/chat", {
         jwt,
         method: "POST",
-        body: { tool: "get_latest_analysis", args: { company_id: "DEMO001" } }
+        body: { message: "有哪些模拟公司" }
       });
-      const testData = (await test.json()) as { status: string };
-      expect(testData.status).toBe("unavailable");
+      expect(test.status).toBe(409);
+      expect(((await test.json()) as { error: string }).error).toBe("mcp_not_connected");
 
       const reconnect = await authedFetch("/api/connect", {
         jwt,
@@ -540,39 +603,48 @@ describe("ResearchAgent chat and tools", () => {
     }
   });
 
-  it("emits structured server audit events for tool-test without sensitive fields", async () => {
+  it("emits structured server audit events for tool-execute without sensitive fields", async () => {
     const jwt = await signJwt({ sub: "sub-audit", email: VIEWER_EMAIL });
     await connectAgentMcp({ sub: "sub-audit", email: VIEWER_EMAIL });
+    let call = 0;
+    __setModelFetchForTests(async () => {
+      call += 1;
+      if (call === 1) {
+        return toolCallResponse([
+          { id: "a1", name: "list_demo_companies", args: "{}" },
+          { id: "a2", name: "read_research_document", args: "{\"document_id\":\"research-note-a\"}" }
+        ]);
+      }
+      return textResponse("完成。");
+    });
     const spy = vi.spyOn(console, "info").mockImplementation(() => {});
     try {
-      const resp = await authedFetch("/api/tool-test", {
+      const resp = await authedFetch("/api/chat", {
         jwt,
         method: "POST",
-        body: {
-          tool: "read_research_document",
-          args: { document_id: "research-note-a" }
-        }
+        body: { message: "CF_DEMO_SECRET_9274" }
       });
-      const data = (await resp.json()) as { status: string };
-      expect(data.status).toBe("denied");
+      expect(resp.status).toBe(200);
       const records = spy.mock.calls
         .map((c) => String(c[0]))
         .filter((s) => s.includes("tool_audit"))
         .map((s) => JSON.parse(s) as Record<string, unknown>);
-      expect(records).toHaveLength(1);
+      expect(records.length).toBeGreaterThanOrEqual(1);
       const rec = records[0];
-      expect(rec.action).toBe("tool-test");
-      expect(rec.tool).toBe("read_research_document");
-      expect(rec.status).toBe("denied");
+      expect(rec.action).toBe("tool-execute");
+      expect(rec.tool).toBe("list_demo_companies");
+      expect(rec.status).toBe("ok");
       expect(rec.role).toBe("viewer");
       expect(rec.actorId).toBe(await sha256Hex("sub-audit"));
       expect(rec.requestId).toMatch(UUID_RE);
       expect(rec.identitySource).toBe("local_jwt");
       expect(typeof rec.conversationId).toBe("string");
-      const serialized = JSON.stringify(rec);
+      const serialized = JSON.stringify(records);
       expect(serialized).not.toContain(VIEWER_EMAIL);
       expect(serialized).not.toContain("research-note-a");
       expect(serialized).not.toContain("CF_DEMO_SECRET");
+      const denied = records.find((r) => r.tool === "read_research_document");
+      expect(denied).toBeUndefined();
     } finally {
       spy.mockRestore();
     }
@@ -678,10 +750,10 @@ describe("ResearchAgent chat and tools", () => {
     const sessA = await authedFetch("/api/session", { jwt: jwtA });
     const dataA = (await sessA.json()) as {
       mcp: { connected: boolean };
-      tools: string[];
+      servers?: { tools: string[] }[];
     };
     expect(dataA.mcp.connected).toBe(true);
-    expect(dataA.tools).toContain("list_demo_companies");
+    expect(flatTools(dataA)).toContain("list_demo_companies");
 
     const sessB = await authedFetch("/api/session", { jwt: jwtB });
     const dataB = (await sessB.json()) as { mcp: { connected: boolean } };
@@ -1332,16 +1404,12 @@ describe("ResearchAgent chat and tools", () => {
     });
     const session = (await (await authedFetch("/api/session", { jwt })).json()) as {
       mcp: { connected: boolean; state: string };
-      tools: string[];
+      servers?: { tools: string[] }[];
     };
     expect(session.mcp.connected).toBe(true);
-    expect(session.tools).toContain("list_demo_companies");
-    const test = await authedFetch("/api/tool-test", {
-      jwt,
-      method: "POST",
-      body: { tool: "list_demo_companies", args: {} }
-    });
-    expect(((await test.json()) as { status: string }).status).toBe("ok");
+    expect(flatTools(session)).toContain("list_demo_companies");
+    const test = await callPortalOn(stub, "list_demo_companies", {});
+    expect(test.status).toBe("ok");
     const clientAfter = await runInDurableObject(stub as never, (instance) =>
       (instance as unknown as {
         mcp: { getServersFromStorage(): { id: string; client_id: string | null }[] };
@@ -1670,5 +1738,119 @@ describe("ResearchAgent chat and tools", () => {
     expect(out.location).not.toContain("error");
     expect(out.location).not.toContain("AAA.BBB.CCC");
     expect(out.location).not.toContain("shh123");
+  });
+
+  it("session payload exposes servers, role-shaped suggestions, and the model id", async () => {
+    const jwtA = await signJwt({ sub: "sub-payload-a", email: ANALYST_EMAIL });
+    const jwtV = await signJwt({ sub: "sub-payload-v", email: VIEWER_EMAIL });
+    await connectAgentMcp({ sub: "sub-payload-a", email: ANALYST_EMAIL });
+    await connectAgentMcp({ sub: "sub-payload-v", email: VIEWER_EMAIL });
+    const a = (await (await authedFetch("/api/session", { jwt: jwtA })).json()) as {
+      servers: { id: string; label: string; tools: string[] }[];
+      suggestions: { title: string; message: string }[];
+      modelId: string;
+    };
+    const v = (await (await authedFetch("/api/session", { jwt: jwtV })).json()) as {
+      servers: { id: string; label: string; tools: string[] }[];
+      suggestions: { title: string; message: string }[];
+      modelId: string;
+    };
+    expect(a.servers.length).toBeGreaterThan(0);
+    expect(flatTools(a)).toContain("read_research_document");
+    expect(flatTools(v)).not.toContain("read_research_document");
+    expect(a.suggestions.length).toBeGreaterThan(0);
+    expect(v.suggestions.length).toBeGreaterThan(0);
+    expect(a.suggestions.every((s) => typeof s.title === "string" && typeof s.message === "string")).toBe(true);
+    expect(JSON.stringify(a.suggestions)).not.toEqual(JSON.stringify(v.suggestions));
+    expect(a.modelId).toBe(v.modelId);
+    expect(a.modelId).toContain("@cf/");
+  });
+
+  it("stopping a stream before any text persists nothing; after text keeps it with the stopped suffix", async () => {
+    const sub = "sub-stop";
+    const jwt = await signJwt({ sub, email: ANALYST_EMAIL });
+    await connectAgentMcp({ sub, email: ANALYST_EMAIL });
+    const stub = await agentStub(sub);
+    const ctxFor = () => ({
+      actorId: "actor-stop",
+      userEmail: ANALYST_EMAIL,
+      role: "analyst" as const,
+      requestId: crypto.randomUUID(),
+      identitySource: "local_jwt"
+    });
+
+    __setModelFetchForTests(async () => {
+      await new Promise((r) => setTimeout(r, 1500));
+      return textResponse("不应到达");
+    });
+    const stream1 = await runInDurableObject(stub as never, (instance) =>
+      (instance as unknown as {
+        chatStream(m: string, c: ReturnType<typeof ctxFor>): ReadableStream<Uint8Array>;
+      }).chatStream("空停止", ctxFor())
+    );
+    await new Promise((r) => setTimeout(r, 300));
+    await stream1.cancel();
+    await new Promise((r) => setTimeout(r, 1800));
+    const afterEarly = (await (await authedFetch("/api/session", { jwt })).json()) as {
+      history: unknown[];
+    };
+    expect(afterEarly.history).toHaveLength(0);
+
+    let call = 0;
+    __setModelFetchForTests(async () => {
+      call += 1;
+      if (call === 1) {
+        return openAiResponse({
+          id: "r1",
+          object: "chat.completion",
+          created: 0,
+          model: "m",
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: "assistant",
+                content: "前半截回答",
+                tool_calls: [
+                  { id: "s1", type: "function", function: { name: "list_demo_companies", arguments: "{}" } }
+                ]
+              },
+              finish_reason: "tool_calls"
+            }
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
+        });
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+      return textResponse("不应到达的结尾");
+    });
+    const stream2 = await runInDurableObject(stub as never, (instance) =>
+      (instance as unknown as {
+        chatStream(m: string, c: ReturnType<typeof ctxFor>): ReadableStream<Uint8Array>;
+      }).chatStream("中途停止", ctxFor())
+    );
+    const reader = stream2.getReader();
+    let collected = "";
+    const dec = new TextDecoder();
+    const pump = (async () => {
+      for (;;) {
+        const c = await reader.read();
+        if (c.done) break;
+        collected += dec.decode(c.value, { stream: true });
+      }
+    })();
+    await new Promise((r) => setTimeout(r, 800));
+    await reader.cancel();
+    await pump.catch(() => {});
+    await new Promise((r) => setTimeout(r, 1800));
+    const afterLate = (await (await authedFetch("/api/session", { jwt })).json()) as {
+      history: { role: string; content: string }[];
+    };
+    expect(collected).toContain("前半截回答");
+    expect(afterLate.history).toHaveLength(2);
+    expect(afterLate.history[1].role).toBe("assistant");
+    expect(afterLate.history[1].content).toContain("前半截回答");
+    expect(afterLate.history[1].content).toContain("（已停止生成）");
+    expect(afterLate.history[1].content).not.toContain("不应到达的结尾");
   });
 });

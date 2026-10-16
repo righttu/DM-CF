@@ -21,3 +21,4 @@ apps/agent-demo/test/evidence/
 .devin/agent-demo/.wrangler/
 .devin/agent-demo/node_modules
 .devin/agent-demo/*.local.*
+apps/agent-demo/container/embedding/model/

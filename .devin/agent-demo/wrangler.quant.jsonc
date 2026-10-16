@@ -1,0 +1,98 @@
+{
+  "name": "abc-quant-mcp-s",
+  "main": "../../apps/agent-demo/src/quant/index.ts",
+  "compatibility_date": "2026-10-02",
+  "compatibility_flags": ["nodejs_compat"],
+  "account_id": "ebc4f70211dc33165a239c6018da8e2d",
+  "keep_vars": true,
+  "workers_dev": false,
+  "routes": [
+    { "pattern": "abc-quant-mcp-s.righttu.uk", "custom_domain": true }
+  ],
+  "observability": {
+    "enabled": true,
+    "traces": { "enabled": true }
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "CONSENT_TRANSACTIONS", "class_name": "ConsentTransaction" },
+      { "name": "EMBEDDING", "class_name": "QuantEmbeddingContainer" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ConsentTransaction", "QuantEmbeddingContainer"]
+    }
+  ],
+  "containers": [
+    {
+      "class_name": "QuantEmbeddingContainer",
+      "name": "abc-quant-embedding-container",
+      "image": "../../apps/agent-demo/container/embedding/Dockerfile",
+      "instance_type": "standard-1",
+      "max_instances": 2
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "QUANT_DB",
+      "database_name": "quant-data",
+      "database_id": "85914a38-2ba4-4e85-b229-e1e1a043a266"
+    }
+  ],
+  "vectorize": [
+    { "binding": "VECTORIZE", "index_name": "stock-knowledge" }
+  ],
+  "kv_namespaces": [
+    { "binding": "OAUTH_KV", "id": "REPLACE_ME_QUANT_OAUTH_KV" }
+  ],
+  "vars": {
+    "TEAM_DOMAIN": "https://righttu.cloudflareaccess.com",
+    "MCP_AUTHORIZE_ACCESS_AUD": "REPLACE_ME_QUANT_AUD",
+    "PUBLIC_MCP_ORIGIN": "https://abc-quant-mcp-s.righttu.uk",
+    "ALLOWED_ORIGINS": "https://agent-demo.righttu.uk,https://portal-demo.righttu.uk",
+    "ENVIRONMENT": "production"
+  },
+  "env": {
+    "local": {
+      "durable_objects": {
+        "bindings": [
+          { "name": "CONSENT_TRANSACTIONS", "class_name": "ConsentTransaction" },
+          { "name": "EMBEDDING", "class_name": "QuantEmbeddingContainer" }
+        ]
+      },
+      "migrations": [
+        {
+          "tag": "v1",
+          "new_sqlite_classes": ["ConsentTransaction", "QuantEmbeddingContainer"]
+        }
+      ],
+      "d1_databases": [
+        {
+          "binding": "QUANT_DB",
+          "database_name": "quant-data-local",
+          "database_id": "local-quant-db"
+        }
+      ],
+      "vectorize": [
+        { "binding": "VECTORIZE", "index_name": "stock-knowledge-local" }
+      ],
+      "kv_namespaces": [
+        { "binding": "OAUTH_KV", "id": "local-quant-oauth-kv" }
+      ],
+      "vars": {
+        "ENVIRONMENT": "local",
+        "PUBLIC_MCP_ORIGIN": "http://localhost:8789",
+        "ALLOWED_ORIGINS": "http://localhost:8787",
+        "TEAM_DOMAIN": "https://local.invalid",
+        "MCP_AUTHORIZE_ACCESS_AUD": "local-quant-aud",
+        "ANALYST_EMAILS": "analyst@local.test",
+        "VIEWER_EMAILS": "viewer@local.test",
+        "LOCAL_DEV_IDENTITY_ENABLED": "true",
+        "LOCAL_ANALYST_EMAIL": "analyst@local.test",
+        "LOCAL_VIEWER_EMAIL": "viewer@local.test"
+      }
+    }
+  }
+}

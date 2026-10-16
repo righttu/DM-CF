@@ -19,6 +19,11 @@
       "database_name": "demo-agent-db-test",
       "database_id": "demo-agent-db-test",
       "migrations_dir": "../../apps/agent-demo/migrations"
+    },
+    {
+      "binding": "QUANT_DB",
+      "database_name": "quant-db-test",
+      "database_id": "quant-db-test"
     }
   ],
   "kv_namespaces": [
@@ -37,7 +42,6 @@
     "ANALYST_EMAILS": "analyst@example.com",
     "VIEWER_EMAILS": "viewer@example.com",
     "MCP_SERVER_URL": "http://localhost/mcp",
-    "MCP_TOOL_NAMES_JSON": "{}",
     "ACCOUNT_ID": "test-account",
     "GATEWAY_ID": "test-gateway",
     "MODEL_ID": "@cf/zai-org/glm-5.3-flash",

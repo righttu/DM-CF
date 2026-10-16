@@ -4,7 +4,6 @@ import { wrapAISDK } from "agents/observability/ai";
 import * as ai from "ai";
 // import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { createWorkersAI } from "workers-ai-provider";
-import { z } from "zod";
 import {
   authenticate,
   checkBrowserOrigin,
@@ -18,18 +17,14 @@ import {
   type DemoRole
 } from "../shared/access.js";
 import { readBoundedText } from "../shared/body.js";
-import { CANONICAL_TOOLS, type CanonicalTool } from "../shared/demo-tools.js";
 import { captureDlpFromError, lastBlock, type DlpOutcome } from "./dlp.js";
-import { renderPage } from "./ui.js";
+import { renderPage, pageScriptHash } from "./ui.js";
 import {
-  DEMO_SCENARIOS,
-  DOCUMENT_IDS,
   MAX_HISTORY_MESSAGES,
   MAX_MESSAGE_CHARACTERS,
   MAX_TOOL_STEPS,
-  COMPANY_IDS,
-  SYSTEM_PROMPT,
-  TOOL_DESCRIPTIONS
+  SUGGESTED_PROMPTS,
+  SYSTEM_PROMPT
 } from "../research-policy.js";
 
 interface AgentDemoEnv extends AccessEnv {
@@ -38,7 +33,6 @@ interface AgentDemoEnv extends AccessEnv {
   AGENT_ACCESS_AUD?: string;
   PUBLIC_ORIGIN?: string;
   MCP_SERVER_URL?: string;
-  MCP_TOOL_NAMES_JSON?: string;
   ACCOUNT_ID?: string;
   GATEWAY_ID?: string;
   MODEL_ID?: string;
@@ -121,6 +115,25 @@ interface PortalServerRow {
 interface ChatEvent {
   text: string;
   kind: "" | "ok" | "denied";
+  server?: string;
+  tool?: string;
+  status?: string;
+  durationMs?: number;
+}
+
+const SERVER_LABELS: Record<string, string> = {
+  "research-demo": "Research MCP-S",
+  "abc-quant": "Quant MCP-S"
+};
+
+const PORTAL_TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+
+interface DiscoveredTool {
+  name: string;
+  description: string;
+  inputSchema: unknown;
+  server: string;
+  label: string;
 }
 
 const SECURITY_HEADERS: Record<string, string> = {
@@ -198,28 +211,6 @@ function mcpServerUrlAllowed(env: AgentDemoEnv): string | null {
   } catch {
     return null;
   }
-}
-
-function toolNameMap(env: AgentDemoEnv): Record<string, string> | null {
-  if (!env.MCP_TOOL_NAMES_JSON) return {};
-  try {
-    const parsed = JSON.parse(env.MCP_TOOL_NAMES_JSON) as Record<string, unknown>;
-    const map: Record<string, string> = {};
-    for (const [key, value] of Object.entries(parsed)) {
-      if (CANONICAL_TOOLS.includes(key as CanonicalTool) && typeof value === "string") {
-        map[key] = value;
-      }
-    }
-    return map;
-  } catch {
-    return null;
-  }
-}
-
-function remoteName(env: AgentDemoEnv, canonical: CanonicalTool): string | null {
-  const map = toolNameMap(env);
-  if (map === null) return null;
-  return map[canonical] ?? canonical;
 }
 
 const REQUEST_UUID_PATTERN =
@@ -470,6 +461,7 @@ interface ChatOutcome {
   events: ChatEvent[];
   dlp?: DlpOutcome;
   mcpRequired?: boolean;
+  stopped?: boolean;
 }
 
 const BLOCKED_REPLY = "该请求被 AI Gateway DLP 策略拦截（云端确认），未返回模型内容。";
@@ -485,48 +477,40 @@ function buildTools(
     events.push(event);
     onEvent?.(event);
   };
-  const execute = (canonical: CanonicalTool) => async (args: Record<string, unknown>) => {
-    const key = `${canonical}:${JSON.stringify(args)}`;
-    if (seen.has(key)) {
-      return { already_retrieved: true, result: seen.get(key) };
-    }
-    record({ text: `工具调用 ${canonical}`, kind: "" });
-    const result = await agent.callRemoteTool(canonical, args, context);
-    if (result.status === "ok") seen.set(key, result.payload);
-    agent.audit(context, "tool-execute", canonical, result.status);
-    if (result.status === "ok") {
-      record({ text: `工具返回 ${canonical}`, kind: "ok" });
-    } else {
-      record({
-        text: `工具${result.status === "denied" ? "被拒绝" : "不可用/出错"} ${canonical}`,
-        kind: "denied"
-      });
-    }
-    return result.payload ?? { error: result.status };
-  };
-  const available = new Set(agent.availableCanonical(context.role));
   const tools: ai.ToolSet = {};
-  if (available.has("list_demo_companies")) {
-    tools.list_demo_companies = ai.tool({
-      description: TOOL_DESCRIPTIONS.list_demo_companies,
-      inputSchema: z.object({}),
-      execute: execute("list_demo_companies")
-    });
-  }
-  if (available.has("get_latest_analysis")) {
-    tools.get_latest_analysis = ai.tool({
-      description: TOOL_DESCRIPTIONS.get_latest_analysis,
-      inputSchema: z.object({ company_id: z.enum(COMPANY_IDS) }),
-      execute: async (args: { company_id: string }) =>
-        execute("get_latest_analysis")({ company_id: args.company_id })
-    });
-  }
-  if (available.has("read_research_document")) {
-    tools.read_research_document = ai.tool({
-      description: TOOL_DESCRIPTIONS.read_research_document,
-      inputSchema: z.object({ document_id: z.enum(DOCUMENT_IDS) }),
-      execute: async (args: { document_id: string }) =>
-        execute("read_research_document")({ document_id: args.document_id })
+  for (const tool of agent.discoveredTools()) {
+    tools[tool.name] = ai.tool({
+      description: tool.description || tool.name,
+      inputSchema: ai.jsonSchema(
+        (tool.inputSchema ?? { type: "object", properties: {} }) as Parameters<
+          typeof ai.jsonSchema
+        >[0]
+      ),
+      execute: async (args: Record<string, unknown>) => {
+        const key = `${tool.name}:${JSON.stringify(args)}`;
+        if (seen.has(key)) {
+          return { already_retrieved: true, result: seen.get(key) };
+        }
+        const started = Date.now();
+        record({ text: `工具调用 ${tool.name}`, kind: "", server: tool.server, tool: tool.name, status: "running" });
+        const result = await agent.callPortalTool(tool.name, args, context);
+        const durationMs = Date.now() - started;
+        if (result.status === "ok") seen.set(key, result.payload);
+        agent.audit(context, "tool-execute", tool.name, result.status);
+        const kind = result.status === "ok" ? "ok" : "denied";
+        record({
+          text:
+            result.status === "ok"
+              ? `工具返回 ${tool.name}`
+              : `工具${result.status === "denied" ? "被拒绝" : "不可用/出错"} ${tool.name}`,
+          kind,
+          server: tool.server,
+          tool: tool.name,
+          status: result.status,
+          durationMs
+        });
+        return result.payload ?? { error: result.status };
+      }
     });
   }
   return tools;
@@ -853,80 +837,6 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     return this.getMcpServers().servers?.["research"];
   }
 
-  async diagnoseMcp(): Promise<Record<string, unknown>> {
-    const target = mcpServerUrlAllowed(this.env);
-    if (!target) return { error: "unconfigured" };
-    const secrets = [this.env.DASHSCOPE_API_KEY, this.env.CF_AIG_TOKEN];
-    const keys = [
-      ...(await this.ctx.storage.list({ prefix: `/${this.name}/research/` })).keys()
-    ];
-    const tokenKey = keys.find((k) => k.endsWith("/token"));
-    const stored = tokenKey
-      ? await this.ctx.storage.get<{ access_token?: string }>(tokenKey)
-      : undefined;
-    const accessToken = stored?.access_token;
-    const summary = {
-      storedKeys: keys.length,
-      hasToken: !!accessToken,
-      hasClientInfo: keys.some((k) => k.includes("/client_info/")),
-      registration: this.researchRegistration()?.state ?? null
-    };
-    if (!accessToken) return { ...summary, steps: [] };
-    secrets.push(accessToken);
-    const base: Record<string, string> = {
-      "content-type": "application/json",
-      accept: "application/json, text/event-stream",
-      authorization: `Bearer ${accessToken}`
-    };
-    const steps: unknown[] = [];
-    let sessionId: string | null = null;
-    const send = async (label: string, body: unknown) => {
-      try {
-        const headers = { ...base, ...(sessionId ? { "mcp-session-id": sessionId } : {}) };
-        const resp = await fetch(target, {
-          method: "POST",
-          headers,
-          body: JSON.stringify(body),
-          redirect: "manual",
-          signal: AbortSignal.timeout(10000)
-        });
-        sessionId = resp.headers.get("mcp-session-id") ?? sessionId;
-        const text = (await resp.text()).slice(0, label === "portal_list_servers" ? 700 : 300);
-        steps.push({
-          label,
-          status: resp.status,
-          contentType: resp.headers.get("content-type"),
-          body: sanitizeDiagnostic(text, secrets)
-        });
-        return resp.status;
-      } catch (e) {
-        steps.push({ label, error: sanitizeDiagnostic(e, secrets) });
-        return 0;
-      }
-    };
-    const ok = await send("initialize", {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: {
-        protocolVersion: "2025-06-18",
-        capabilities: {},
-        clientInfo: { name: "diag", version: "1" }
-      }
-    });
-    if (ok >= 200 && ok < 300) {
-      await send("initialized", { jsonrpc: "2.0", method: "notifications/initialized" });
-      await send("tools/list", { jsonrpc: "2.0", id: 2, method: "tools/list" });
-      await send("portal_list_servers", {
-        jsonrpc: "2.0",
-        id: 3,
-        method: "tools/call",
-        params: { name: "portal_list_servers", arguments: {} }
-      });
-    }
-    return { ...summary, steps };
-  }
-
   mcpStatus(): {
     connected: boolean;
     state: string;
@@ -959,15 +869,35 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     return status === null ? text : `[HTTP ${status}] ${text}`;
   }
 
-  availableCanonical(role: DemoRole): string[] {
-    const allowed: CanonicalTool[] =
-      role === "analyst" ? CANONICAL_TOOLS : ["list_demo_companies", "get_latest_analysis"];
-    const discovered = this.discoveredRemoteNames();
-    if (discovered.size === 0) return [];
-    return allowed.filter((c) => {
-      const remote = remoteName(this.env, c);
-      return remote !== null && discovered.has(remote);
-    });
+  discoveredTools(): DiscoveredTool[] {
+    const out: DiscoveredTool[] = [];
+    for (const tool of this.mcp.listTools({ serverId: "research" })) {
+      const name = typeof tool?.name === "string" ? tool.name : "";
+      if (!PORTAL_TOOL_NAME.test(name) || name.startsWith("portal_")) continue;
+      const server =
+        Object.keys(SERVER_LABELS).find((id) => name.startsWith(`${id}_`)) ?? "";
+      out.push({
+        name,
+        description: typeof tool?.description === "string" ? tool.description : "",
+        inputSchema: tool?.inputSchema,
+        server,
+        label: server ? SERVER_LABELS[server] : "MCP"
+      });
+    }
+    return out;
+  }
+
+  private discoveredServers(): { id: string; label: string; tools: string[] }[] {
+    const groups = new Map<string, { id: string; label: string; tools: string[] }>();
+    for (const t of this.discoveredTools()) {
+      let g = groups.get(t.server);
+      if (!g) {
+        g = { id: t.server, label: t.label, tools: [] };
+        groups.set(t.server, g);
+      }
+      g.tools.push(t.name);
+    }
+    return [...groups.values()];
   }
 
   async getSessionData(role: DemoRole) {
@@ -984,9 +914,9 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
         ...mcp,
         detail: mcp.detail ?? this.state.lastMcpFailure ?? null
       },
-      tools: this.availableCanonical(role),
-      expectedTools:
-        role === "analyst" ? [...CANONICAL_TOOLS] : ["list_demo_companies", "get_latest_analysis"],
+      servers: this.discoveredServers(),
+      suggestions: SUGGESTED_PROMPTS[role],
+      modelId: this.env.MODEL_ID || DEFAULT_MODEL_ID,
       portal: {
         listAvailable: connected && names.has("portal_list_servers"),
         manageAvailable: connected && names.has("portal_toggle_servers"),
@@ -1261,17 +1191,11 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     return { status: "resolved" };
   }
 
-  async callRemoteTool(
-    canonical: CanonicalTool,
+  async callPortalTool(
+    name: string,
     args: Record<string, unknown>,
     context: AuditContext
   ): Promise<{ status: "ok" | "denied" | "unavailable" | "error"; detail?: string; payload?: unknown }> {
-    if (context.role !== "analyst" && canonical === "read_research_document") {
-      return { status: "denied", detail: "viewer 无权访问研究文档" };
-    }
-    if (!CANONICAL_TOOLS.includes(canonical)) {
-      return { status: "denied", detail: "unknown_tool" };
-    }
     const current = this.mcpStatus();
     if (!current.connected) {
       return {
@@ -1279,14 +1203,17 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
         detail: `MCP 未连接或连接已过期（状态：${current.state}${current.detail ? "；" + current.detail : ""}）`
       };
     }
-    const remote = remoteName(this.env, canonical);
-    if (remote === null || !this.discoveredRemoteNames().has(remote)) {
-      return { status: "unavailable", detail: "工具未在已连接服务中公布" };
+    if (
+      !PORTAL_TOOL_NAME.test(name) ||
+      name.startsWith("portal_") ||
+      !this.discoveredRemoteNames().has(name)
+    ) {
+      return { status: "denied", detail: "工具未在已连接服务中公布" };
     }
     try {
       const result = (await this.mcp.callTool({
         serverId: "research",
-        name: remote,
+        name,
         arguments: args,
         _meta: this.portalMeta(context)
       })) as {
@@ -1312,28 +1239,6 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     }
   }
 
-  private validateToolArgs(
-    tool: CanonicalTool,
-    args: Record<string, unknown>
-  ): Record<string, unknown> | null {
-    const keys = Object.keys(args);
-    if (tool === "list_demo_companies") {
-      return keys.length === 0 ? {} : null;
-    }
-    if (tool === "get_latest_analysis") {
-      return keys.length === 1 &&
-        typeof args.company_id === "string" &&
-        (COMPANY_IDS as readonly string[]).includes(args.company_id)
-        ? { company_id: args.company_id }
-        : null;
-    }
-    return keys.length === 1 &&
-      typeof args.document_id === "string" &&
-      (DOCUMENT_IDS as readonly string[]).includes(args.document_id)
-      ? { document_id: args.document_id }
-      : null;
-  }
-
   audit(
     context: AuditContext,
     action: string,
@@ -1341,12 +1246,11 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     status: string,
     event: "tool_audit" | "mcp_audit" = "tool_audit"
   ): void {
-    const canonical = CANONICAL_TOOLS.includes(tool as CanonicalTool) ? tool : "unknown";
     console.info(
       JSON.stringify({
         event,
         action,
-        tool: canonical,
+        tool: typeof tool === "string" ? tool.slice(0, 64) : "unknown",
         status,
         role: context.role,
         actorId: context.actorId,
@@ -1355,31 +1259,6 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
         conversationId: this.ensureConversationId()
       })
     );
-  }
-
-  async toolTest(
-    tool: string,
-    args: Record<string, unknown>,
-    context: AuditContext
-  ): Promise<{ status: string; detail?: string; result?: unknown }> {
-    await this.ensureMcpReady();
-    if (!CANONICAL_TOOLS.includes(tool as CanonicalTool)) {
-      this.audit(context, "tool-test", tool, "denied");
-      return { status: "denied", detail: "unknown_tool" };
-    }
-    if ((tool as CanonicalTool) === "read_research_document" && context.role !== "analyst") {
-      this.audit(context, "tool-test", tool, "denied");
-      return { status: "denied", detail: "viewer 无权访问研究文档" };
-    }
-    const validated = this.validateToolArgs(tool as CanonicalTool, args);
-    if (validated === null) {
-      this.audit(context, "tool-test", tool, "invalid_args");
-      return { status: "invalid_args", detail: "参数未通过本地校验" };
-    }
-    const outcome = await this.callRemoteTool(tool as CanonicalTool, validated, context);
-    this.audit(context, "tool-test", tool, outcome.status);
-    if (outcome.status === "ok") return { status: "ok", result: outcome.payload };
-    return { status: outcome.status, detail: outcome.detail };
   }
 
   private telemetry(context: AuditContext, action: string) {
@@ -1406,22 +1285,36 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
 
   chatStream(message: string, context: AuditContext): ReadableStream<Uint8Array> {
     const encoder = new TextEncoder();
+    const abort = new AbortController();
     return new ReadableStream<Uint8Array>({
       start: (controller) => {
-        const write = (value: unknown) =>
-          controller.enqueue(encoder.encode(`${JSON.stringify(value)}\n`));
-        this.runChat(message, context, write)
+        const write = (value: unknown) => {
+          try {
+            controller.enqueue(encoder.encode(`${JSON.stringify(value)}\n`));
+          } catch {
+          }
+        };
+        this.runChat(message, context, write, abort.signal)
           .then((outcome) =>
             write({
               type: "done",
               reply: outcome.reply,
+              stopped: outcome.stopped === true,
               dlp: outcome.dlp,
               mcpRequired: outcome.mcpRequired === true,
               requestId: context.requestId
             })
           )
           .catch(() => write({ type: "error", requestId: context.requestId }))
-          .finally(() => controller.close());
+          .finally(() => {
+            try {
+              controller.close();
+            } catch {
+            }
+          });
+      },
+      cancel: () => {
+        abort.abort();
       }
     });
   }
@@ -1429,7 +1322,8 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
   private async runChat(
     message: string,
     context: AuditContext,
-    emit: (signal: ChatSignal) => void
+    emit: (signal: ChatSignal) => void,
+    signal?: AbortSignal
   ): Promise<ChatOutcome> {
     await this.ensureMcpReady();
     this.syncRole(context.role);
@@ -1499,26 +1393,39 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
         maxRetries: 0,
         maxOutputTokens: 2048,
         experimental_telemetry: telemetry,
+        abortSignal: signal,
         onError: () => undefined
       });
       let text = "";
       let errored = false;
       let stepHasText = false;
-      for await (const part of result.fullStream as AsyncIterable<{
-        type: string;
-        text?: string;
-      }>) {
-        if (part.type === "start-step") {
-          stepHasText = false;
-        } else if (part.type === "text-delta" && typeof part.text === "string") {
-          let delta = part.text;
-          if (!stepHasText && text.length > 0) delta = `\n\n${delta}`;
-          stepHasText = true;
-          text += delta;
-          emit({ type: "delta", text: delta });
-        } else if (part.type === "error") {
-          errored = true;
+      try {
+        for await (const part of result.fullStream as AsyncIterable<{
+          type: string;
+          text?: string;
+        }>) {
+          if (part.type === "start-step") {
+            stepHasText = false;
+          } else if (part.type === "text-delta" && typeof part.text === "string") {
+            let delta = part.text;
+            if (!stepHasText && text.length > 0) delta = `\n\n${delta}`;
+            stepHasText = true;
+            text += delta;
+            emit({ type: "delta", text: delta });
+          } else if (part.type === "error") {
+            errored = true;
+          }
         }
+      } catch (streamError) {
+        if (!signal?.aborted) throw streamError;
+      }
+      if (signal?.aborted) {
+        const partial = text.trim();
+        if (!partial) return { reply: "", events, stopped: true };
+        const reply = `${partial}\n\n（已停止生成）`;
+        this.persistTurn(userMessage, reply);
+        record({ text: "已停止生成", kind: "denied" });
+        return { reply, events, stopped: true };
       }
       const blocked = blockedOutcome();
       if (blocked) return blocked;
@@ -1564,13 +1471,12 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
       "dlp-test"
     );
     if (!model) return { error: "模型网关未配置" };
-    const scenario = DEMO_SCENARIOS.find((s) => s.id === "dlp");
     const traced = wrapAISDK(ai, { storeMessages: false, storeTools: false });
     try {
       const result = await traced.generateText({
         model,
         system: SYSTEM_PROMPT,
-        prompt: scenario?.message ?? "CF_DEMO_SECRET_9274",
+        prompt: "CF_DEMO_SECRET_9274",
         maxRetries: 0,
         maxOutputTokens: 2048,
         experimental_telemetry: this.telemetry(context, "dlp-test")
@@ -1646,10 +1552,10 @@ async function handleRequest(
             actorId: doName
           },
           history: session.history,
-          scenarios: DEMO_SCENARIOS,
           mcp: session.mcp,
-          tools: session.tools,
-          expectedTools: session.expectedTools,
+          servers: session.servers,
+          suggestions: session.suggestions,
+          modelId: session.modelId,
           conversationId: session.conversationId,
           sessions: session.sessions,
           portal: session.portal,
@@ -1666,7 +1572,7 @@ async function handleRequest(
         headers: {
           "content-type": "text/html; charset=utf-8",
           ...SECURITY_HEADERS,
-          "content-security-policy": `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
+          "content-security-policy": `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}' 'sha256-${await pageScriptHash()}'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
         }
       }
     );
@@ -1685,8 +1591,9 @@ async function handleRequest(
       conversationId: session.conversationId,
       sessions: session.sessions,
       mcp: session.mcp,
-      tools: session.tools,
-      expectedTools: session.expectedTools,
+      servers: session.servers,
+      suggestions: session.suggestions,
+      modelId: session.modelId,
       portal: session.portal,
       setup: {
         mcpConfigured: mcpServerUrlAllowed(env) !== null,
@@ -1710,45 +1617,6 @@ async function handleRequest(
       .toLowerCase();
     if (url.pathname.startsWith("/api/") && contentType !== "application/json") {
       return json({ error: "unsupported_media_type" }, 415);
-    }
-  }
-
-  if (url.pathname === "/api/diag/portal" && request.method === "POST") {
-    const target = mcpServerUrlAllowed(env);
-    if (!target) return json({ error: "unconfigured" }, 400);
-    if (new URL(request.url).searchParams.get("mode") === "stored") {
-      return json(await stub.diagnoseMcp());
-    }
-    try {
-      const resp = await fetch(target, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          accept: "application/json, text/event-stream"
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          method: "initialize",
-          params: {
-            protocolVersion: "2025-06-18",
-            capabilities: {},
-            clientInfo: { name: "diag", version: "1" }
-          }
-        }),
-        redirect: "manual",
-        signal: AbortSignal.timeout(10000)
-      });
-      const text = (await resp.text()).slice(0, 300);
-      return json({
-        status: resp.status,
-        contentType: resp.headers.get("content-type"),
-        location: resp.headers.get("location"),
-        wwwAuthenticate: resp.headers.get("www-authenticate"),
-        body: sanitizeDiagnostic(text, [env.DASHSCOPE_API_KEY, env.CF_AIG_TOKEN])
-      });
-    } catch (e) {
-      return json({ error: "fetch_failed", detail: sanitizeDiagnostic(e, [env.DASHSCOPE_API_KEY, env.CF_AIG_TOKEN]) }, 502);
     }
   }
 
@@ -1882,29 +1750,6 @@ async function handleRequest(
         },
         409
       );
-    }
-    return json({ ...result, requestId: auditContext.requestId });
-  }
-
-  if (url.pathname === "/api/tool-test" && request.method === "POST") {
-    const parsed = await readJsonObject(request);
-    if (!parsed.ok) return json({ error: parsed.error }, parsed.status);
-    const tool = parsed.value.tool;
-    if (typeof tool !== "string" || tool.length > 64) {
-      return json({ error: "invalid_tool" }, 400);
-    }
-    const rawArgs = parsed.value.args;
-    const args =
-      rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)
-        ? (rawArgs as Record<string, unknown>)
-        : rawArgs === undefined
-          ? {}
-          : null;
-    if (args === null) return json({ error: "invalid_args" }, 400);
-    const result: { status: string; detail?: string; result?: unknown } =
-      await stub.toolTest(tool, args, auditContext);
-    if (result.status === "invalid_args") {
-      return json({ ...result, requestId: auditContext.requestId }, 400);
     }
     return json({ ...result, requestId: auditContext.requestId });
   }
