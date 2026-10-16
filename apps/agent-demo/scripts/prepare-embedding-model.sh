@@ -12,6 +12,15 @@ if [ ! -d "$SRC" ]; then
   exit 1
 fi
 
-mkdir -p "$DEST"
-cp -R "$SRC"/. "$DEST"/
-echo "model copied to $DEST"
+FILES=(
+  config.json config_sentence_transformers.json modules.json sentence_bert_config.json
+  model.safetensors tokenizer.json tokenizer_config.json special_tokens_map.json vocab.txt
+  1_Pooling/config.json
+)
+
+rm -rf "$DEST"
+mkdir -p "$DEST/1_Pooling"
+for f in "${FILES[@]}"; do
+  cp "$SRC/$f" "$DEST/$f"
+done
+echo "model copied to $DEST ($(du -sh "$DEST" | cut -f1))"
