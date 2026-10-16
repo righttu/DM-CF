@@ -1,0 +1,19 @@
+.devin/agent-demo/wrangler.quant.jsonc
+  s_02649a17b7b371::t_7f0544858d80f5 48,52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e63d034d39c6cd8f22b83e0407aa18f20618a59f",
+  "prompts": {},
+  "sessions": {
+    "s_02649a17b7b371": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "calm-noun",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
