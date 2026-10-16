@@ -45,11 +45,11 @@
     { "binding": "VECTORIZE", "index_name": "stock-knowledge" }
   ],
   "kv_namespaces": [
-    { "binding": "OAUTH_KV", "id": "REPLACE_ME_QUANT_OAUTH_KV" }
+    { "binding": "OAUTH_KV", "id": "3e6db718bcf84164b3fffbd483156555" }
   ],
   "vars": {
     "TEAM_DOMAIN": "https://righttu.cloudflareaccess.com",
-    "MCP_AUTHORIZE_ACCESS_AUD": "REPLACE_ME_QUANT_AUD",
+    "MCP_AUTHORIZE_ACCESS_AUD": "8e49e8855f422256e227ad66632a33477839f4de231759fd398061476182513d",
     "PUBLIC_MCP_ORIGIN": "https://abc-quant-mcp-s.righttu.uk",
     "ALLOWED_ORIGINS": "https://agent-demo.righttu.uk,https://portal-demo.righttu.uk",
     "ENVIRONMENT": "production"
