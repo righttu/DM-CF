@@ -1,0 +1,29 @@
+AGENTS.md
+  s_02649a17b7b371::t_21fc6556ae696d 114-123
+apps/agent-demo/src/agent/index.ts
+  s_02649a17b7b371::t_d885ca71111923 79-105,107,109,452,694,701-796,982,1395,1550,1613,1653,1685,1769-1794
+apps/agent-demo/src/agent/ui.ts
+  s_02649a17b7b371::t_a7675cd8332cba 10,12,32,51-55,57-58,109-112,187-227,317,650,654,668
+apps/agent-demo/src/shared/access.ts
+  s_02649a17b7b371::t_3c36d9192aebe0 15
+apps/agent-demo/test/agent.test.ts
+  s_02649a17b7b371::t_052b37a0318045 204,206,1231-1290
+apps/agent-demo/test/dlp.test.ts
+  s_02649a17b7b371::t_735532f874a3c4 361,364
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c3368626059e97ee84e4040f098613bd3003c041",
+  "prompts": {},
+  "sessions": {
+    "s_02649a17b7b371": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "calm-noun",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
