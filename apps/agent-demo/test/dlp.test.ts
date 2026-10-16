@@ -358,13 +358,12 @@ describe("DLP outcome classification", () => {
 
     const dlpMeta = JSON.parse(metaCalls[1]!) as Record<string, string>;
     expect(Object.keys(dlpMeta).sort()).toEqual(
-      ["action", "actor_id", "conversation_id", "request_id", "role"].sort()
+      ["action", "conversation_id", "request_id", "role", "user"].sort()
     );
     expect(dlpMeta.action).toBe("dlp-test");
-    expect(dlpMeta.actor_id).toBe(await sha256Hex("sub-dlp-424"));
+    expect(dlpMeta.user).toBe(ANALYST_EMAIL);
     expect(dlpMeta.request_id).toBe(dlpData.requestId);
     expect(JSON.stringify(dlpMeta)).not.toContain("CF_DEMO_SECRET");
-    expect(JSON.stringify(dlpMeta)).not.toContain("@");
     expect(JSON.stringify(dlpMeta)).not.toContain("test-aig-token");
   });
 

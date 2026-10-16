@@ -76,9 +76,37 @@ interface PendingPortal {
   expiresAt: number;
 }
 
+type ChatTurn = { role: "user" | "assistant"; content: string };
+
+interface StoredSession {
+  id: string;
+  title: string;
+  updatedAt: number;
+  history: ChatTurn[];
+}
+
+interface SessionSummary {
+  id: string;
+  title: string;
+  updatedAt: number;
+  messageCount: number;
+  current: boolean;
+}
+
+const MAX_SESSIONS = 20;
+const MAX_STORED_MESSAGES = 60;
+const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function sessionTitle(history: ChatTurn[]): string {
+  const first = history.find((m) => m.role === "user")?.content.trim() ?? "";
+  if (!first) return "新会话";
+  return first.length > 28 ? `${first.slice(0, 28)}…` : first;
+}
+
 interface AgentStateShape {
-  history: { role: "user" | "assistant"; content: string }[];
+  history: ChatTurn[];
   conversationId: string;
+  sessions?: StoredSession[];
   lastRole?: DemoRole;
   pendingPortal?: PendingPortal | null;
   lastMcpFailure?: string | null;
@@ -421,7 +449,7 @@ function buildChatModel(
       id: env.GATEWAY_ID as string,
       skipCache: true,
       metadata: {
-        actor_id: context.actorId,
+        user: context.userEmail ?? context.actorId,
         conversation_id: conversationId,
         request_id: context.requestId,
         role: context.role,
@@ -663,10 +691,107 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
       this.setState({
         history: [],
         conversationId: crypto.randomUUID(),
+        sessions: [],
         lastRole: role,
         pendingPortal: null
       });
     }
+  }
+
+  private sessionSummaries(): SessionSummary[] {
+    const current = this.state.history;
+    const list: SessionSummary[] = (this.state.sessions ?? []).map((x) => ({
+      id: x.id,
+      title: x.title,
+      updatedAt: x.updatedAt,
+      messageCount: x.history.length,
+      current: false
+    }));
+    list.push({
+      id: this.ensureConversationId(),
+      title: sessionTitle(current),
+      updatedAt: Date.now(),
+      messageCount: current.length,
+      current: true
+    });
+    return list.sort((a, b) => (a.current ? -1 : b.current ? 1 : b.updatedAt - a.updatedAt));
+  }
+
+  private archiveCurrent(): StoredSession[] {
+    const others = this.state.sessions ?? [];
+    if (this.state.history.length === 0) return others;
+    const archived: StoredSession = {
+      id: this.ensureConversationId(),
+      title: sessionTitle(this.state.history),
+      updatedAt: Date.now(),
+      history: this.state.history
+    };
+    return [archived, ...others].slice(0, MAX_SESSIONS - 1);
+  }
+
+  private sessionPayload() {
+    return {
+      history: this.state.history,
+      conversationId: this.ensureConversationId(),
+      sessions: this.sessionSummaries()
+    };
+  }
+
+  async newSession(role: DemoRole): Promise<{ status: "ok" | "busy" } & Partial<ReturnType<ResearchAgent["sessionPayload"]>>> {
+    this.syncRole(role);
+    if (this.busy) return { status: "busy" };
+    if (this.state.history.length > 0) {
+      this.setState({
+        ...this.state,
+        sessions: this.archiveCurrent(),
+        history: [],
+        conversationId: crypto.randomUUID()
+      });
+    }
+    return { status: "ok", ...this.sessionPayload() };
+  }
+
+  async switchSession(
+    role: DemoRole,
+    id: unknown
+  ): Promise<{ status: "ok" | "busy" | "invalid" | "not_found" } & Partial<ReturnType<ResearchAgent["sessionPayload"]>>> {
+    this.syncRole(role);
+    if (typeof id !== "string" || !SESSION_ID_PATTERN.test(id)) return { status: "invalid" };
+    if (this.busy) return { status: "busy" };
+    if (id === this.ensureConversationId()) return { status: "ok", ...this.sessionPayload() };
+    const target = (this.state.sessions ?? []).find((x) => x.id === id);
+    if (!target) return { status: "not_found" };
+    const remaining = this.archiveCurrent().filter((x) => x.id !== id);
+    this.setState({
+      ...this.state,
+      sessions: remaining,
+      history: target.history,
+      conversationId: target.id
+    });
+    return { status: "ok", ...this.sessionPayload() };
+  }
+
+  async deleteSession(
+    role: DemoRole,
+    id: unknown
+  ): Promise<{ status: "ok" | "busy" | "invalid" | "not_found" } & Partial<ReturnType<ResearchAgent["sessionPayload"]>>> {
+    this.syncRole(role);
+    if (typeof id !== "string" || !SESSION_ID_PATTERN.test(id)) return { status: "invalid" };
+    if (this.busy) return { status: "busy" };
+    const others = this.state.sessions ?? [];
+    if (id === this.ensureConversationId()) {
+      const [next, ...rest] = [...others].sort((a, b) => b.updatedAt - a.updatedAt);
+      this.setState({
+        ...this.state,
+        sessions: rest,
+        history: next ? next.history : [],
+        conversationId: next ? next.id : crypto.randomUUID()
+      });
+      return { status: "ok", ...this.sessionPayload() };
+    }
+    if (!others.some((x) => x.id === id)) return { status: "not_found" };
+    this.setState({ ...this.state, sessions: others.filter((x) => x.id !== id) });
+    return { status: "ok", ...this.sessionPayload() };
   }
 
   private healing: Promise<boolean> | null = null;
@@ -854,6 +979,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     return {
       history: this.state.history,
       conversationId: this.ensureConversationId(),
+      sessions: this.sessionSummaries(),
       mcp: {
         ...mcp,
         detail: mcp.detail ?? this.state.lastMcpFailure ?? null
@@ -1266,6 +1392,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
         role: context.role,
         action,
         actorId: context.actorId,
+        userEmail: context.userEmail ?? "",
         requestId: context.requestId,
         identitySource: context.identitySource
       }
@@ -1420,7 +1547,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
       ...this.state.history,
       userMessage,
       { role: "assistant" as const, content: reply }
-    ].slice(-MAX_HISTORY_MESSAGES);
+    ].slice(-MAX_STORED_MESSAGES);
     this.setState({ ...this.state, history: next });
   }
 
@@ -1483,6 +1610,7 @@ async function handleRequest(
   const doName = await sha256Hex(identity.sub);
   const auditContext: AuditContext = {
     actorId: doName,
+    userEmail: identity.email,
     role: identity.role,
     requestId: crypto.randomUUID(),
     identitySource: identity.localSimulation
@@ -1522,6 +1650,7 @@ async function handleRequest(
           tools: session.tools,
           expectedTools: session.expectedTools,
           conversationId: session.conversationId,
+          sessions: session.sessions,
           portal: session.portal,
           setup: {
             mcpConfigured: mcpServerUrlAllowed(env) !== null,
@@ -1553,6 +1682,7 @@ async function handleRequest(
       },
       history: session.history,
       conversationId: session.conversationId,
+      sessions: session.sessions,
       mcp: session.mcp,
       tools: session.tools,
       expectedTools: session.expectedTools,
@@ -1634,6 +1764,32 @@ async function handleRequest(
       { ...result, requestId: auditContext.requestId },
       result.status === "failed" ? 502 : 200
     );
+  }
+
+  if (url.pathname.startsWith("/api/sessions/") && request.method === "POST") {
+    const parsed = await readJsonObject(request);
+    if (!parsed.ok) return json({ error: parsed.error }, parsed.status);
+    const action = url.pathname.slice("/api/sessions/".length);
+    let result: { status: string };
+    if (action === "new") {
+      result = await stub.newSession(identity.role);
+    } else if (action === "switch") {
+      result = await stub.switchSession(identity.role, parsed.value.id);
+    } else if (action === "delete") {
+      if (parsed.value.confirm !== true) return json({ error: "confirmation_required" }, 400);
+      result = await stub.deleteSession(identity.role, parsed.value.id);
+    } else {
+      return json({ error: "not_found" }, 404);
+    }
+    const status =
+      result.status === "ok"
+        ? 200
+        : result.status === "busy"
+          ? 409
+          : result.status === "not_found"
+            ? 404
+            : 400;
+    return json({ ...result, requestId: auditContext.requestId }, status);
   }
 
   if (url.pathname === "/api/disconnect" && request.method === "POST") {

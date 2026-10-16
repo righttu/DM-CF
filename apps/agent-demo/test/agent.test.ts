@@ -201,13 +201,12 @@ describe("ResearchAgent chat and tools", () => {
     expect(data.requestId).toMatch(UUID_RE);
     const meta = JSON.parse(requests[0].metadata!) as Record<string, string>;
     expect(Object.keys(meta).sort()).toEqual(
-      ["action", "actor_id", "conversation_id", "request_id", "role"].sort()
+      ["action", "conversation_id", "request_id", "role", "user"].sort()
     );
-    expect(meta.actor_id).toBe(await sha256Hex("sub-chat-1"));
+    expect(meta.user).toBe(ANALYST_EMAIL);
     expect(meta.request_id).toBe(data.requestId);
     expect(meta.role).toBe("analyst");
     expect(meta.action).toBe("chat");
-    expect(JSON.stringify(meta)).not.toContain("@");
     expect(JSON.stringify(meta)).not.toContain("Bearer");
     expect(JSON.stringify(meta)).not.toContain("test-aig-token");
     expect(call).toBe(2);
@@ -1227,6 +1226,66 @@ describe("ResearchAgent chat and tools", () => {
       body: { message: "" }
     });
     expect(bad.status).toBe(400);
+  });
+
+  it("manages chat sessions per user: new, switch, delete, with isolation and a busy guard", async () => {
+    const jwtA = await signJwt({ sub: "sub-sess-a", email: ANALYST_EMAIL });
+    const jwtB = await signJwt({ sub: "sub-sess-b", email: ANALYST_EMAIL });
+    await connectAgentMcp({ sub: "sub-sess-a", email: ANALYST_EMAIL });
+    __setModelFetchForTests(async () => textResponse("回复一"));
+    const say = (jwt: string, message: string) =>
+      authedFetch("/api/chat", { jwt, method: "POST", body: { message } });
+    const post = (jwt: string, path: string, body: Record<string, unknown> = {}) =>
+      authedFetch(path, { jwt, method: "POST", body });
+    type Payload = {
+      status: string;
+      history: { role: string; content: string }[];
+      conversationId: string;
+      sessions: { id: string; title: string; messageCount: number; current: boolean }[];
+    };
+
+    await say(jwtA, "有哪些模拟公司");
+    const first = (await (await authedFetch("/api/session", { jwt: jwtA })).json()) as Payload;
+    const firstId = first.conversationId;
+    expect(first.history).toHaveLength(2);
+    expect(first.sessions).toHaveLength(1);
+
+    const created = (await (await post(jwtA, "/api/sessions/new")).json()) as Payload;
+    expect(created.status).toBe("ok");
+    expect(created.history).toHaveLength(0);
+    expect(created.conversationId).not.toBe(firstId);
+    expect(created.sessions.map((x) => x.id)).toContain(firstId);
+    expect(created.sessions.find((x) => x.id === firstId)?.title).toContain("有哪些模拟公司");
+
+    const again = (await (await post(jwtA, "/api/sessions/new")).json()) as Payload;
+    expect(again.conversationId).toBe(created.conversationId);
+    expect(again.sessions).toHaveLength(2);
+
+    const switched = (await (await post(jwtA, "/api/sessions/switch", { id: firstId })).json()) as Payload;
+    expect(switched.history).toHaveLength(2);
+    expect(switched.conversationId).toBe(firstId);
+
+    const foreign = await post(jwtB, "/api/sessions/switch", { id: firstId });
+    expect(foreign.status).toBe(404);
+    const badId = await post(jwtA, "/api/sessions/switch", { id: "../x" });
+    expect(badId.status).toBe(400);
+
+    const noConfirm = await post(jwtA, "/api/sessions/delete", { id: firstId });
+    expect(noConfirm.status).toBe(400);
+    const deleted = (await (await post(jwtA, "/api/sessions/delete", { id: firstId, confirm: true })).json()) as Payload;
+    expect(deleted.sessions.some((x) => x.id === firstId)).toBe(false);
+    expect(deleted.history).toHaveLength(0);
+    expect(deleted.sessions).toHaveLength(1);
+
+    __setModelFetchForTests(async () => {
+      await new Promise((r) => setTimeout(r, 1500));
+      return textResponse("慢回复");
+    });
+    const slow = say(jwtA, "有哪些模拟公司");
+    await new Promise((r) => setTimeout(r, 700));
+    const busy = await post(jwtA, "/api/sessions/new");
+    expect(busy.status).toBe(409);
+    await slow;
   });
 
   it("heals a woken connection that is connected but undiscovered without re-authorizing", async () => {

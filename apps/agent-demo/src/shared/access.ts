@@ -12,6 +12,7 @@ export interface AccessIdentity {
 
 export interface AuditContext {
   actorId: string;
+  userEmail?: string;
   role: DemoRole;
   requestId: string;
   identitySource: "access" | "local_jwt" | "local_simulation";

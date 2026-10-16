@@ -7,9 +7,9 @@ const PAGE_HTML = `<!doctype html>
 <style>
 :root{color-scheme:dark}
 *{box-sizing:border-box}
-body{margin:0;font-family:system-ui,-apple-system,"PingFang SC",sans-serif;background:#0b1220;color:#e2e8f0;display:flex;min-height:100vh}
+body{margin:0;font-family:system-ui,-apple-system,"PingFang SC",sans-serif;background:#0b1220;color:#e2e8f0;display:flex;height:100vh;overflow:hidden}
 aside{width:280px;min-width:280px;background:#111a2e;border-right:1px solid #24304d;padding:20px;display:flex;flex-direction:column;gap:14px;overflow-y:auto}
-main{flex:1;display:flex;flex-direction:column;padding:20px;gap:14px;min-width:0}
+main{flex:1;display:flex;flex-direction:column;padding:20px;gap:14px;min-width:0;min-height:0}
 h1{font-size:16px;margin:0}
 h2{font-size:13px;margin:0;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em}
 .badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;background:#1e3a5f;color:#7dd3fc;border:1px solid #2d4a70;margin:2px 2px 2px 0}
@@ -29,7 +29,7 @@ button:disabled{background:#334155;color:#64748b;cursor:not-allowed}
 button.ghost{background:#24304d}
 button.scenario{display:block;width:100%;text-align:left;margin-bottom:8px;background:#1c2a47}
 button.scenario:hover:not(:disabled){background:#24365c}
-#chat{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:10px;padding:4px;min-height:40vh}
+#chat{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:10px;padding:4px;min-height:0}
 .msg{max-width:82%;padding:10px 14px;border-radius:10px;font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
 .msg.user{align-self:flex-end;background:#2563eb;color:#fff}
 .msg.agent{align-self:flex-start;background:#1c2a47;border:1px solid #2d4166}
@@ -48,8 +48,14 @@ details.turn>summary{cursor:pointer;color:#cbd5e1;padding:2px 0;list-style-posit
 .small{font-size:12px;color:#64748b}
 #dlp-result{font-size:12px;white-space:pre-wrap;word-break:break-all}
 a{color:#7dd3fc}
+#session-list{max-height:220px;overflow-y:auto}
+.session-row{display:flex;gap:6px;margin-top:6px}
+.session-open{flex:1;min-width:0;text-align:left;background:#1c2a47;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.session-row.current .session-open{outline:1px solid #2563eb}
+.session-del{background:#3a1d24;color:#fca5a5;padding:6px 10px}
 @media (max-width:900px){
-  body{flex-direction:column}
+  body{flex-direction:column;height:auto;min-height:100vh;overflow:auto}
+  #chat{max-height:60vh;min-height:30vh}
   aside{width:100%;min-width:0;border-right:none;border-bottom:1px solid #24304d}
   main{padding:12px}
   #composer{flex-direction:column}
@@ -99,6 +105,10 @@ a{color:#7dd3fc}
     </div>
     <a id="portal-url" class="small" target="_blank" rel="noopener noreferrer" hidden>打开 Portal 原生管理页</a>
     <div id="portal-roster"></div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>会话</h2><button class="ghost" id="new-session" type="button">新建会话</button></div>
+    <div id="session-list"></div>
   </div>
   <div class="card">
     <h2>演示场景</h2>
@@ -173,6 +183,47 @@ function addEvent(text, kind) {
 function clearTimeline() {
   timeline.replaceChildren();
   currentTurn = null;
+}
+const sessionList = document.getElementById('session-list');
+function renderSessions(list) {
+  sessionList.replaceChildren();
+  for (const x of (Array.isArray(list) ? list : [])) {
+    const row = el('div', 'session-row' + (x.current ? ' current' : ''));
+    const open = el('button', 'session-open', (x.title || '新会话') + ' · ' + x.messageCount);
+    open.title = x.title || '新会话';
+    open.disabled = x.current;
+    open.addEventListener('click', () => sessionAction('/api/sessions/switch', { id: x.id }));
+    const del = el('button', 'session-del', '删除');
+    del.addEventListener('click', () => {
+      if (!confirm('删除该会话及其对话记录？AI Gateway 中已产生的调用日志不会被删除。')) return;
+      sessionAction('/api/sessions/delete', { id: x.id, confirm: true });
+    });
+    row.append(open, del);
+    sessionList.appendChild(row);
+  }
+}
+async function sessionAction(path, body) {
+  if (sending) {
+    addMsg('system', '当前回复尚未完成，请稍后再试。');
+    return;
+  }
+  const r = await api(path, body);
+  if (r.stale) return;
+  const { status, data } = r;
+  if (status === 409) {
+    addMsg('system', '当前回复尚未完成，请稍后再试。');
+    return;
+  }
+  if (status !== 200 || !data || !Array.isArray(data.history)) {
+    addMsg('system', '会话操作失败（HTTP ' + status + '）');
+    return;
+  }
+  chat.replaceChildren();
+  for (const m of data.history) addMsg(m.role === 'user' ? 'user' : 'agent', m.content);
+  clearTimeline();
+  currentConversationId = data.conversationId;
+  document.getElementById('conversation-id').textContent = data.conversationId;
+  renderSessions(data.sessions);
 }
 function setStatus(id, text, cls) {
   const node = document.getElementById(id);
@@ -263,6 +314,7 @@ function refreshSession(s) {
     }
   }
   applyIdentity(user);
+  if (Array.isArray(s.sessions)) renderSessions(s.sessions);
   if (s.conversationId) {
     currentConversationId = s.conversationId;
     document.getElementById('conversation-id').textContent = currentConversationId;
@@ -595,9 +647,11 @@ async function send() {
   sending = false;
   sendBtn.disabled = !readyForChat;
 }
+document.getElementById('new-session').addEventListener('click', () => sessionAction('/api/sessions/new', {}));
 sendBtn.addEventListener('click', send);
 input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
 
+renderSessions(boot.sessions);
 loadSession();
 </script>
 </body>
@@ -611,6 +665,7 @@ export interface BootstrapData {
   tools: string[];
   expectedTools: string[];
   conversationId: string;
+  sessions?: { id: string; title: string; updatedAt: number; messageCount: number; current: boolean }[];
   portal?: {
     listAvailable: boolean;
     manageAvailable: boolean;
