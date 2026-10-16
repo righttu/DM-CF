@@ -1,4 +1,5 @@
-FROM --platform=linux/amd64 python:3.12-slim
+ARG BASE_PLATFORM=linux/amd64
+FROM --platform=${BASE_PLATFORM} python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     HF_HUB_OFFLINE=1 \
