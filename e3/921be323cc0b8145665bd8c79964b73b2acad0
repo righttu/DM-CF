@@ -1,0 +1,79 @@
+.devin/agent-demo/wrangler.test.jsonc
+  s_02649a17b7b371::t_6b683583fda148 22-26
+.gitignore
+  s_02649a17b7b371::t_1c56e618e5735b 24
+AGENTS.md
+  s_02649a17b7b371::t_039244d28ffdae 132-142
+apps/agent-demo/package-lock.json
+  s_02649a17b7b371::t_f5873254171e5c 13,455-460
+apps/agent-demo/scripts/prepare-embedding-model.sh
+  s_02649a17b7b371::t_9fca797a259c1c 1-17
+apps/agent-demo/src/quant/tools.ts
+  s_02649a17b7b371::t_39731fb7bbc6e9 1-634
+apps/agent-demo/src/research-policy.ts
+  s_02649a17b7b371::t_954d217c990cfa 1-26,50
+apps/agent-demo/src/shared/mcp-kit.ts
+  s_02649a17b7b371::t_b02ac91a2de8ce 1-774
+apps/agent-demo/test/agent.test.ts
+  s_02649a17b7b371::t_11d46e0e7c3df6 141-175,297,311,322,332-347,349-351,372,375-390,392-416,418-427,429,474,477-489,491-494,496-497,538-545,582,585,587-588,606,609-619,622,625,627,632,634-636,642,646-647,753,756,1407,1410-1412,1742-1856
+apps/agent-demo/test/assets.d.ts
+  s_02649a17b7b371::t_bf8e88c44cc8b5 1-4
+apps/agent-demo/test/fixtures/quant-schema.sql
+  s_02649a17b7b371::t_16c63e6a38f98c 1-103
+apps/agent-demo/test/quant.test.ts
+  s_02649a17b7b371::t_ef5efcea5f2c36 1-546
+apps/agent-demo/test/ui.test.ts
+  s_02649a17b7b371::t_465975fff7f407 5-24,27,38-40,48,52,62-64,69-71,74-75,77-87,95,104-106
+.devin/agent-demo/wrangler.quant.jsonc
+  s_b751563f7e2c20::t_5230425fd31bde 1-98
+apps/agent-demo/container/embedding/.dockerignore
+  s_b751563f7e2c20::t_c1c2caa1a28424 1-3
+apps/agent-demo/container/embedding/Dockerfile
+  s_b751563f7e2c20::t_c65adbf6e640ef 1-17
+apps/agent-demo/container/embedding/requirements.txt
+  s_b751563f7e2c20::t_257507c1b95e5b 1-28
+apps/agent-demo/container/embedding/server.py
+  s_b751563f7e2c20::t_8f60e04acc8d0d 1-64
+apps/agent-demo/package.json
+  s_b751563f7e2c20::t_67d67b4e8faca7 18-19,23
+apps/agent-demo/src/agent/index.ts
+  s_b751563f7e2c20::t_9398cfce981b20 21,26-27,118-136,464,481-513,872-900,917-919,1194-1195,1206-1211,1216,1253,1288,1291-1297,1302,1309-1317,1325-1326,1396,1402-1417,1419-1428,1479,1556-1558,1575,1594-1596
+apps/agent-demo/src/agent/ui.ts
+  s_b751563f7e2c20::t_6928d5b1fc96d9 8-28,30-43,45-209,214,216-226,230,232-245,248-299,302,304-305,308-555,557,559-593,595-626,628-633,636-644,648-652,655-656,659,663-664,666,668,670,672-681,684-685,687-698,701-702,706-709,711,713-722,727-745,747,749-755,757-774,777-778,781-784,786-787,790,793-794,796,799-800,806,810-812,816-817,823,826,828,832,834-836,838,842-851,855,866-867,873-874,877,879-881,887,889,891,894,897-898,900,902,907-908,912,914,916,924,928,931,934-945,947,949-955,957,962-963,966,976-978,980-981,991,996,998-999,1002-1003,1007-1014,1022-1032,1035-1037,1039-1045,1047,1049-1052,1054,1063-1066,1081-1089
+apps/agent-demo/src/mcp/index.ts
+  s_b751563f7e2c20::t_dcbca0b433b7b4 3,5-12,21-24,31-32,34-36,38,47-48,62-63,78-79,89-98
+apps/agent-demo/src/quant/catalog.ts
+  s_b751563f7e2c20::t_5e4c2682abdbf6 1-399
+apps/agent-demo/src/quant/index.ts
+  s_b751563f7e2c20::t_c02e8babc5fa08 1-33
+apps/agent-demo/test/e2e.test.ts
+  s_b751563f7e2c20::t_7d20ef83608677 1,9-62,65,72,75-78,80-91,93,96,98-108
+apps/agent-demo/test/entry.ts
+  s_b751563f7e2c20::t_3da82021bc86dc 3,5,8,13-26
+stock_basic_sync_final.py
+  s_b751563f7e2c20::t_065c8d51345b0f 1-98
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e3921be323cc0b8145665bd8c79964b73b2acad0",
+  "prompts": {},
+  "sessions": {
+    "s_02649a17b7b371": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "calm-noun",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    },
+    "s_b751563f7e2c20": {
+      "agent_id": {
+        "tool": "devin",
+        "id": "s_b751563f7e2c20",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
