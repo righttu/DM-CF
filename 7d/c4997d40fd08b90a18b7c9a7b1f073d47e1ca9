@@ -1,0 +1,63 @@
+.devin/agent-demo/wrangler.test.jsonc
+  s_02649a17b7b371::t_f33b704323afbd 9-10,15-16
+.gitignore
+  s_02649a17b7b371::t_c6c69180431b1f 25-26
+ai_analyst_Brain_final.py
+  s_02649a17b7b371::t_0f838f64447808 32
+ai_analyst_infra_final.py
+  s_02649a17b7b371::t_ce5177442f0ef4 19,22
+apps/agent-demo/container/analysis/requirements.txt
+  s_02649a17b7b371::t_d1e04b427249ff 1-95
+apps/agent-demo/scripts/prepare-analysis-container.sh
+  s_02649a17b7b371::t_3a831d5c91cf75 1-57
+apps/agent-demo/src/quant/analysis.ts
+  s_02649a17b7b371::t_7fe525668da6f6 1-661
+apps/agent-demo/test/quant.test.ts
+  s_02649a17b7b371::t_820f40b1567120 356
+chip_hunter_db_final.py
+  s_02649a17b7b371::t_887fe1944f6348 34
+knowledge_miner_final.py
+  s_02649a17b7b371::t_d35d5d3c3b889b 35,54
+.devin/agent-demo/wrangler.quant.jsonc
+  s_da21f5b2265499::t_7d4e5812aeca48 19-20,27-30,40-46,49-51,70-71,78-79,86-89,102-104,118-119
+apps/agent-demo/container/analysis/.dockerignore
+  s_da21f5b2265499::t_6e83cc9579daed 1-3
+apps/agent-demo/container/analysis/Dockerfile
+  s_da21f5b2265499::t_17c92f085ba0f1 1-24
+apps/agent-demo/container/analysis/server.py
+  s_da21f5b2265499::t_fc0c8ab9410ff0 1-208
+apps/agent-demo/src/quant/catalog.ts
+  s_da21f5b2265499::t_ef3d994aaa136c 350-351,377-381,400-401,406-407
+apps/agent-demo/src/quant/index.ts
+  s_da21f5b2265499::t_8c4231cf0581e6 8,12,18-23
+apps/agent-demo/src/quant/tools.ts
+  s_da21f5b2265499::t_c5bffe85ddc80b 18-23,29,236-242,285,287,647-738
+apps/agent-demo/test/entry.ts
+  s_da21f5b2265499::t_02c69f3d488a19 3-13,15-54
+apps/agent-demo/test/quant-analysis.test.ts
+  s_da21f5b2265499::t_85b3eadf608a56 1-645
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7dc4997d40fd08b90a18b7c9a7b1f073d47e1ca9",
+  "prompts": {},
+  "sessions": {
+    "s_02649a17b7b371": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "calm-noun",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    },
+    "s_da21f5b2265499": {
+      "agent_id": {
+        "tool": "devin",
+        "id": "s_da21f5b2265499",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
