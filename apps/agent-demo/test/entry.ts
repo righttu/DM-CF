@@ -26,7 +26,8 @@ class TestQuantAnalysisContainer extends DurableObject<QuantEnv & AnalysisEnv> {
         request: () => Promise.reject(new Error("no_transport_stub")),
         stop: () => Promise.resolve()
       },
-    () => this.ctx.id.name ?? ""
+    () => this.ctx.id.name ?? "",
+    (seconds) => this.ctx.storage.setAlarm(Date.now() + seconds * 1000)
   );
 
   jobContext(): Promise<{ ts_code: string; date: string } | null> {
@@ -42,7 +43,7 @@ class TestQuantAnalysisContainer extends DurableObject<QuantEnv & AnalysisEnv> {
   }
 
   alarm(): Promise<void> {
-    return this.runner.alarm();
+    return this.runner.onTimeout();
   }
 }
 

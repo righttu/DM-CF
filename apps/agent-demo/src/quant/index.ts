@@ -1,4 +1,6 @@
 import { Container } from "@cloudflare/containers";
+
+export { ContainerProxy } from "@cloudflare/containers";
 import {
   createMcpWorker,
   ConsentTransaction,

@@ -623,14 +623,50 @@ describe("analysis tools", () => {
 
     stubTransport();
     const jobId = `000063.SZ:${today()}`;
-    await stubFor(jobId).startJob({ ts_code: "000063.SZ", date: today(), requested_by: "a" });
+    const stub = stubFor(jobId);
+    await stub.startJob({ ts_code: "000063.SZ", date: today(), requested_by: "a" });
     stopCalls = 0;
-    await runInDurableObject(stubFor(jobId), async (instance) => {
+    // Backdate started_at so the 20-minute window has elapsed.
+    await runInDurableObject(stub, async (instance, ctx) => {
+      const job = (await ctx.storage.get("job")) as { started_at: string };
+      job.started_at = new Date(Date.now() - 21 * 60 * 1000).toISOString();
+      await ctx.storage.put("job", job);
       await instance.alarm();
     });
     const timed = await callTool("get_analysis_status", { job_id: jobId });
     expect(timed.payload.status).toBe("timeout");
     expect(stopCalls).toBeGreaterThan(0);
+  });
+
+  it("an unrelated alarm tick does not mark a running job as timeout", async () => {
+    stubTransport();
+    const jobId = `000008.SZ:${today()}`;
+    const stub = stubFor(jobId);
+    await stub.startJob({ ts_code: "000008.SZ", date: today(), requested_by: "a" });
+    // A fresh alarm tick (e.g. the container lifecycle monitor firing seconds
+    // after start) must be ignored while the job is inside its timeout window.
+    await runInDurableObject(stub, async (instance) => {
+      await instance.alarm();
+    });
+    const view = await stub.status();
+    expect(view.status).toBe("running");
+    // Once the job has finished, a late timeout tick is a no-op too.
+    statusBody = { state: "succeeded", phase: "done", result: { status: "success" } };
+    await stub.status();
+    await runInDurableObject(stub, async (instance, ctx) => {
+      const job = (await ctx.storage.get("job")) as { started_at: string };
+      job.started_at = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      await ctx.storage.put("job", job);
+      await instance.alarm();
+    });
+    expect((await stub.status()).status).toBe("succeeded");
+  });
+
+  it("exports ContainerProxy so container outbound interception works", async () => {
+    const mod = (await import("../src/quant/index.js")) as Record<string, unknown>;
+    expect(typeof mod.ContainerProxy).toBe("function");
+    const { ContainerProxy } = await import("@cloudflare/containers");
+    expect(mod.ContainerProxy).toBe(ContainerProxy);
   });
 
   it("marks the job failed when the container reports failure", async () => {

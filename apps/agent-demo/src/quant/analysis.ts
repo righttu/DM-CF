@@ -45,6 +45,7 @@ export interface AnalysisJobView extends AnalysisJob {
 }
 
 const JOB_TIMEOUT_MS = 20 * 60 * 1000;
+const JOB_TIMEOUT_SECONDS = JOB_TIMEOUT_MS / 1000;
 const CONTAINER_HOST = "http://container";
 
 export function shanghaiCompactDate(now = new Date()): string {
@@ -82,7 +83,8 @@ export class AnalysisJobRunner {
     private readonly storage: DurableObjectStorage,
     private readonly env: AnalysisEnv,
     private readonly transport: () => AnalysisTransport,
-    private readonly jobId: () => string
+    private readonly jobId: () => string,
+    private readonly scheduleTimeout: (seconds: number) => void | Promise<void>
   ) {}
 
   private containerEnvVars(): Record<string, string> {
@@ -138,7 +140,7 @@ export class AnalysisJobRunner {
       error: null
     };
     await this.saveJob(job);
-    await this.storage.setAlarm(Date.now() + JOB_TIMEOUT_MS);
+    await this.scheduleTimeout(JOB_TIMEOUT_SECONDS);
     const t = this.transport();
     try {
       await t.start(this.containerEnvVars());
@@ -222,9 +224,12 @@ export class AnalysisJobRunner {
     await this.saveJob(job);
   }
 
-  async alarm(): Promise<void> {
+  async onTimeout(): Promise<void> {
     const job = await this.loadJob();
     if (!job || (job.status !== "queued" && job.status !== "running")) return;
+    // Ignore early/unrelated ticks: the timeout only applies once the job has
+    // actually been alive for the full timeout window.
+    if (Date.now() - Date.parse(job.started_at) < JOB_TIMEOUT_MS) return;
     job.status = "timeout";
     job.finished_at = new Date().toISOString();
     job.error = "analysis_timeout";
@@ -248,7 +253,8 @@ export class QuantAnalysisContainer extends Container<AnalysisEnv> {
     this.ctx.storage,
     this.env,
     () => transportOverride ?? this.defaultTransport(),
-    () => this.ctx.id.name ?? ""
+    () => this.ctx.id.name ?? "",
+    (seconds) => this.schedule(seconds, "onJobTimeout").then(() => undefined)
   );
 
   private defaultTransport(): AnalysisTransport {
@@ -275,8 +281,8 @@ export class QuantAnalysisContainer extends Container<AnalysisEnv> {
     return this.runner.status();
   }
 
-  alarm(): Promise<void> {
-    return this.runner.alarm();
+  async onJobTimeout(): Promise<void> {
+    await this.runner.onTimeout();
   }
 }
 
