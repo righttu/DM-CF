@@ -10,7 +10,7 @@ OLLAMA_MODEL = "qwen3:14b"
 BAILIAN_MODEL = "qwen3.5-flash"
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
 
-D1_API_URL = 'https://stock-api.righttu.uk'
+D1_API_URL = os.getenv("D1_API_URL", "https://stock-api.righttu.uk")
 CF_ACCESS_CLIENT_ID = os.getenv('CF_ACCESS_CLIENT_ID')
 CF_ACCESS_CLIENT_SECRET = os.getenv('CF_ACCESS_CLIENT_SECRET')
 

@@ -1,5 +1,14 @@
 import { Container } from "@cloudflare/containers";
 import { QUANT_QUERIES } from "./catalog.js";
+import {
+  checkReadOnlyOutbound,
+  normalizeSql,
+  outboundAllow,
+  outboundDeny,
+  readJsonBody,
+  sha256Short,
+  validVector
+} from "../shared/outbound.js";
 
 export interface AnalysisEnv {
   QUANT_DB: D1Database;
@@ -379,56 +388,16 @@ function summarizeResult(result: unknown): AnalysisResultSummary | null {
 
 // ============================ outbound handler ============================
 
-const MAX_BODY = 2 * 1024 * 1024;
 const R2_MAX_BYTES = 1024 * 1024;
-const VECTOR_DIM = 512;
+
+const OUTBOUND_EVENT = "quant_analysis_outbound";
 
 function deny(kind: string, hash?: string): Response {
-  console.info(
-    JSON.stringify({
-      event: "quant_analysis_outbound",
-      action: "deny",
-      kind,
-      sha256: hash ?? null
-    })
-  );
-  return Response.json({ success: false, error: "operation_not_allowed" }, { status: 403 });
+  return outboundDeny(OUTBOUND_EVENT, kind, hash);
 }
 
 function allow(kind: string, hash: string | null, body: unknown): Response {
-  console.info(
-    JSON.stringify({
-      event: "quant_analysis_outbound",
-      action: "allow",
-      kind,
-      sha256: hash
-    })
-  );
-  return Response.json(body);
-}
-
-function normalizeSql(raw: string): string {
-  let sql = raw.replace(/\s+/g, " ").trim();
-  while (sql.endsWith(";")) sql = sql.slice(0, -1).trimEnd();
-  return sql;
-}
-
-async function sha256Short(text: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
-}
-
-const READONLY_FORBIDDEN =
-  /\b(insert|update|delete|drop|alter|create|attach|detach|pragma|vacuum|reindex|analyze|begin|commit|rollback|savepoint|release|load_extension)\b/i;
-const READONLY_FORBIDDEN_OBJECTS = /\b(sqlite_\w+|_cf_\w+|d1_\w+|pragma_\w+)\b/i;
-
-function checkReadOnlyOutbound(sql: string): boolean {
-  if (sql.length === 0 || sql.length > 4000) return false;
-  if (sql.includes(";") || sql.includes("--") || sql.includes("/*")) return false;
-  if (!/^(select|with)\b/i.test(sql)) return false;
-  if (READONLY_FORBIDDEN.test(sql)) return false;
-  if (READONLY_FORBIDDEN_OBJECTS.test(sql)) return false;
-  return true;
+  return outboundAllow(OUTBOUND_EVENT, kind, hash, body);
 }
 
 const PRAGMA_SYNC_STATUS = "PRAGMA table_info(sync_status)";
@@ -461,20 +430,6 @@ type OutboundEnv = {
   R2_STOCK_INFOR?: R2Bucket;
 };
 
-async function readJsonBody(request: Request): Promise<Record<string, unknown> | null> {
-  const length = Number(request.headers.get("content-length") ?? "0");
-  if (length > MAX_BODY) return null;
-  try {
-    const text = await request.text();
-    if (text.length > MAX_BODY) return null;
-    const parsed = JSON.parse(text);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
-  }
-}
 
 async function resolveJob(
   env: OutboundEnv,
@@ -615,13 +570,6 @@ async function handleDbSave(
   return allow("db_save", hash, { success: true, count: data.length });
 }
 
-function validVector(v: unknown): v is number[] {
-  return (
-    Array.isArray(v) &&
-    v.length === VECTOR_DIM &&
-    (v as unknown[]).every((n) => typeof n === "number" && Number.isFinite(n))
-  );
-}
 
 async function handleVectorCheck(
   request: Request,

@@ -1,0 +1,57 @@
+{
+  "name": "abc-quant-pipeline",
+  "main": "../../apps/agent-demo/src/pipeline/index.ts",
+  "compatibility_date": "2026-10-02",
+  "compatibility_flags": ["nodejs_compat"],
+  "account_id": "ebc4f70211dc33165a239c6018da8e2d",
+  "keep_vars": true,
+  "workers_dev": false,
+  "observability": {
+    "enabled": true,
+    "traces": { "enabled": true }
+  },
+  "triggers": {
+    "crons": ["0 10 * * 1-5"]
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "BATCH", "class_name": "QuantBatchContainer" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["QuantBatchContainer"] }
+  ],
+  "containers": [
+    {
+      "class_name": "QuantBatchContainer",
+      "name": "abc-quant-batch-container",
+      "image": "../../apps/agent-demo/container/batch/Dockerfile",
+      "instance_type": "standard-2",
+      "max_instances": 2
+    }
+  ],
+  "workflows": [
+    {
+      "name": "abc-quant-daily",
+      "binding": "DAILY",
+      "class_name": "QuantDailyWorkflow"
+    }
+  ],
+  "r2_buckets": [
+    { "binding": "R2_STOCK_INFOR", "bucket_name": "stock-infor" }
+  ],
+  "d1_databases": [
+    {
+      "binding": "QUANT_DB",
+      "database_name": "quant-data",
+      "database_id": "85914a38-2ba4-4e85-b229-e1e1a043a266"
+    }
+  ],
+  "vectorize": [
+    { "binding": "VECTORIZE", "index_name": "stock-knowledge" }
+  ],
+  "vars": {
+    "ENVIRONMENT": "production",
+    "CF_ACCOUNT_ID": "ebc4f70211dc33165a239c6018da8e2d"
+  }
+}

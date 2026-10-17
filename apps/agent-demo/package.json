@@ -16,7 +16,8 @@
     "postinstall": "node scripts/ensure-config-node-modules.mjs",
     "deploy:agent": "wrangler deploy -c ../../.devin/agent-demo/wrangler.agent.jsonc --env=''",
     "deploy:mcp": "wrangler deploy -c ../../.devin/agent-demo/wrangler.mcp.jsonc --env=''",
-    "deploy:quant": "wrangler deploy -c ../../.devin/agent-demo/wrangler.quant.jsonc --env=''"
+    "deploy:quant": "wrangler deploy -c ../../.devin/agent-demo/wrangler.quant.jsonc --env=''",
+    "deploy:pipeline": "wrangler deploy -c ../../.devin/agent-demo/wrangler.pipeline.jsonc --env=''"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "2.0.81",

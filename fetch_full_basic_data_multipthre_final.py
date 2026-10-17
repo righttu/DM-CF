@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
 # 配置区
-D1_API_URL = 'https://stock-api.righttu.uk'
+D1_API_URL = os.getenv("D1_API_URL", "https://stock-api.righttu.uk")
 CF_ACCESS_CLIENT_ID = os.getenv("CF_ACCESS_CLIENT_ID")
 CF_ACCESS_CLIENT_SECRET = os.getenv("CF_ACCESS_CLIENT_SECRET")
 

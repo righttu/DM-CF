@@ -27,7 +27,7 @@ TS_TOKEN = os.getenv("MY_TUSHARE_TOKEN")
 pro = ts.pro_api(TS_TOKEN)
 #pro._DataApi__http_url = 'https://tushare.top/dataapi/' # 镜像站
 
-D1_API_URL = 'https://stock-api.righttu.uk'
+D1_API_URL = os.getenv("D1_API_URL", "https://stock-api.righttu.uk")
 CF_ACCESS_CLIENT_ID = os.getenv('CF_ACCESS_CLIENT_ID')
 CF_ACCESS_CLIENT_SECRET = os.getenv('CF_ACCESS_CLIENT_SECRET')
 

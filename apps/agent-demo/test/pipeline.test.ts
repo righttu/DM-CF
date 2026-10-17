@@ -1,0 +1,987 @@
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { env } from "cloudflare:test";
+import schemaSql from "./fixtures/quant-schema.sql?raw";
+import { batchOutboundHandler } from "../src/pipeline/outbound.js";
+import {
+  __setBatchTransportForTests,
+  type QuantBatchContainer
+} from "../src/pipeline/batch.js";
+import {
+  bjCompactDate,
+  runDailyPipeline,
+  scheduledTick,
+  type StepLike
+} from "../src/pipeline/workflow.js";
+import { fetchStockBasicRows, syncStockBasic } from "../src/pipeline/stockBasic.js";
+
+type TestEnv = typeof env & {
+  QUANT_DB: D1Database;
+  BATCH: DurableObjectNamespace<QuantBatchContainer>;
+};
+
+const tenv = env as unknown as TestEnv;
+
+let statusBody: Record<string, unknown> = { state: "running" };
+let stopCalls = 0;
+
+function stubTransport() {
+  __setBatchTransportForTests({
+    async start() {},
+    async request(path) {
+      if (path === "/run") return Response.json({ state: "running" });
+      if (path === "/status") return Response.json(statusBody);
+      return new Response("nf", { status: 404 });
+    },
+    async stop() {
+      stopCalls += 1;
+    }
+  });
+}
+
+afterEach(() => {
+  __setBatchTransportForTests(undefined);
+  statusBody = { state: "running" };
+  stopCalls = 0;
+});
+
+function batchStub(jobId: string) {
+  return tenv.BATCH.get(tenv.BATCH.idFromName(jobId));
+}
+
+function containerCtx(jobId: string) {
+  return { containerId: tenv.BATCH.idFromName(jobId).toString() };
+}
+
+const fakeVectorize = {
+  checked: [] as string[],
+  upserted: [] as { id: string; values: number[]; metadata: Record<string, unknown>; namespace?: string }[],
+  queried: [] as { topK: number; namespace?: string }[],
+  async getByIds(ids: string[]) {
+    this.checked.push(...ids);
+    return ids.filter((id) => id.endsWith("_present")).map((id) => ({ id }));
+  },
+  async upsert(vectors: { id: string; values: number[]; metadata: Record<string, unknown>; namespace?: string }[]) {
+    this.upserted.push(...vectors);
+    return {};
+  },
+  async query(_v: number[], options: { topK: number; namespace?: string }) {
+    this.queried.push({ topK: options.topK, namespace: options.namespace });
+    return { matches: [{ id: "m1", score: 0.9 }] };
+  }
+};
+
+const fakeR2 = {
+  puts: [] as { key: string; size: number }[],
+  async put(key: string, body: ReadableStream) {
+    const text = await new Response(body).text();
+    this.puts.push({ key, size: text.length });
+    return { key };
+  }
+};
+
+function outboundEnv() {
+  return {
+    QUANT_DB: tenv.QUANT_DB,
+    BATCH: tenv.BATCH as never,
+    VECTORIZE: fakeVectorize as never,
+    R2_STOCK_INFOR: fakeR2 as never
+  };
+}
+
+function post(path: string, body: unknown) {
+  return new Request(`http://quant-data.internal${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+}
+
+const RUN_DATE = "20261017";
+
+async function seedJob(name: string, script: string, runDate = RUN_DATE) {
+  stubTransport();
+  const jobId = `t1:${name}`;
+  await batchStub(jobId).startJob({ script, run_date: runDate });
+  return { jobId, ctx: containerCtx(jobId) };
+}
+
+async function denied(req: Request, jobId: string) {
+  const resp = await batchOutboundHandler(req, outboundEnv(), containerCtx(jobId));
+  const body = (await resp.json()) as { success: boolean; error: string };
+  expect(resp.status).toBe(403);
+  expect(body.error).toBe("operation_not_allowed");
+}
+
+beforeAll(async () => {
+  for (const statement of schemaSql.split(";")) {
+    const sql = statement.trim();
+    if (sql) await tenv.QUANT_DB.prepare(sql).run();
+  }
+});
+
+describe("batch outbound handler", () => {
+  it("common query rules: fixed queries + read-only guard for any script", async () => {
+    const { jobId, ctx } = await seedJob("q-common", "fundamentals");
+    const env2 = outboundEnv();
+
+    const pragma = await batchOutboundHandler(
+      post("/api/db/query", { sql: "PRAGMA table_info(sync_status)" }),
+      env2,
+      ctx
+    );
+    expect(((await pragma.json()) as { success: boolean }).success).toBe(true);
+
+    const hunterTables = await batchOutboundHandler(
+      post("/api/db/query", {
+        sql: "  SELECT name FROM sqlite_master\nWHERE type='table' AND name LIKE '%_hunter' "
+      }),
+      env2,
+      ctx
+    );
+    const names = ((await hunterTables.json()) as { results: { name: string }[] }).results.map(
+      (r) => r.name
+    );
+    expect(names).toContain("chip_hunter");
+
+    const sel = await batchOutboundHandler(
+      post("/api/db/query", { sql: "SELECT 1 AS one" }),
+      env2,
+      ctx
+    );
+    expect(((await sel.json()) as { success: boolean }).success).toBe(true);
+
+    for (const sql of [
+      "DELETE FROM chip_hunter",
+      "UPDATE sync_status SET ts_code='x'",
+      "DROP TABLE x",
+      "SELECT name FROM sqlite_master"
+    ]) {
+      await denied(post("/api/db/query", { sql }), jobId);
+    }
+    await denied(post("/api/evil", {}), jobId);
+    const getResp = await batchOutboundHandler(
+      new Request("http://quant-data.internal/api/db/query", { method: "GET" }),
+      env2,
+      ctx
+    );
+    expect(getResp.status).toBe(403);
+    const noJob = await batchOutboundHandler(
+      post("/api/db/query", { sql: "SELECT 1" }),
+      env2,
+      { containerId: tenv.BATCH.idFromName("no:such").toString() }
+    );
+    expect(noJob.status).toBe(403);
+  });
+
+  it("fundamentals: stock_fundamentals DDL no-op and db/save with stock-api semantics", async () => {
+    const { jobId, ctx } = await seedJob("j-fund", "fundamentals");
+    const env2 = outboundEnv();
+
+    const ddl = await batchOutboundHandler(
+      post("/api/db/execute", {
+        sql: `CREATE TABLE IF NOT EXISTS stock_fundamentals (
+                ts_code TEXT, end_date TEXT, ann_date TEXT,
+                PRIMARY KEY (ts_code, end_date)
+            )`
+      }),
+      env2,
+      ctx
+    );
+    expect(((await ddl.json()) as { success: boolean }).success).toBe(true);
+
+    // data[0] keys -> columns; missing keys in later rows -> NULL.
+    const save = await batchOutboundHandler(
+      post("/api/db/save", {
+        table: "stock_fundamentals",
+        data: [
+          { ts_code: "600519.SH", end_date: "20260630", roe: 0.2 },
+          { ts_code: "000001.SZ", end_date: "20260630" }
+        ]
+      }),
+      env2,
+      ctx
+    );
+    const saveBody = (await save.json()) as { success: boolean; count: number };
+    expect(saveBody.success).toBe(true);
+    expect(saveBody.count).toBe(2);
+    const row = await tenv.QUANT_DB.prepare(
+      "SELECT roe FROM stock_fundamentals WHERE ts_code='000001.SZ' AND end_date='20260630'"
+    ).first<{ roe: number | null }>();
+    expect(row?.roe).toBeNull();
+
+    // INSERT OR IGNORE: same PK saved again is a no-op, count still returned.
+    const save2 = await batchOutboundHandler(
+      post("/api/db/save", {
+        table: "stock_fundamentals",
+        data: [{ ts_code: "600519.SH", end_date: "20260630", roe: 0.99 }]
+      }),
+      env2,
+      ctx
+    );
+    expect(((await save2.json()) as { success: boolean }).success).toBe(true);
+    const roe = await tenv.QUANT_DB.prepare(
+      "SELECT roe FROM stock_fundamentals WHERE ts_code='600519.SH' AND end_date='20260630'"
+    ).first<{ roe: number }>();
+    expect(roe?.roe).toBe(0.2);
+
+    const empty = await batchOutboundHandler(
+      post("/api/db/save", { table: "stock_fundamentals", data: [] }),
+      env2,
+      ctx
+    );
+    expect(((await empty.json()) as { count: number }).count).toBe(0);
+
+    await denied(
+      post("/api/db/save", { table: "chip_hunter", data: [{ ts_code: "600519.SH" }] }),
+      jobId
+    );
+    await denied(
+      post("/api/db/save", {
+        table: "stock_fundamentals",
+        data: [{ ts_code: "x", not_a_column: 1 }]
+      }),
+      jobId
+    );
+    await denied(post("/api/vector/query", { vector: [1], topK: 1, filter: {} }), jobId);
+  });
+
+  it("chip_hunter / alpha_hunter: own DDL no-ops and own save tables only", async () => {
+    const chip = await seedJob("j-chip", "chip_hunter");
+    const env2 = outboundEnv();
+    for (const sql of [
+      "CREATE TABLE IF NOT EXISTS chip_hunter (id INTEGER PRIMARY KEY)",
+      "CREATE INDEX IF NOT EXISTS idx_chip_ts_code ON chip_hunter(ts_code)",
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_chip_code_scan_date ON chip_hunter(ts_code, scan_date)",
+      "CREATE TABLE IF NOT EXISTS alpha_hunter (id INTEGER PRIMARY KEY)",
+      "CREATE INDEX IF NOT EXISTS idx_alpha_ts_code ON alpha_hunter(ts_code)"
+    ]) {
+      const r = await batchOutboundHandler(
+        post("/api/db/execute", { sql }),
+        env2,
+        chip.ctx
+      );
+      // alpha_* DDL is a no-op for chip jobs? No — cross-script DDL is denied.
+      const body = (await r.json()) as { success: boolean; error?: string };
+      if (sql.includes("alpha")) {
+        expect(body.success).toBe(false);
+      } else {
+        expect(body.success).toBe(true);
+      }
+    }
+    const chipSave = await batchOutboundHandler(
+      post("/api/db/save", {
+        table: "chip_hunter",
+        data: [{ ts_code: "600519.SH", scan_date: RUN_DATE, score: 5 }]
+      }),
+      env2,
+      chip.ctx
+    );
+    expect(((await chipSave.json()) as { success: boolean }).success).toBe(true);
+    await denied(
+      post("/api/db/save", { table: "alpha_hunter", data: [{ ts_code: "600519.SH" }] }),
+      chip.jobId
+    );
+
+    const alpha = await seedJob("j-alpha", "alpha_hunter");
+    const alphaSave = await batchOutboundHandler(
+      post("/api/db/save", {
+        table: "alpha_hunter",
+        data: [{ ts_code: "600519.SH", scan_date: RUN_DATE, score: 7 }]
+      }),
+      env2,
+      alpha.ctx
+    );
+    expect(((await alphaSave.json()) as { success: boolean }).success).toBe(true);
+    await denied(
+      post("/api/db/save", { table: "chip_hunter", data: [{ ts_code: "600519.SH" }] }),
+      alpha.jobId
+    );
+    // alpha DDL no-ops for alpha job
+    const idx = await batchOutboundHandler(
+      post("/api/db/execute", {
+        sql: "CREATE INDEX IF NOT EXISTS idx_alpha_scan_date ON alpha_hunter(scan_date)"
+      }),
+      env2,
+      alpha.ctx
+    );
+    expect(((await idx.json()) as { success: boolean }).success).toBe(true);
+  });
+
+  it("hotspot_registry: upsert exact form only", async () => {
+    const { jobId, ctx } = await seedJob("j-reg", "hotspot_registry");
+    const env2 = outboundEnv();
+    const upsert = `INSERT INTO hotspot_registry (ts_code, name, sector, node, purity, em_reason, ts_main_biz, volume_node, remark, create_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(ts_code, sector, node) DO UPDATE SET
+            em_reason = excluded.em_reason,
+            ts_main_biz = excluded.ts_main_biz,
+            create_date = excluded.create_date`;
+    const r = await batchOutboundHandler(
+      post("/api/db/execute", {
+        sql: upsert,
+        params: ["600519.SH", "茅台", "白酒", "龙头", "", "reason", "biz", "node_t", "", RUN_DATE]
+      }),
+      env2,
+      ctx
+    );
+    expect(((await r.json()) as { success: boolean }).success).toBe(true);
+    const row = await tenv.QUANT_DB.prepare(
+      "SELECT em_reason FROM hotspot_registry WHERE ts_code='600519.SH' AND sector='白酒' AND node='龙头'"
+    ).first<{ em_reason: string }>();
+    expect(row?.em_reason).toBe("reason");
+
+    await denied(
+      post("/api/db/execute", { sql: upsert, params: ["600519.SH", "茅台", "白酒", "龙头"] }),
+      jobId
+    );
+    await denied(post("/api/db/execute", { sql: "UPDATE hotspot_registry SET purity='x'" }), jobId);
+  });
+
+  it("registry_auditor: exact UPDATE only, nothing else", async () => {
+    const { jobId, ctx } = await seedJob("j-aud", "registry_auditor");
+    const env2 = outboundEnv();
+    const r = await batchOutboundHandler(
+      post("/api/db/execute", {
+        sql: `UPDATE hotspot_registry
+              SET purity = ?, remark = ?
+              WHERE ts_code = ? AND sector = ? AND node = ?`,
+        params: ["真题材", "真题材|龙头|ok", "600519.SH", "白酒", "龙头"]
+      }),
+      env2,
+      ctx
+    );
+    expect(((await r.json()) as { success: boolean }).success).toBe(true);
+    await denied(
+      post("/api/db/execute", {
+        sql: "INSERT INTO hotspot_registry (ts_code) VALUES ('x')"
+      }),
+      jobId
+    );
+    await denied(
+      post("/api/db/save", { table: "institutional_surveys", data: [] }),
+      jobId
+    );
+  });
+
+  it("hotspot_hunter: DDL no-op and exact 32-column insert", async () => {
+    const { jobId, ctx } = await seedJob("j-hot", "hotspot_hunter");
+    const env2 = outboundEnv();
+    const ddl = await batchOutboundHandler(
+      post("/api/db/execute", {
+        sql: "CREATE TABLE IF NOT EXISTS hotspot_hunter (ts_code TEXT)"
+      }),
+      env2,
+      ctx
+    );
+    expect(((await ddl.json()) as { success: boolean }).success).toBe(true);
+
+    const insertSql = `INSERT OR REPLACE INTO hotspot_hunter (
+    ts_code, trade_date, name, industry, sector, close,
+    turnover_rate_3d, industry_turnover_rate_3d, pe_ttm,
+    pe_ttm_percentile, industry_pe_ttm_median, peg, pb,
+    pb_percentile, industry_pb_median, forecast_eps_fy1,
+    forecast_eps_fy2, net_inflow_5d, total_mv, ps_ttm,
+    con_growth_rate, chip_latest_change, chip_cumu_change,
+    volume_ratio, mf_intensity, pct_chg, net_mf_amount,
+    bias_60, is_institutional, em_reason, scan_date, tags
+) VALUES (
+    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+)`;
+    const params = new Array<unknown>(32).fill("x");
+    params[0] = "600519.SH";
+    params[1] = "20261017";
+    params[30] = RUN_DATE;
+    const r = await batchOutboundHandler(
+      post("/api/db/execute", { sql: insertSql, params }),
+      env2,
+      ctx
+    );
+    expect(((await r.json()) as { success: boolean }).success).toBe(true);
+    await denied(
+      post("/api/db/execute", { sql: insertSql, params: params.slice(0, 31) }),
+      jobId
+    );
+  });
+
+  it("knowledge_miner: sync DDL/upserts, surveys save, vector check/upsert", async () => {
+    const { jobId, ctx } = await seedJob("j-km", "knowledge_miner");
+    const env2 = outboundEnv();
+    for (const sql of [
+      "CREATE TABLE IF NOT EXISTS sync_status (ts_code TEXT PRIMARY KEY)",
+      "CREATE TABLE IF NOT EXISTS institutional_surveys (ts_code TEXT)",
+      "ALTER TABLE sync_status ADD COLUMN last_news_sync TEXT"
+    ]) {
+      const r = await batchOutboundHandler(post("/api/db/execute", { sql }), env2, ctx);
+      expect(((await r.json()) as { success: boolean }).success).toBe(true);
+    }
+    for (const col of ["last_report_sync", "last_news_sync"]) {
+      const r = await batchOutboundHandler(
+        post("/api/db/execute", {
+          sql: `INSERT INTO sync_status (ts_code, ${col}) VALUES (?, ?)
+                ON CONFLICT(ts_code) DO UPDATE SET ${col}=excluded.${col}`,
+          params: ["600519.SH", "2026-10-17"]
+        }),
+        env2,
+        ctx
+      );
+      expect(((await r.json()) as { success: boolean }).success).toBe(true);
+    }
+    await denied(
+      post("/api/db/execute", {
+        sql: "INSERT INTO sync_status (ts_code, last_report_sync) VALUES (?, ?) ON CONFLICT(ts_code) DO UPDATE SET last_report_sync=excluded.last_report_sync",
+        params: ["NOT_A_CODE", "2026-10-17"]
+      }),
+      jobId
+    );
+
+    const save = await batchOutboundHandler(
+      post("/api/db/save", {
+        table: "institutional_surveys",
+        data: [
+          {
+            ts_code: "600519.SH",
+            survey_date: "2026-10-16",
+            org_count: 3,
+            org_names: "中金",
+            reception_place: "会议室"
+          }
+        ]
+      }),
+      env2,
+      ctx
+    );
+    expect(((await save.json()) as { success: boolean }).success).toBe(true);
+    await denied(
+      post("/api/db/save", {
+        table: "institutional_surveys",
+        data: [{ ts_code: "600519.SH", survey_date: "d", org_count: 1, org_names: "n", extra: 1 }]
+      }),
+      jobId
+    );
+    await denied(
+      post("/api/db/save", {
+        table: "institutional_surveys",
+        data: [{ ts_code: "BAD", survey_date: "d", org_count: 1, org_names: "n", reception_place: "p" }]
+      }),
+      jobId
+    );
+
+    const vec = new Array(512).fill(0.1);
+    const check = await batchOutboundHandler(
+      post("/api/vector/check", { id: "600519.SH_2026-10-16_ab_present" }),
+      env2,
+      ctx
+    );
+    expect(((await check.json()) as { exists: boolean }).exists).toBe(true);
+
+    const up = await batchOutboundHandler(
+      post("/api/vector/upsert", {
+        ids: ["600519.SH_a_0", "000001.SZ_b_1"],
+        embeddings: [vec, vec],
+        metadatas: [
+          { ts_code: "600519.SH", t: 1 },
+          { ts_code: "000001.SZ", t: 2 }
+        ]
+      }),
+      env2,
+      ctx
+    );
+    expect(((await up.json()) as { success: boolean }).success).toBe(true);
+    expect(fakeVectorize.upserted.at(-2)?.namespace).toBe("600519.SH");
+    expect(fakeVectorize.upserted.at(-1)?.namespace).toBe("000001.SZ");
+
+    await denied(
+      post("/api/vector/upsert", {
+        ids: ["600519.SH_x_0"],
+        embeddings: [vec],
+        metadatas: [{ ts_code: "000001.SZ" }]
+      }),
+      jobId
+    );
+    await denied(
+      post("/api/vector/query", { vector: vec, topK: 5, filter: { ts_code: { $eq: "600519.SH" } } }),
+      jobId
+    );
+  });
+
+  it("ai_brain: ai_analysis_result DDL/insert with run_date, prompt-log R2, vector query", async () => {
+    const { jobId, ctx } = await seedJob("j-brain", "ai_brain");
+    const env2 = outboundEnv();
+    const ddl = await batchOutboundHandler(
+      post("/api/db/execute", {
+        sql: "CREATE TABLE IF NOT EXISTS ai_analysis_result (report_date TEXT)"
+      }),
+      env2,
+      ctx
+    );
+    expect(((await ddl.json()) as { success: boolean }).success).toBe(true);
+
+    const params = new Array<unknown>(24).fill("x");
+    params[0] = RUN_DATE;
+    params[2] = "600519.SH";
+    const ins = await batchOutboundHandler(
+      post("/api/db/execute", {
+        sql: "INSERT OR REPLACE INTO ai_analysis_result VALUES (" + "?,".repeat(23) + "?)",
+        params
+      }),
+      env2,
+      ctx
+    );
+    expect(((await ins.json()) as { success: boolean }).success).toBe(true);
+
+    const wrongDate = [...params];
+    wrongDate[0] = "19990101";
+    await denied(
+      post("/api/db/execute", {
+        sql: "INSERT OR REPLACE INTO ai_analysis_result VALUES (" + "?,".repeat(23) + "?)",
+        params: wrongDate
+      }),
+      jobId
+    );
+
+    // Midnight crossover: the current Asia/Shanghai date is accepted even when
+    // it differs from the job's run_date.
+    const old = await seedJob("j-brain2", "ai_brain", "19990101");
+    const todayBj = [...params];
+    todayBj[0] = bjCompactDate();
+    const todayIns = await batchOutboundHandler(
+      post("/api/db/execute", {
+        sql: "INSERT OR REPLACE INTO ai_analysis_result VALUES (" + "?,".repeat(23) + "?)",
+        params: todayBj
+      }),
+      env2,
+      old.ctx
+    );
+    expect(((await todayIns.json()) as { success: boolean }).success).toBe(true);
+    const neither = [...params];
+    neither[0] = "20000101";
+    await denied(
+      post("/api/db/execute", {
+        sql: "INSERT OR REPLACE INTO ai_analysis_result VALUES (" + "?,".repeat(23) + "?)",
+        params: neither
+      }),
+      old.jobId
+    );
+
+    const key = `prompt_logs/20261017_153000_600519.SH_茅台_data.txt`;
+    const form = new FormData();
+    form.append("key", key);
+    form.append("file", new File(["prompt"], "f.txt"));
+    const up = await batchOutboundHandler(
+      new Request("http://quant-data.internal/api/r2/upload", { method: "POST", body: form }),
+      env2,
+      ctx
+    );
+    expect(((await up.json()) as { success: boolean }).success).toBe(true);
+
+    for (const badKey of [
+      `prompt_logs/../600519.SH_x_data.txt`,
+      `prompt_logs/20261017_153000_600519_SH_x_data.txt`,
+      `other/20261017_153000_600519.SH_x_data.txt`
+    ]) {
+      const f2 = new FormData();
+      f2.append("key", badKey);
+      f2.append("file", new File(["x"], "f.txt"));
+      await denied(
+        new Request("http://quant-data.internal/api/r2/upload", { method: "POST", body: f2 }),
+        jobId
+      );
+    }
+
+    const vec = new Array(512).fill(0.1);
+    const q = await batchOutboundHandler(
+      post("/api/vector/query", {
+        vector: vec,
+        topK: 5,
+        filter: { ts_code: { $eq: "600519.SH" } }
+      }),
+      env2,
+      ctx
+    );
+    expect(((await q.json()) as { success: boolean }).success).toBe(true);
+    expect(fakeVectorize.queried.at(-1)?.namespace).toBe("600519.SH");
+    await denied(
+      post("/api/vector/query", { vector: vec, topK: 5, filter: { ts_code: { $eq: "BAD" } } }),
+      jobId
+    );
+    await denied(post("/api/vector/check", { id: "600519.SH_x" }), jobId);
+  });
+});
+
+describe("stock_basic sync (TS port)", () => {
+  function tushareItems(status: string, n: number, prefix: string) {
+    return {
+      fields: [
+        "ts_code", "symbol", "name", "fullname", "cnspell", "area", "industry",
+        "market", "exchange", "list_status", "list_date", "delist_date", "is_hs"
+      ],
+      items: Array.from({ length: n }, (_, i) => [
+        `${prefix}${String(i).padStart(4, "0")}.SH`,
+        `${prefix}${i}`,
+        i === 0 ? "茅'台" : `name${i}`,
+        "",
+        "nan",
+        null,
+        "白酒",
+        "主板",
+        "SSE",
+        status,
+        "20010827",
+        null,
+        "N"
+      ])
+    };
+  }
+
+  it("fetches L/D/P, dedupes by ts_code, maps empty/nan/null to NULL", async () => {
+    const calls: string[] = [];
+    const dup = tushareItems("L", 10, "600");
+    dup.items.push([...dup.items[0]]); // duplicate ts_code
+    const fetcher = async (_api: string, params: Record<string, unknown>) => {
+      calls.push(String(params.list_status));
+      if (params.list_status === "L") return dup;
+      if (params.list_status === "D") return { fields: dup.fields, items: [] };
+      return tushareItems("P", 2, "920");
+    };
+    const rows = await fetchStockBasicRows("token", fetcher);
+    expect(calls).toEqual(["L", "D", "P"]);
+    expect(rows).toHaveLength(12);
+  });
+
+  it("aborts when < 4000 rows; writes bound params in batches otherwise", async () => {
+    const small = async () => tushareItems("L", 3, "600");
+    await expect(
+      syncStockBasic({ QUANT_DB: tenv.QUANT_DB, MY_TUSHARE_TOKEN: "t" }, { fetcher: small })
+    ).rejects.toThrow("stock_basic_rows_abnormal: 3");
+
+    const big = async (_api: string, params: Record<string, unknown>) => {
+      if (params.list_status === "L") return tushareItems("L", 4100, "600");
+      return { fields: tushareItems("L", 0, "x").fields, items: [] };
+    };
+    const res = await syncStockBasic(
+      { QUANT_DB: tenv.QUANT_DB, MY_TUSHARE_TOKEN: "t" },
+      { fetcher: big }
+    );
+    expect(res.written).toBe(4100);
+    expect(res.total).toBe(4100);
+    const sample = await tenv.QUANT_DB.prepare(
+      "SELECT name, fullname, cnspell, update_time FROM stock_basic WHERE ts_code='6000000.SH'"
+    ).first<{ name: string; fullname: string | null; cnspell: string | null; update_time: string }>();
+    expect(sample?.name).toBe("茅'台");
+    expect(sample?.fullname).toBeNull();
+    expect(sample?.cnspell).toBeNull();
+    expect(sample?.update_time).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+
+    const badCode = async () => {
+      throw new Error("tushare_stock_basic: code=-1 bad");
+    };
+    await expect(
+      syncStockBasic({ QUANT_DB: tenv.QUANT_DB, MY_TUSHARE_TOKEN: "t" }, { fetcher: badCode })
+    ).rejects.toThrow("code=-1");
+  });
+});
+
+describe("daily workflow", () => {
+  function fakeStep() {
+    const calls: string[] = [];
+    const step: StepLike & { calls: string[] } = {
+      calls,
+      async do(name, fn) {
+        calls.push(`do:${name}`);
+        return fn();
+      },
+      async sleep(name) {
+        calls.push(`sleep:${name}`);
+      }
+    };
+    return step;
+  }
+
+  function fakeBatch(behaviour: Record<string, { statuses?: string[]; fail?: boolean }>) {
+    const starts: string[] = [];
+    const stops: string[] = [];
+    const ns = {
+      starts,
+      stops,
+      idFromName: (name: string) => ({ toString: () => name }),
+      get: (id: { toString(): string }) => {
+        const name = id.toString().split(":")[1];
+        const b = (behaviour[name] ?? {}) as { statuses?: string[]; fail?: boolean; _n?: number };
+        b._n = b._n ?? 0;
+        return {
+          async startJob() {
+            starts.push(name);
+            if (b.fail) throw new Error("start_boom");
+            return { script: name, status: "running" };
+          },
+          async status() {
+            const s =
+              b.statuses?.[Math.min(b._n ?? 0, (b.statuses?.length ?? 1) - 1)] ?? "succeeded";
+            b._n = (b._n ?? 0) + 1;
+            return {
+              status: s === "finished" ? "succeeded" : s,
+              error_tail: s === "failed" ? ["boom_err"] : []
+            };
+          },
+          async stopJob() {
+            stops.push(name);
+          }
+        };
+      }
+    };
+    return ns;
+  }
+
+  const openCal = async () => ({ fields: ["cal_date", "is_open"], items: [["20261017", "1"]] });
+  const closedCal = async () => ({ fields: ["cal_date", "is_open"], items: [["20261017", "0"]] });
+
+  it("skips everything on a non-trading day", async () => {
+    const step = fakeStep();
+    const res = await runDailyPipeline(
+      { BATCH: fakeBatch({}) as never, QUANT_DB: tenv.QUANT_DB, MY_TUSHARE_TOKEN: "t" },
+      "i1",
+      { date: "20261017" },
+      step,
+      { fetcher: closedCal }
+    );
+    expect(res.trade_day).toBe(false);
+    expect(res.steps.every((s) => s.status === "skipped")).toBe(true);
+    expect(res.steps).toHaveLength(9);
+    expect(step.calls).toEqual(["do:trade_day"]);
+  });
+
+  it("runs steps in order, polling until finished, continuing on failure", async () => {
+    const step = fakeStep();
+    const batch = fakeBatch({
+      fundamentals: { statuses: ["failed", "succeeded"] },
+      chip_hunter: { statuses: ["running", "succeeded"] }
+    });
+    const res = await runDailyPipeline(
+      { BATCH: batch as never, QUANT_DB: tenv.QUANT_DB, MY_TUSHARE_TOKEN: "t" },
+      "i2",
+      { date: "20261017", only: ["fundamentals", "chip_hunter"] },
+      step,
+      { fetcher: openCal }
+    );
+    expect(res.trade_day).toBe(true);
+    expect(res.steps.map((s) => `${s.name}:${s.status}`)).toEqual([
+      "fundamentals:succeeded",
+      "chip_hunter:succeeded"
+    ]);
+    // fundamentals failed once -> retried once -> started twice.
+    expect(batch.starts).toEqual(["fundamentals", "fundamentals", "chip_hunter"]);
+    const fundIdx = step.calls.findIndex((c) => c === "do:poll fundamentals #1 0");
+    const chipIdx = step.calls.findIndex((c) => c === "do:start chip_hunter #1");
+    expect(chipIdx).toBeGreaterThan(fundIdx);
+    for (const s of res.steps) {
+      expect(typeof s.duration_s).toBe("number");
+      expect(s.started_at_bj).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    }
+  });
+
+  it("marks a script failed after the 4 h cap and stops its container", async () => {
+    const step = fakeStep();
+    let now = 1_000_000;
+    const batch = fakeBatch({ fundamentals: { statuses: ["running"] } });
+    const res = await runDailyPipeline(
+      { BATCH: batch as never, QUANT_DB: tenv.QUANT_DB, MY_TUSHARE_TOKEN: "t" },
+      "i3",
+      { date: "20261017", only: ["fundamentals"] },
+      step,
+      { fetcher: openCal, clock: () => (now += 3 * 60 * 60 * 1000) }
+    );
+    expect(res.steps[0].status).toBe("failed");
+    expect(res.steps[0].error).toBe("step_timeout_4h");
+    expect(batch.stops).toContain("fundamentals");
+  });
+
+  it("force runs on a non-trading day; a failed step reports its error", async () => {
+    const step = fakeStep();
+    const batch = fakeBatch({ fundamentals: { statuses: ["failed"] } });
+    const res = await runDailyPipeline(
+      { BATCH: batch as never, QUANT_DB: tenv.QUANT_DB, MY_TUSHARE_TOKEN: "t" },
+      "i4",
+      { date: "20261017", force: true, only: ["fundamentals"] },
+      step,
+      { fetcher: closedCal }
+    );
+    expect(res.steps[0].status).toBe("failed");
+    expect(res.steps[0].error).toBe("boom_err");
+    // retry once -> two start calls
+    expect(batch.starts.filter((n) => n === "fundamentals")).toHaveLength(2);
+  });
+
+  it("joins the last non-empty error_tail lines", async () => {
+    const step = fakeStep();
+    const batch = {
+      starts: 0,
+      idFromName: (n: string) => ({ toString: () => n }),
+      get: () => ({
+        async startJob() {
+          batch.starts += 1;
+          return {};
+        },
+        async status() {
+          return { status: "failed", error_tail: ["", "first_boom", "", "last_boom", ""] };
+        },
+        async stopJob() {}
+      })
+    };
+    const res = await runDailyPipeline(
+      { BATCH: batch as never, QUANT_DB: tenv.QUANT_DB, MY_TUSHARE_TOKEN: "t" },
+      "i5",
+      { date: "20261017", only: ["fundamentals"] },
+      step,
+      { fetcher: openCal }
+    );
+    expect(res.steps[0].error).toBe("first_boom | last_boom");
+  });
+
+  // A Workflow-like step: step.do results are memoized by name; replays re-run
+  // runDailyPipeline from the top with the cache intact.
+  function memoStep() {
+    const cache = new Map<string, unknown>();
+    const calls: string[] = [];
+    let hibernated = false;
+    const step = {
+      calls,
+      hibernateOnFirstSleep() {
+        hibernated = false;
+        this._armed = true;
+      },
+      _armed: false,
+      async do(name: string, fn: () => Promise<unknown> | unknown) {
+        calls.push(`do:${name}`);
+        if (cache.has(name)) return cache.get(name);
+        const v = await fn();
+        cache.set(name, v);
+        return v;
+      },
+      async sleep(name: string) {
+        calls.push(`sleep:${name}`);
+        if (this._armed && !hibernated) {
+          hibernated = true;
+          throw new Error("workflow_hibernate");
+        }
+      }
+    };
+    return step as StepLike & {
+      calls: string[];
+      _armed: boolean;
+      hibernateOnFirstSleep(): void;
+    };
+  }
+
+  it("retries re-execute under #2 step names (memoized steps are not reused)", async () => {
+    const step = memoStep();
+    const batch = fakeBatch({ fundamentals: { statuses: ["failed", "succeeded"] } });
+    const res = await runDailyPipeline(
+      { BATCH: batch as never, QUANT_DB: tenv.QUANT_DB, MY_TUSHARE_TOKEN: "t" },
+      "i6",
+      { date: "20261017", only: ["fundamentals"] },
+      step,
+      { fetcher: openCal }
+    );
+    expect(res.steps[0].status).toBe("succeeded");
+    // startJob really ran twice: attempt 2 used fresh #2 step names.
+    expect(batch.starts).toEqual(["fundamentals", "fundamentals"]);
+    expect(step.calls).toContain("do:start fundamentals #2");
+    expect(step.calls).not.toContain("do:start fundamentals");
+  });
+
+  it("replays return memoized steps: identical result, no re-executed starts", async () => {
+    const step = memoStep();
+    // 30 min per clock call: begin@+0.5h ... end@+2.5h -> duration 7200 s.
+    let now = 1_000_000;
+    const clock = () => (now += 30 * 60 * 1000);
+    const batch = fakeBatch({ fundamentals: { statuses: ["running", "succeeded"] } });
+    const env2 = { BATCH: batch as never, QUANT_DB: tenv.QUANT_DB, MY_TUSHARE_TOKEN: "t" };
+
+    const res = await runDailyPipeline(
+      env2, "i7", { date: "20261017", only: ["fundamentals"] }, step,
+      { fetcher: openCal, clock }
+    );
+    expect(res.steps[0].status).toBe("succeeded");
+    expect(res.steps[0].duration_s).toBe(7200);
+    expect(batch.starts).toEqual(["fundamentals"]);
+
+    // Replay hours later (the run re-executes top to bottom): every step
+    // returns its memoized value, so the result is byte-identical and no
+    // side-effecting step runs again.
+    now += 3 * 60 * 60 * 1000;
+    const res2 = await runDailyPipeline(
+      env2, "i7", { date: "20261017", only: ["fundamentals"] }, step,
+      { fetcher: openCal, clock }
+    );
+    expect(res2).toEqual(res);
+    expect(batch.starts).toEqual(["fundamentals"]);
+  });
+
+  it("the 4h cap triggers only when persisted elapsed time exceeds it", async () => {
+    const step = memoStep();
+    // Each clock() call advances 1 h so persisted poll times keep increasing.
+    let now = 1_000_000;
+    const clock = () => (now += 60 * 60 * 1000);
+    const batch = fakeBatch({ fundamentals: { statuses: ["running"] } });
+    const env2 = { BATCH: batch as never, QUANT_DB: tenv.QUANT_DB, MY_TUSHARE_TOKEN: "t" };
+
+    // Pass 1: begin/t0/start persist (t0 = +2h), then the first sleep
+    // hibernates -> the step is recorded failed and the run ends.
+    step.hibernateOnFirstSleep();
+    const pass1 = await runDailyPipeline(
+      env2, "i8", { date: "20261017", only: ["fundamentals"] }, step,
+      { fetcher: openCal, clock }
+    );
+    expect(pass1.steps[0].error).toBe("workflow_hibernate");
+
+    // Replay: poll 0 executes now and persists its timestamp; the cap compares
+    // poll.now - t0 using values that came out of steps, so it fires on the
+    // fifth poll (elapsed 5h), not on a recomputed replay clock.
+    now += 2 * 60 * 60 * 1000;
+    const res = await runDailyPipeline(
+      env2, "i8", { date: "20261017", only: ["fundamentals"] }, step,
+      { fetcher: openCal, clock }
+    );
+    const fund = res.steps[0];
+    expect(fund.status).toBe("failed");
+    expect(fund.error).toBe("step_timeout_4h");
+    // Both attempts hit the cap -> two stops.
+    expect(batch.stops).toEqual(["fundamentals", "fundamentals"]);
+    // The cap fired on the second persisted poll of attempt 1 (elapsed 5h),
+    // not immediately on replay — poll 0's persisted `now` was used.
+    const stopIdx = step.calls.indexOf("do:stop fundamentals #1");
+    expect(step.calls.indexOf("do:poll fundamentals #1 1")).toBeGreaterThan(-1);
+    expect(step.calls.indexOf("do:poll fundamentals #1 1")).toBeLessThan(stopIdx);
+    expect(step.calls.indexOf("do:poll fundamentals #1 2")).toBe(-1);
+    expect(stopIdx).toBeGreaterThan(step.calls.indexOf("do:poll fundamentals #1 0"));
+  });
+
+  it("scheduled() creates a deterministic daily instance id and ignores duplicates", async () => {
+    const created: string[] = [];
+    const daily = {
+      async create(opts: { id: string }) {
+        created.push(opts.id);
+        if (created.length > 1) throw new Error("instance already exists");
+        return {};
+      }
+    };
+    const id = await scheduledTick({ DAILY: daily as never, QUANT_DB: tenv.QUANT_DB });
+    expect(id).toBe(`daily-${bjCompactDate()}`);
+    await expect(scheduledTick({ DAILY: daily as never, QUANT_DB: tenv.QUANT_DB })).resolves.toBe(id);
+    const failing = {
+      async create() {
+        throw new Error("quota exceeded");
+      }
+    };
+    await expect(scheduledTick({ DAILY: failing as never, QUANT_DB: tenv.QUANT_DB })).rejects.toThrow("quota exceeded");
+  });
+
+  it("pipeline entry exports ContainerProxy for outbound interception", async () => {
+    const mod = (await import("../src/pipeline/index.js")) as Record<string, unknown>;
+    expect(typeof mod.ContainerProxy).toBe("function");
+    const { ContainerProxy } = await import("@cloudflare/containers");
+    expect(mod.ContainerProxy).toBe(ContainerProxy);
+    expect(typeof mod.QuantDailyWorkflow).toBe("function");
+    expect(typeof mod.QuantBatchContainer).toBe("function");
+  });
+});

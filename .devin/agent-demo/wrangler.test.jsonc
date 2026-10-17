@@ -7,13 +7,15 @@
     "bindings": [
       { "name": "ResearchAgent", "class_name": "ResearchAgent" },
       { "name": "CONSENT_TRANSACTIONS", "class_name": "ConsentTransaction" },
-      { "name": "ANALYSIS", "class_name": "QuantAnalysisContainer" }
+      { "name": "ANALYSIS", "class_name": "QuantAnalysisContainer" },
+      { "name": "BATCH", "class_name": "QuantBatchContainer" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["ResearchAgent"] },
     { "tag": "v1-consent", "new_sqlite_classes": ["ConsentTransaction"] },
-    { "tag": "v1-analysis", "new_sqlite_classes": ["QuantAnalysisContainer"] }
+    { "tag": "v1-analysis", "new_sqlite_classes": ["QuantAnalysisContainer"] },
+    { "tag": "v1-batch", "new_sqlite_classes": ["QuantBatchContainer"] }
   ],
   "d1_databases": [
     {

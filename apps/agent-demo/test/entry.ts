@@ -47,11 +47,51 @@ class TestQuantAnalysisContainer extends DurableObject<QuantEnv & AnalysisEnv> {
   }
 }
 
+import {
+  BatchJobRunner,
+  batchTransport,
+  type BatchJob,
+  type PipelineEnv
+} from "../src/pipeline/batch.js";
+
+// Same pattern as the analysis test DO: no container runtime in the pool, so
+// BATCH maps to a plain Durable Object running the same job logic.
+class TestQuantBatchContainer extends DurableObject<PipelineEnv> {
+  private readonly runner = new BatchJobRunner(
+    this.ctx.storage,
+    this.env,
+    () =>
+      batchTransport() ?? {
+        start: () => Promise.reject(new Error("no_transport_stub")),
+        request: () => Promise.reject(new Error("no_transport_stub")),
+        stop: () => Promise.resolve()
+      },
+    () => this.ctx.id.name ?? ""
+  );
+
+  jobContext(): Promise<{ script: string; run_date: string } | null> {
+    return this.runner.jobContext();
+  }
+
+  startJob(input: { script: string; run_date: string }): Promise<BatchJob> {
+    return this.runner.startJob(input);
+  }
+
+  status(): Promise<BatchJob> {
+    return this.runner.status();
+  }
+
+  stopJob(): Promise<void> {
+    return this.runner.stop();
+  }
+}
+
 export {
   ResearchAgent,
   ConsentTransaction,
   QuantEmbeddingContainer,
-  TestQuantAnalysisContainer as QuantAnalysisContainer
+  TestQuantAnalysisContainer as QuantAnalysisContainer,
+  TestQuantBatchContainer as QuantBatchContainer
 };
 
 const MCP_PATHS = ["/mcp", "/authorize", "/token", "/register", "/.well-known"];

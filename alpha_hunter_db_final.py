@@ -33,7 +33,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 #MY_TOKEN = '787294025173438464'
 MY_TOKEN = os.getenv('MY_TUSHARE_TOKEN')
 # D1 Worker API 配置
-D1_API_URL = 'https://stock-api.righttu.uk'
+D1_API_URL = os.getenv("D1_API_URL", "https://stock-api.righttu.uk")
 CF_ACCESS_CLIENT_ID = os.getenv('CF_ACCESS_CLIENT_ID')
 CF_ACCESS_CLIENT_SECRET = os.getenv('CF_ACCESS_CLIENT_SECRET')
 BATCH_SIZE = 50
