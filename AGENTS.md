@@ -148,3 +148,18 @@ Agent tracing documents three identity fields: agent name (`functionId`, shared:
 - Portal `research-portal` now lists `research-demo` and `abc-quant` (on_behalf true). After creation `abc-quant` waits for browser admin authorization in the dashboard.
 - Embedding compatibility verified: `stock-knowledge` is 512-dim (975 vectors on 2026-10-17); re-embedding three stored `chunk_text`s with the container image gave cosine 1.000000 (max abs diff ≤1.2e-7) against the stored vectors. Done through a temporary Vectorize-bound Worker that was deleted afterwards (the VM API token has no Vectorize permission).
 - `container/embedding/requirements.txt` is a real resolver output (41 pins, all ≥7 days old); never hand-edit individual transitive pins.
+
+## Deferred backlog (user decision 2026-10-17: revisit at the end if time allows)
+
+1. DLP block through the Workers AI binding: never verified live (classification relies on thrown binding errors 2029/2030).
+2. Agent Tracing does not show the user; `user.id`/agent id per user are sent but the dashboard display is unconfirmed.
+3. Dedicated service account for the Portal dashboard admin authorization (today the Analyst's own account is used; its role decides the synced tool catalog).
+4. Enterprise IdP (Okta / Entra ID / Google) with group-based roles instead of hand-maintained `ANALYST_EMAILS`/`VIEWER_EMAILS`.
+5. Rename legacy hostnames `portal-demo` / `mcp-demo` (requires Portal/server/Access/Agent config changes and re-authorization).
+6. Scheduled sync for `stock_basic` (script `stock_basic_sync_final.py` exists, no schedule); research knowledge base is small (975 chunks).
+
+## Phase 2 design notes (on-demand analysis container, not started)
+
+- First step: connectivity test from Cloudflare Containers to Tushare (`api.tushare.pro`), Eastmoney and Sina before packaging the Manual engine.
+- Secrets (Tushare token, DashScope key, AIG token) live in Worker secrets or Secrets Store; start by passing them as container env at start, later harden with outbound-handler credential injection (container never sees the token; check whether Tushare carries the token in the JSON body).
+- Data access: prefer a container outbound handler (`outboundByHost`) that serves stock-api-compatible paths backed by the QUANT_DB / Vectorize / R2 bindings with an allowlist of the exact operations the Manual engine uses, instead of the public `stock-api` whose `/api/db/execute` runs arbitrary SQL. Requires an inventory of every SQL/R2/Vectorize call made by `Manual_Analyst_Engine` and the modules it imports; Python then only needs `D1_API_URL` from an env var.
