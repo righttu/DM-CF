@@ -21,6 +21,10 @@ CF_ACCESS_CLIENT_ID = os.getenv('CF_ACCESS_CLIENT_ID')
 CF_ACCESS_CLIENT_SECRET = os.getenv('CF_ACCESS_CLIENT_SECRET')
 EMBEDDING_MODEL_PATH = os.getenv("EMBEDDING_MODEL_PATH") or "/home/righttu/ai-finance/CloudFlare/models/bge-small-zh-v1.5/BAAI/bge-small-zh-v1___5"
 
+# 🔥 chip_hunter 诊断范围：仅取 score 最高的前 N 只进入知识库挖掘与 AI 诊断；
+# 设为 None 恢复原始行为（分析全部 chip_hunter 股票）。
+CHIP_TOP_N = 30
+
 class CloudAPIClient:
     """统一封装 HTTP 调用 + CF Access 认证"""
     def __init__(self, base_url):
@@ -81,6 +85,9 @@ class DBLoader:
             "forecast_eps_fy1", "forecast_eps_fy2", "con_growth_rate",
             "tags", "scan_date" # 辅助字段
         ]
+        # chip_hunter 限流需要 score 排序，补选该列（其他表保持不变）
+        if CHIP_TOP_N is not None and table_name == 'chip_hunter' and "score" not in fields:
+            fields = fields + ["score"]
         col_str = ", ".join(fields)
 
         # 🔥 [新增] 行业黑名单定义
@@ -130,6 +137,17 @@ class DBLoader:
 
             if not df.empty:
                 df['source_strategy'] = table_name
+                # chip_hunter: 同一 ts_code 保留 score 最高行，再取 score 前 N；
+                # CHIP_TOP_N=None 时走原始去重路径（行为不变）。
+                if CHIP_TOP_N is not None and table_name == 'chip_hunter':
+                    df = df.assign(_score_num=pd.to_numeric(df['score'], errors='coerce'))
+                    df = (
+                        df.sort_values('_score_num', ascending=False)
+                        .drop_duplicates(subset=['ts_code'])
+                        .head(CHIP_TOP_N)
+                        .drop(columns=['_score_num'])
+                    )
+                    return df
                 return df.drop_duplicates(subset=['ts_code'])
             return pd.DataFrame()
         except Exception as e:

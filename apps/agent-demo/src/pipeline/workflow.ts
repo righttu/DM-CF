@@ -20,7 +20,36 @@ export const BATCH_SCRIPTS = [
 ] as const;
 
 const STEP_CAP_MS = 4 * 60 * 60 * 1000;
+const LONG_STEP_CAP_MS = 8 * 60 * 60 * 1000;
+const LONG_STEPS = new Set<string>(["knowledge_miner", "ai_brain"]);
 const POLL_INTERVAL = "2 minutes";
+
+// fundamentals 只在财报季运行：北京时间周五 且 处于以下窗口（月-日，闭区间）。
+// 修改窗口或星期只需改这两个字段；force 或 only 手动触发不受此限制。
+const FUNDAMENTALS_SCHEDULE = {
+  weekday: 5, // 0=周日 ... 5=周五
+  windows: [
+    [3, 20, 4, 30],
+    [7, 15, 8, 31],
+    [10, 1, 10, 31]
+  ] as const
+};
+
+// date 是北京时间 YYYYMMDD；返回该日历日是否为限定星期且落在任一个窗口内。
+export function fundamentalsWindowOpen(date: string): boolean {
+  const y = Number(date.slice(0, 4));
+  const m = Number(date.slice(4, 6));
+  const d = Number(date.slice(6, 8));
+  if (new Date(Date.UTC(y, m - 1, d)).getUTCDay() !== FUNDAMENTALS_SCHEDULE.weekday) {
+    return false;
+  }
+  const mmdd = m * 100 + d;
+  return FUNDAMENTALS_SCHEDULE.windows.some(([m1, d1, m2, d2]) => {
+    const lo = m1 * 100 + d1;
+    const hi = m2 * 100 + d2;
+    return mmdd >= lo && mmdd <= hi;
+  });
+}
 
 export interface StepLike {
   do<T>(name: string, fn: () => Promise<T> | T): Promise<T>;
@@ -97,6 +126,7 @@ async function runScriptOnce(
   clock: () => number
 ): Promise<ScriptOutcome> {
   const stub = stubFor(env, jobName);
+  const capMs = LONG_STEPS.has(name) ? LONG_STEP_CAP_MS : STEP_CAP_MS;
   const t0 = await step.do(`t0 ${name} #${attempt}`, () => clock());
   await step.do(`start ${name} #${attempt}`, () =>
     stub.startJob({ script: name, run_date: runDate })
@@ -111,9 +141,12 @@ async function runScriptOnce(
     if (poll.job.status === "failed") {
       return { status: "failed", error: jobError(poll.job.error_tail) };
     }
-    if (poll.now - t0 > STEP_CAP_MS) {
+    if (poll.now - t0 > capMs) {
       await step.do(`stop ${name} #${attempt}`, () => stub.stopJob());
-      return { status: "failed", error: "step_timeout_4h" };
+      return {
+        status: "failed",
+        error: `step_timeout_${capMs === LONG_STEP_CAP_MS ? "8h" : "4h"}`
+      };
     }
   }
 }
@@ -169,6 +202,22 @@ export async function runDailyPipeline(
   }
 
   for (const name of names) {
+    // fundamentals 仅在财报季周五运行（定时调度路径）；force 或 only 手动触发不受限。
+    if (
+      name === "fundamentals" &&
+      !params.force &&
+      !params.only?.includes("fundamentals") &&
+      !fundamentalsWindowOpen(date)
+    ) {
+      records.push({
+        name,
+        status: "skipped",
+        started_at_bj: null,
+        duration_s: 0,
+        error: "not_in_report_window"
+      });
+      continue;
+    }
     const begin = await step.do(`begin ${name}`, () => ({ ms: clock(), bj: beijingNow() }));
     const rec: StepRecord = {
       name,

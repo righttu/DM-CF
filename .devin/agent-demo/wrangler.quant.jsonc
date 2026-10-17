@@ -59,6 +59,7 @@
   "vectorize": [
     { "binding": "VECTORIZE", "index_name": "stock-knowledge" }
   ],
+  "ai": { "binding": "AI" },
   "kv_namespaces": [
     { "binding": "OAUTH_KV", "id": "3e6db718bcf84164b3fffbd483156555" }
   ],
@@ -99,6 +100,7 @@
       "vectorize": [
         { "binding": "VECTORIZE", "index_name": "stock-knowledge-local" }
       ],
+      "ai": { "binding": "AI" },
       "r2_buckets": [
         { "binding": "R2_STOCK_INFOR", "bucket_name": "stock-infor-local" }
       ],

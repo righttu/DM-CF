@@ -1,11 +1,12 @@
 import { Container } from "@cloudflare/containers";
-import { batchOutboundHandler } from "./outbound.js";
+import { AI_OUTBOUND_HOST, aiOutboundHandler, batchOutboundHandler } from "./outbound.js";
 
 export interface PipelineEnv {
   QUANT_DB: D1Database;
   BATCH?: DurableObjectNamespace<QuantBatchContainer>;
   VECTORIZE?: Vectorize;
   R2_STOCK_INFOR?: R2Bucket;
+  AI?: Ai;
   DAILY?: Workflow<DailyParams>;
   MY_TUSHARE_TOKEN?: string;
   DASHSCOPE_API_KEY?: string;
@@ -63,6 +64,8 @@ export class BatchJobRunner {
     const env = this.env;
     const vars: Record<string, string> = {
       D1_API_URL: `http://${BATCH_OUTBOUND_HOST}`,
+      AI_BASE_URL: `http://${AI_OUTBOUND_HOST}/v1`,
+      AI_API_KEY: "unused",
       CF_ACCESS_CLIENT_ID: "unused",
       CF_ACCESS_CLIENT_SECRET: "unused"
     };
@@ -240,5 +243,6 @@ export class QuantBatchContainer extends Container<PipelineEnv> {
 }
 
 QuantBatchContainer.outboundByHost = {
-  [BATCH_OUTBOUND_HOST]: batchOutboundHandler
+  [BATCH_OUTBOUND_HOST]: batchOutboundHandler,
+  [AI_OUTBOUND_HOST]: aiOutboundHandler
 };

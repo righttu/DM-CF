@@ -21,10 +21,14 @@ except ImportError:
     exit(1)
 
 # ================= 配置区 =================
-AI_ENGINE = "BAILIAN"  # 开关: "OLLAMA" 或 "BAILIAN"
+# AI_ENGINE = "BAILIAN"  # 开关: "OLLAMA" 或 "BAILIAN" 或 "WORKERS_AI"；改回 BAILIAN 用下面这行并注释掉 WORKERS_AI
+AI_ENGINE = "WORKERS_AI"
 OLLAMA_MODEL = "qwen3:14b"
 BAILIAN_MODEL = "qwen3.8-2.4t-a95b"
+WORKERS_AI_MODEL = "@cf/moonshotai/kimi-k2.6"
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY") # 从环境变量读取
+AI_BASE_URL = os.getenv("AI_BASE_URL")  # 容器内走出站处理器（ai.internal）；未设置时直连 AI Gateway
+AI_API_KEY = os.getenv("AI_API_KEY") or os.getenv("CLOUDFLARE_API_TOKEN") or ""
 CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID")
 CF_AIG_TOKEN = os.getenv("CF_AIG_TOKEN")
 CF_ACCESS_CLIENT_ID = os.getenv("CF_ACCESS_CLIENT_ID")
@@ -41,7 +45,20 @@ class AnalystBrain:
 
     def _init_ai_client(self):
         """标准化 SDK 初始化"""
-        if AI_ENGINE == "BAILIAN":
+        if AI_ENGINE == "WORKERS_AI":
+            base_url = AI_BASE_URL or f"https://gateway.ai.cloudflare.com/v1/{CF_ACCOUNT_ID}/ai-gateway/workers-ai/v1"
+            if not AI_BASE_URL and not AI_API_KEY:
+                print("❌ 错误: 未设置 AI_API_KEY / CLOUDFLARE_API_TOKEN（直连 AI Gateway 需要）")
+                exit(1)
+            self.client = OpenAI(
+                api_key=AI_API_KEY or "unused",
+                base_url=base_url,
+                default_headers=(
+                    {"cf-aig-authorization": f"Bearer {CF_AIG_TOKEN}"} if CF_AIG_TOKEN else {}
+                )
+            )
+            self.active_model = WORKERS_AI_MODEL
+        elif AI_ENGINE == "BAILIAN":
             if not DASHSCOPE_API_KEY:
                 print("❌ 错误: 未设置环境变量 DASHSCOPE_API_KEY")
                 exit(1)

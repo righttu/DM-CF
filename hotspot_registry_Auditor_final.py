@@ -5,10 +5,16 @@ import requests
 from openai import OpenAI
 
 # --- 配置提取 ---
-AI_ENGINE = "BAILIAN"  # 开关: "OLLAMA" 或 "BAILIAN"
+# AI_ENGINE = "BAILIAN"  # 开关: "OLLAMA" 或 "BAILIAN" 或 "WORKERS_AI"；改回 BAILIAN 用下面这行并注释掉 WORKERS_AI
+AI_ENGINE = "WORKERS_AI"
 OLLAMA_MODEL = "qwen3:14b"
 BAILIAN_MODEL = "qwen3.5-flash"
+WORKERS_AI_MODEL = "@cf/moonshotai/kimi-k2.6"
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
+CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID")
+CF_AIG_TOKEN = os.getenv("CF_AIG_TOKEN")
+AI_BASE_URL = os.getenv("AI_BASE_URL")  # 容器内走出站处理器（ai.internal）；未设置时直连 AI Gateway
+AI_API_KEY = os.getenv("AI_API_KEY") or os.getenv("CLOUDFLARE_API_TOKEN") or ""
 
 D1_API_URL = os.getenv("D1_API_URL", "https://stock-api.righttu.uk")
 CF_ACCESS_CLIENT_ID = os.getenv('CF_ACCESS_CLIENT_ID')
@@ -36,7 +42,19 @@ class RegistryAuditor:
         self._init_ai_client()
         
     def _init_ai_client(self):
-        if AI_ENGINE == "BAILIAN":
+        if AI_ENGINE == "WORKERS_AI":
+            base_url = AI_BASE_URL or f"https://gateway.ai.cloudflare.com/v1/{CF_ACCOUNT_ID}/ai-gateway/workers-ai/v1"
+            if not AI_BASE_URL and not AI_API_KEY:
+                print("❌ 未设置 AI_API_KEY / CLOUDFLARE_API_TOKEN（直连 AI Gateway 需要）"); exit(1)
+            self.client = OpenAI(
+                api_key=AI_API_KEY or "unused",
+                base_url=base_url,
+                default_headers=(
+                    {"cf-aig-authorization": f"Bearer {CF_AIG_TOKEN}"} if CF_AIG_TOKEN else {}
+                )
+            )
+            self.active_model = WORKERS_AI_MODEL
+        elif AI_ENGINE == "BAILIAN":
             if not DASHSCOPE_API_KEY:
                 print("❌ 未设置环境变量 DASHSCOPE_API_KEY"); exit(1)
             self.client = OpenAI(
@@ -90,9 +108,17 @@ class RegistryAuditor:
             response = self.client.chat.completions.create(
                 model=self.active_model,
                 messages=[{"role": "user", "content": prompt}],
-                response_format={ "type": "json_object" } # 强制要求 JSON
+                # Workers AI/Kimi 不支持 response_format，提示词已要求 JSON；
+                # thinking 关闭以保证输出稳定与时延
+                **({"response_format": {"type": "json_object"}} if AI_ENGINE != "WORKERS_AI" else {}),
+                extra_body=(
+                    {"chat_template_kwargs": {"thinking": False}}
+                    if AI_ENGINE == "WORKERS_AI" else {}
+                )
             )
             res_content = response.choices[0].message.content
+            if AI_ENGINE == "WORKERS_AI":
+                res_content = res_content.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
             return json.loads(res_content)
         except Exception as e:
             print(f"❌ AI 推理失败 ({name}): {e}")

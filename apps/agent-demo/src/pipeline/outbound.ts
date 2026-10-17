@@ -2,9 +2,13 @@
 // the allowlist is resolved by script name. Everything else -> 403 + audit log
 // of kind + sha256 (never SQL text or bodies).
 import {
+  AI_CHAT_MODEL,
+  AI_OUTBOUND_HOST,
   TS_CODE_PATTERN,
+  aiChatOutboundHandler,
   bjCompactDate,
   checkReadOnlyOutbound,
+  type AiRunLike,
   normalizeSql,
   outboundAllow,
   outboundDeny,
@@ -185,6 +189,28 @@ export async function batchOutboundHandler(
     default:
       return deny("path", await sha256Short(url.pathname));
   }
+}
+
+export { AI_OUTBOUND_HOST, AI_CHAT_MODEL };
+
+const AI_SCRIPTS = new Set(["ai_brain", "registry_auditor"]);
+
+// ai.internal handler: only the Brain and Auditor jobs may call Workers AI.
+export async function aiOutboundHandler(
+  request: Request,
+  env: BatchOutboundEnv & { AI?: AiRunLike },
+  ctx: { containerId: string }
+): Promise<Response> {
+  const job = await resolveJob(env, ctx.containerId);
+  const hash = await sha256Short("ai:job");
+  if (!job) return deny("no_job", hash);
+  if (!AI_SCRIPTS.has(job.script)) return deny("ai_script", hash);
+  return aiChatOutboundHandler(
+    request,
+    env.AI,
+    { source: "batch", script: job.script, run_date: job.run_date },
+    EVENT
+  );
 }
 
 async function handleDbQuery(request: Request, env: BatchOutboundEnv): Promise<Response> {

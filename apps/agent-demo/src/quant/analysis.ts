@@ -1,13 +1,16 @@
 import { Container } from "@cloudflare/containers";
 import { QUANT_QUERIES } from "./catalog.js";
 import {
+  AI_OUTBOUND_HOST,
+  aiChatOutboundHandler,
   checkReadOnlyOutbound,
   normalizeSql,
   outboundAllow,
   outboundDeny,
   readJsonBody,
   sha256Short,
-  validVector
+  validVector,
+  type AiRunLike
 } from "../shared/outbound.js";
 
 export interface AnalysisEnv {
@@ -15,6 +18,7 @@ export interface AnalysisEnv {
   ANALYSIS?: DurableObjectNamespace<QuantAnalysisContainer>;
   VECTORIZE?: Vectorize;
   R2_STOCK_INFOR?: R2Bucket;
+  AI?: Ai;
   MY_TUSHARE_TOKEN?: string;
   DASHSCOPE_API_KEY?: string;
   CF_AIG_TOKEN?: string;
@@ -151,6 +155,8 @@ export class AnalysisJobRunner {
     const env = this.env;
     const vars: Record<string, string> = {
       D1_API_URL: `http://${ANALYSIS_OUTBOUND_HOST}`,
+      AI_BASE_URL: `http://${AI_OUTBOUND_HOST}/v1`,
+      AI_API_KEY: "unused",
       CF_ACCESS_CLIENT_ID: "unused",
       CF_ACCESS_CLIENT_SECRET: "unused"
     };
@@ -368,8 +374,26 @@ export class QuantAnalysisContainer extends Container<AnalysisEnv> {
 }
 
 QuantAnalysisContainer.outboundByHost = {
-  [ANALYSIS_OUTBOUND_HOST]: quantOutboundHandler
+  [ANALYSIS_OUTBOUND_HOST]: quantOutboundHandler,
+  [AI_OUTBOUND_HOST]: analysisAiOutboundHandler
 };
+
+// ai.internal handler: any job on this container may call Workers AI (fixed
+// model + whitelisted fields inside the shared handler).
+export async function analysisAiOutboundHandler(
+  request: Request,
+  env: OutboundEnv & { AI?: AiRunLike },
+  ctx: { containerId: string }
+): Promise<Response> {
+  const job = await resolveJob(env, ctx.containerId);
+  if (!job) return deny("no_job");
+  return aiChatOutboundHandler(
+    request,
+    env.AI,
+    { source: "analysis", ts_code: job.ts_code },
+    OUTBOUND_EVENT
+  );
+}
 
 function summarizeResult(result: unknown): AnalysisResultSummary | null {
   if (!result || typeof result !== "object") return null;

@@ -11,8 +11,9 @@
     "traces": { "enabled": true }
   },
   "triggers": {
-    "crons": ["0 10 * * 1-5"]
+    "crons": ["30 10 * * 1-5"]
   },
+  "ai": { "binding": "AI" },
   "durable_objects": {
     "bindings": [
       { "name": "BATCH", "class_name": "QuantBatchContainer" }

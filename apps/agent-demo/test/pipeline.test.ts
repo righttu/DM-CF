@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 import schemaSql from "./fixtures/quant-schema.sql?raw";
-import { batchOutboundHandler } from "../src/pipeline/outbound.js";
+import { aiOutboundHandler, batchOutboundHandler } from "../src/pipeline/outbound.js";
 import {
   __setBatchTransportForTests,
   type QuantBatchContainer
@@ -608,6 +608,130 @@ describe("batch outbound handler", () => {
   });
 });
 
+describe("ai.internal outbound handler", () => {
+  const fakeAi = {
+    calls: [] as { model: string; input: Record<string, unknown>; options: unknown }[],
+    result: { response: "pong" } as unknown,
+    async run(model: string, input: Record<string, unknown>, options: unknown) {
+      this.calls.push({ model, input, options });
+      return this.result;
+    }
+  };
+
+  function aiEnv() {
+    return { ...outboundEnv(), AI: fakeAi as never };
+  }
+
+  function chat(body: unknown) {
+    return post("/v1/chat/completions", body);
+  }
+  async function aiDenied(req: Request, jobId: string) {
+    const resp = await aiOutboundHandler(req, aiEnv(), containerCtx(jobId));
+    const body = (await resp.json()) as { success: boolean; error: string };
+    expect(resp.status).toBe(403);
+    expect(body.error).toBe("operation_not_allowed");
+  }
+  const goodBody = {
+    model: "@cf/moonshotai/kimi-k2.6",
+    messages: [{ role: "user", content: "hi" }]
+  };
+
+  it("denies: wrong model, non-chat path, GET, oversize, non-brain script", async () => {
+    const { jobId, ctx } = await seedJob("j-ai", "ai_brain");
+    const env2 = aiEnv();
+    await aiDenied(chat({ ...goodBody, model: "@cf/other/x" }), jobId);
+    await aiDenied(post("/v1/embeddings", goodBody), jobId);
+    await aiDenied(post("/v1/chat/completions/extra", goodBody), jobId);
+    const get = await aiOutboundHandler(
+      new Request("http://ai.internal/v1/chat/completions", { method: "GET" }),
+      env2,
+      ctx
+    );
+    expect(get.status).toBe(403);
+    const big = await aiOutboundHandler(
+      new Request("http://ai.internal/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...goodBody, pad: "x".repeat(3 * 1024 * 1024) })
+      }),
+      env2,
+      ctx
+    );
+    expect(big.status).toBe(403);
+    const chip = await seedJob("j-ai-chip", "chip_hunter");
+    await aiDenied(chat(goodBody), chip.jobId);
+    await aiDenied(chat(goodBody), "no:job");
+  });
+
+  it("allows brain/auditor, forwards whitelisted fields, shapes both result forms", async () => {
+    fakeAi.calls.length = 0;
+    const brain = await seedJob("j-ai-b1", "ai_brain");
+    const env2 = aiEnv();
+    const r1 = await aiOutboundHandler(
+      chat({
+        ...goodBody,
+        temperature: 0.1,
+        top_p: 0.9,
+        max_tokens: 512,
+        chat_template_kwargs: { thinking: false },
+        evil_field: "drop_me",
+        api_key: "drop_me_too"
+      }),
+      env2,
+      brain.ctx
+    );
+    expect(r1.status).toBe(200);
+    const b1 = (await r1.json()) as { choices: { message: { content: string } }[] };
+    expect(b1.choices[0].message.content).toBe("pong");
+    const call = fakeAi.calls[0];
+    expect(call.model).toBe("@cf/moonshotai/kimi-k2.6");
+    expect(call.input.messages).toEqual(goodBody.messages);
+    expect(call.input.chat_template_kwargs).toEqual({ thinking: false });
+    expect(call.input).not.toHaveProperty("evil_field");
+    expect(call.input).not.toHaveProperty("api_key");
+    expect(call.input).not.toHaveProperty("model");
+    const meta = (call.options as { gateway: { id: string; metadata: Record<string, string> } })
+      .gateway.metadata;
+    expect(meta.script).toBe("ai_brain");
+    expect(meta.run_date).toBe(RUN_DATE);
+
+    // Auditor job allowed too.
+    const aud = await seedJob("j-ai-a1", "registry_auditor");
+    const r2 = await aiOutboundHandler(chat(goodBody), env2, aud.ctx);
+    expect(r2.status).toBe(200);
+    expect((fakeAi.calls[1].options as never as { gateway: { metadata: { script: string } } })
+      .gateway.metadata.script).toBe("registry_auditor");
+
+    // OpenAI-shaped binding result is passed through (reasoning preserved).
+    fakeAi.result = {
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "ok", reasoning_content: "thought" },
+          finish_reason: "stop"
+        }
+      ],
+      usage: { total_tokens: 9 }
+    };
+    const r3 = await aiOutboundHandler(chat(goodBody), env2, brain.ctx);
+    const b3 = (await r3.json()) as {
+      choices: { message: { content: string; reasoning_content?: string } }[];
+      usage: { total_tokens: number };
+    };
+    expect(b3.choices[0].message.content).toBe("ok");
+    expect(b3.choices[0].message.reasoning_content).toBe("thought");
+
+    // Workers AI text shape {response:{content, reasoning_content}} is wrapped.
+    fakeAi.result = { response: { content: "wrapped", reasoning_content: "r" }, usage: { t: 1 } };
+    const r4 = await aiOutboundHandler(chat(goodBody), env2, brain.ctx);
+    const b4 = (await r4.json()) as {
+      choices: { message: { content: string; reasoning_content?: string } }[];
+    };
+    expect(b4.choices[0].message.content).toBe("wrapped");
+    expect(b4.choices[0].message.reasoning_content).toBe("r");
+  });
+});
+
 describe("stock_basic sync (TS port)", () => {
   function tushareItems(status: string, n: number, prefix: string) {
     return {
@@ -793,6 +917,58 @@ describe("daily workflow", () => {
     expect(res.steps[0].status).toBe("failed");
     expect(res.steps[0].error).toBe("step_timeout_4h");
     expect(batch.stops).toContain("fundamentals");
+  });
+
+  it("fundamentals runs only on report-window Fridays unless forced/only", async () => {
+    const mk = () => fakeBatch({ fundamentals: { statuses: ["succeeded"] } });
+    const env2 = () => ({ BATCH: mk() as never, QUANT_DB: tenv.QUANT_DB, MY_TUSHARE_TOKEN: "t" });
+    const fund = (r: { steps: { name: string; status: string; error: string | null }[] }) =>
+      r.steps.find((s) => s.name === "fundamentals");
+
+    // Scheduled run (no only/force), 2026-10-16: Friday inside 10-01..10-31 -> runs.
+    const fri = await runDailyPipeline(env2(), "w1", { date: "20261016" }, fakeStep(), { fetcher: openCal });
+    expect(fund(fri)?.status).toBe("succeeded");
+
+    // 2026-10-15: Thursday inside the window -> skipped.
+    const thu = await runDailyPipeline(env2(), "w2", { date: "20261015" }, fakeStep(), { fetcher: openCal });
+    expect(fund(thu)).toMatchObject({ status: "skipped", error: "not_in_report_window" });
+
+    // 2026-05-15: Friday outside every window -> skipped.
+    const offFri = await runDailyPipeline(env2(), "w3", { date: "20260515" }, fakeStep(), { fetcher: openCal });
+    expect(fund(offFri)?.status).toBe("skipped");
+
+    // force overrides the window.
+    const forced = await runDailyPipeline(env2(), "w4", { date: "20260515", force: true }, fakeStep(), { fetcher: openCal });
+    expect(fund(forced)?.status).toBe("succeeded");
+
+    // `only` containing fundamentals overrides the window too.
+    const only = await runDailyPipeline(env2(), "w5", { date: "20260515", only: ["fundamentals"] }, fakeStep(), { fetcher: openCal });
+    expect(fund(only)?.status).toBe("succeeded");
+
+    // `only` on a non-window Friday without force still skips? No — only wins:
+    // covered above; a scheduled non-Friday in-window skips (2026-10-22 Thu).
+    const thu2 = await runDailyPipeline(env2(), "w6", { date: "20261022" }, fakeStep(), { fetcher: openCal });
+    expect(fund(thu2)?.status).toBe("skipped");
+  });
+
+  it("knowledge_miner / ai_brain get an 8 h cap instead of 4 h", async () => {
+    const step = fakeStep();
+    // +5h per clock call: a 4h step would cap on the first poll; an 8h step continues.
+    let now = 1_000_000;
+    const clock = () => (now += 5 * 60 * 60 * 1000);
+    const batch = fakeBatch({ knowledge_miner: { statuses: ["running"] } });
+    const res = await runDailyPipeline(
+      { BATCH: batch as never, QUANT_DB: tenv.QUANT_DB, MY_TUSHARE_TOKEN: "t" },
+      "w7",
+      { date: "20261017", force: true, only: ["knowledge_miner"] },
+      step,
+      { fetcher: openCal, clock }
+    );
+    expect(res.steps[0].status).toBe("failed");
+    expect(res.steps[0].error).toBe("step_timeout_8h");
+    // First poll (elapsed 5h) did NOT stop: a second poll ran before the cap.
+    expect(step.calls).toContain("do:poll knowledge_miner #1 1");
+    expect(step.calls).toContain("do:poll knowledge_miner #1 0");
   });
 
   it("force runs on a non-trading day; a failed step reports its error", async () => {
