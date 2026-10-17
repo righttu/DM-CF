@@ -181,3 +181,11 @@ Agent tracing documents three identity fields: agent name (`functionId`, shared:
 - Smoke builds must not leave modified tracked files in the VM checkout (they block `git pull`, and a chained deploy then runs from the wrong directory). Compare with `git show origin/master:<file> | cmp` before discarding.
 - After each deploy, remove pushed `registry.cloudflare.com/.../abc-quant-*` images and `docker builder prune -af`; the VM root otherwise drops to ~1.5 GB free.
 - No cron/systemd jobs exist on the VM: all batch scripts are run manually (inventory for Phase 3).
+
+## Phase 3 rollout (2026-10-17)
+
+- `abc-quant-pipeline` deployed (version `43684363`, commit `370e06c`): cron `0 10 * * 1-5` (18:00 Asia/Shanghai) creates Workflow `abc-quant-daily` instance `daily-YYYYMMDD`; steps trade_day → stock_basic (Worker-native TS port) → fundamentals → chip_hunter → alpha_hunter → hotspot_registry → registry_auditor → hotspot_hunter → knowledge_miner → ai_brain, continue-on-failure, one retry per script, 4 h cap, 2-minute polling. Secrets `MY_TUSHARE_TOKEN`, `DASHSCOPE_API_KEY`, `CF_AIG_TOKEN` set (verified with `wrangler secret list`). Container `abc-quant-batch-container` (standard-2, max 2) runs each script as a subprocess; outbound allowlist per script in `src/pipeline/outbound.ts` (`/api/db/save` mirrors stock-api: INSERT OR IGNORE, first-row columns).
+- Workflows replay `run()` after every sleep: every timestamp must come from a `step.do`, and step names must be unique per attempt (memoized by name).
+- Batch image must build under QEMU on the arm64 VM: base `mcr.microsoft.com/playwright/python` pinned by amd64 digest (no apt, no `playwright install`). Image ~4.25 GB; a pipeline deploy needs ~4.5 GB free on the VM root.
+- Manual trigger: `npx wrangler workflows trigger abc-quant-daily '{"only":["stock_basic"],"force":true}' -c ../../.devin/agent-demo/wrangler.pipeline.jsonc`; inspect with `wrangler workflows instances describe abc-quant-daily <id>`.
+- Verified 2026-10-17 (Saturday): trade-day gate skipped correctly; forced stock_basic wrote 5,916 rows in 16 s; forced knowledge_miner ran in the container (first start hit "no container instance" while the app was provisioning, the step auto-retried) and exited 0. First full run: Monday 18:00.
