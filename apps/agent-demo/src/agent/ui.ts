@@ -609,7 +609,7 @@ function renderWelcome() {
   w.appendChild(el('h2', '', '你好，' + local));
   w.appendChild(el('p', 'sub', currentRole === 'viewer'
     ? '当前身份可以查询演示数据库中的模拟公司报告。'
-    : '我可以查询 A 股基本面、量化策略信号、AI 诊断报告和研报观点，结论会注明数据来源和日期。'));
+    : '我可以查询行情数据、基本面、量化策略信号、AI 诊断报告和研报观点，结论会注明数据来源和日期。'));
   const grid = el('div', 'sugg-grid');
   const sugg = currentSuggestions();
   if (sugg.length === 0) {

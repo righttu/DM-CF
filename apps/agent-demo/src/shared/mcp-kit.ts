@@ -431,7 +431,9 @@ function consentPage(options: {
   const redirectHost = escapeHtml(options.redirectHost);
   const email = escapeHtml(options.email);
   const role = escapeHtml(options.role);
-  const scopes = options.scopes.map((s) => `<li>${escapeHtml(s)}</li>`).join("");
+  const scopes = options.scopes
+    .map((s) => (s === "mcp:read" ? "只读（mcp:read）" : escapeHtml(s)))
+    .join("、");
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -445,7 +447,6 @@ h1{font-size:18px;margin:0}
 .brand{display:flex;align-items:center;gap:12px;margin:0 0 16px}
 .logo{width:44px;height:44px;min-width:44px;border-radius:50%;background:#1d4ed8;color:#fff;font-weight:700;font-size:15px;display:flex;align-items:center;justify-content:center}
 p{font-size:14px;line-height:1.6;color:#cbd5e1}
-ul{background:#0f172a;border-radius:8px;padding:12px 12px 12px 28px;font-size:13px}
 .actions{display:flex;gap:12px;margin-top:20px}
 button{flex:1;padding:10px 0;border-radius:8px;border:none;font-size:14px;cursor:pointer}
 .approve{background:#2563eb;color:#fff}
@@ -456,11 +457,9 @@ button{flex:1;padding:10px 0;border-radius:8px;border:none;font-size:14px;cursor
 <div class="card">
 <div class="brand"><div class="logo">ABC</div><h1>${title}</h1></div>
 <p>应用 <strong>${clientName}</strong> ${escapeHtml(options.resourceDescription)}</p>
-<p>令牌将发送到：<strong>${redirectHost}</strong></p>
-<p>当前上游授权身份：<strong>${email}</strong>（角色：${role}）</p>
-<p>当前浏览器可能复用 Access 登录；切换 Agent 登录不会改变已有的上游授权，授权前请核对上方账号。</p>
-<p>请求的权限范围：</p>
-<ul>${scopes}</ul>
+<p>授权账号：<strong>${email}</strong>（角色：${role}）</p>
+<p>权限：${scopes}</p>
+<p>授权结果返回给：<strong>${redirectHost}</strong>，由 ${clientName} 换取访问令牌，之后只用于访问本服务。</p>
 <form method="post">
 <input type="hidden" name="handle" value="${escapeHtml(options.handle)}">
 <div class="actions">

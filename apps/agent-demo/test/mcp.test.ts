@@ -218,10 +218,11 @@ describe("MCP OAuth + tools", () => {
     expect(getResp.headers.get("cache-control")).toContain("no-store");
     expect(getResp.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
     const html = await getResp.text();
-    expect(html).toContain("当前上游授权身份");
+    expect(html).toContain("授权账号");
     expect(html).toContain(ANALYST_EMAIL);
     expect(html).toContain("analyst");
-    expect(html).toContain("复用 Access 登录");
+    expect(html).not.toContain("复用 Access 登录");
+    expect(html).toContain("只读（mcp:read）");
     const handle = /name="handle" value="([^"]+)"/.exec(html)?.[1]!;
     const cookies = mergeCookieHeader(getSetCookies(getResp));
 

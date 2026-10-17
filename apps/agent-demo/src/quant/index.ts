@@ -26,7 +26,7 @@ export default createMcpWorker<QuantEnv>({
   consent: {
     title: "ABC Quant MCP-S 访问授权",
     resourceDescription:
-      "请求以你的身份只读访问 ABC 量化数据（A 股市场与财务数据、量化策略结果、AI 分析与研报知识库）。"
+      "请求以你的身份只读访问 ABC 量化数据（行情数据、财务数据、量化策略结果、AI 分析与研报知识库）。"
   },
   allowedRoles: ["analyst"],
   registerTools: registerQuantTools
