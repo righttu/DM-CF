@@ -173,3 +173,11 @@ Agent tracing documents three identity fields: agent name (`functionId`, shared:
 - Connectivity from Cloudflare Containers (egress KIX) to Tushare, Eastmoney (forecast, report list, notices, surveys), pdf.dfcfw.com and AI Gateway verified on 2026-10-17. The Sina roll-news API answers "sorry to you for this page" from everywhere (VM too), so the engine's news fetch returns nothing.
 - First deploy failed live with `ctx.exports.ContainerProxy is undefined`: the Worker entry must `export { ContainerProxy } from "@cloudflare/containers"` for outbound handlers. Never override `alarm()` or call `setAlarm` in a Container subclass (the library owns alarms; use `this.schedule()`). Local tests use a plain-DO stand-in, so they cannot catch Container-runtime wiring.
 - Verified end-to-end on 2026-10-17 (version `127f7ab4`): 600031.SH diagnosis ran ~9 min (≈6 min in the Qwen call via the user's `ai-gateway`/`custom-dashscope` route), 58 outbound operations allowed / 0 denied, result row written (target 20.93, final_score 30). The analysis container embeds in-process with its own copy of bge-small-zh; the embedding container only serves `search_research`. Crawling is Python `requests` + `pdfplumber` (no headless browser; Playwright exists only in `hotspot_registry_final.py`).
+
+## Phase timeline + VM hygiene (2026-10-17)
+
+- `abc-quant-mcp-s` version `0550b423` (commit `4048b97`): `get_analysis_status` returns `timeline` (phase, label, `started_at_bj`, `duration_s`) and `total_s`; Portal re-synced (11 tools).
+- Never point local/VM smoke tests of the engine at the production `stock-api` (it reaches prod D1); use an invalid `D1_API_URL` or a local stub.
+- Smoke builds must not leave modified tracked files in the VM checkout (they block `git pull`, and a chained deploy then runs from the wrong directory). Compare with `git show origin/master:<file> | cmp` before discarding.
+- After each deploy, remove pushed `registry.cloudflare.com/.../abc-quant-*` images and `docker builder prune -af`; the VM root otherwise drops to ~1.5 GB free.
+- No cron/systemd jobs exist on the VM: all batch scripts are run manually (inventory for Phase 3).
