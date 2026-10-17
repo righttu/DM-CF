@@ -1,0 +1,71 @@
+.gitignore
+  s_02649a17b7b371::t_c31764d115bda5 27-28
+alpha_hunter_db_final.py
+  s_02649a17b7b371::t_c03ff6396da1cf 36
+apps/agent-demo/container/batch/requirements.txt
+  s_02649a17b7b371::t_f307e1bd121629 1-99
+apps/agent-demo/package.json
+  s_02649a17b7b371::t_e7d9e49c84c98c 19-20
+apps/agent-demo/scripts/prepare-batch-container.sh
+  s_02649a17b7b371::t_4aa091643a1cdf 1-67
+fetch_full_basic_data_multipthre_final.py
+  s_02649a17b7b371::t_b5354a3ee0e241 23
+hotspot_hunter_final.py
+  s_02649a17b7b371::t_3004c84367046f 31
+hotspot_registry_Auditor_final.py
+  s_02649a17b7b371::t_f426a83ad7d66d 13
+hotspot_registry_final.py
+  s_02649a17b7b371::t_6263e005bc2ed9 30
+.devin/agent-demo/wrangler.pipeline.jsonc
+  s_693b5f5d2bc097::t_7a352711a96ffb 1-57
+.devin/agent-demo/wrangler.test.jsonc
+  s_693b5f5d2bc097::t_d739b5410fbfb3 10-11,17-18
+apps/agent-demo/container/batch/.dockerignore
+  s_693b5f5d2bc097::t_6b03f36aedce89 1-3
+apps/agent-demo/container/batch/Dockerfile
+  s_693b5f5d2bc097::t_029887f3ca9791 1-29
+apps/agent-demo/container/batch/server.py
+  s_693b5f5d2bc097::t_7ba1a3d83b0e9d 1-145
+apps/agent-demo/src/pipeline/batch.ts
+  s_693b5f5d2bc097::t_29930c82092541 1-244
+apps/agent-demo/src/pipeline/index.ts
+  s_693b5f5d2bc097::t_f7458078c4e453 1-28
+apps/agent-demo/src/pipeline/outbound.ts
+  s_693b5f5d2bc097::t_57cdc3a9f41b51 1-451
+apps/agent-demo/src/pipeline/stockBasic.ts
+  s_693b5f5d2bc097::t_66be50b7e49f2d 1-122
+apps/agent-demo/src/pipeline/workflow.ts
+  s_693b5f5d2bc097::t_2d2c4b41bfdad2 1-211
+apps/agent-demo/src/quant/analysis.ts
+  s_693b5f5d2bc097::t_3899cc4c27e1f1 3-11,392-393,396,400
+apps/agent-demo/src/shared/outbound.ts
+  s_693b5f5d2bc097::t_a3e2e2bcbeb316 1-96
+apps/agent-demo/test/entry.ts
+  s_693b5f5d2bc097::t_8d8d952cb15b4b 50-88,93-94
+apps/agent-demo/test/pipeline.test.ts
+  s_693b5f5d2bc097::t_b0d054bf63b925 1-987
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "370e06cc7bd33b19945b87e311c4f3e32df69c20",
+  "prompts": {},
+  "sessions": {
+    "s_02649a17b7b371": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "calm-noun",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    },
+    "s_693b5f5d2bc097": {
+      "agent_id": {
+        "tool": "devin",
+        "id": "s_693b5f5d2bc097",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
