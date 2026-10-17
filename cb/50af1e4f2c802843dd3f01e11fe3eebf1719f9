@@ -1,0 +1,47 @@
+apps/agent-demo/src/shared/outbound.ts
+  s_02649a17b7b371::t_66dbbc64812654 97-197
+hotspot_registry_Auditor_final.py
+  s_02649a17b7b371::t_b198c09d11ff95 8-9,12,14-17,45-57,111-117,120-121
+.devin/agent-demo/wrangler.pipeline.jsonc
+  s_c3c9e4afb8abb5::t_09f95a8a72d1c6 14,16
+.devin/agent-demo/wrangler.quant.jsonc
+  s_c3c9e4afb8abb5::t_c4135c04d54126 62,103
+ai_analyst_Brain_final.py
+  s_c3c9e4afb8abb5::t_28bdc035d98233 24-25,28,30-31,48-61
+ai_analyst_infra_final.py
+  s_c3c9e4afb8abb5::t_a04348b42ad3ca 24-27,88-90,140-150
+apps/agent-demo/src/pipeline/batch.ts
+  s_c3c9e4afb8abb5::t_72d3916252043c 2,9,67-68,246-247
+apps/agent-demo/src/pipeline/outbound.ts
+  s_c3c9e4afb8abb5::t_90145a45d0bfcc 5-6,8,11,194-215
+apps/agent-demo/src/pipeline/workflow.ts
+  s_c3c9e4afb8abb5::t_a21b79b5a52110 23-24,27-53,129,144,146-149,205-220
+apps/agent-demo/src/quant/analysis.ts
+  s_c3c9e4afb8abb5::t_38c590859934c4 4-5,12-13,21,158-159,377-378,381-397
+apps/agent-demo/test/pipeline.test.ts
+  s_c3c9e4afb8abb5::t_1d0b58f9b38cac 4,611-734,922-973
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "cb50af1e4f2c802843dd3f01e11fe3eebf1719f9",
+  "prompts": {},
+  "sessions": {
+    "s_02649a17b7b371": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "calm-noun",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    },
+    "s_c3c9e4afb8abb5": {
+      "agent_id": {
+        "tool": "devin",
+        "id": "s_c3c9e4afb8abb5",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
