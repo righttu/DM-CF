@@ -1,0 +1,35 @@
+apps/agent-demo/test/quant-analysis.test.ts
+  s_02649a17b7b371::t_9b6349d8c60cdc 6,666-788
+apps/agent-demo/container/analysis/server.py
+  s_f2441bc70962d7::t_f6964e9789be7d 17-20,73,78-104,115,141-143,152-154,189-201
+apps/agent-demo/src/quant/analysis.ts
+  s_f2441bc70962d7::t_4824ff6439f60a 31-37,48-91,191-192,231-232,248,260-277
+apps/agent-demo/src/quant/catalog.ts
+  s_f2441bc70962d7::t_121fb7875b7514 381
+apps/agent-demo/src/quant/tools.ts
+  s_f2441bc70962d7::t_0058175170bab0 22,678,682-684,733,739-740
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4048b97454d7bc4df024dfc07793aa150ee840f0",
+  "prompts": {},
+  "sessions": {
+    "s_02649a17b7b371": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "calm-noun",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    },
+    "s_f2441bc70962d7": {
+      "agent_id": {
+        "tool": "devin",
+        "id": "s_f2441bc70962d7",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
