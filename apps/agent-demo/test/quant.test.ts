@@ -353,7 +353,7 @@ describe("quant tools", () => {
     const listResp = await quantRpc(token, "tools/list", {}, 2);
     const tools = ((listResp.body.result as { tools?: { name: string; inputSchema?: { properties?: Record<string, { type?: string; enum?: string[]; description?: string; maximum?: number }> } }[] })?.tools) ?? [];
     const byName = new Map(tools.map((t) => [t.name, t]));
-    expect(tools.length).toBe(9);
+    expect(tools.length).toBe(11);
     const findQuery = byName.get("find_stock")!.inputSchema!.properties!.query;
     expect(findQuery.type).toBe("string");
     expect(findQuery.description).toContain("拼音");

@@ -29,7 +29,7 @@ CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID")
 CF_AIG_TOKEN = os.getenv("CF_AIG_TOKEN")
 CF_ACCESS_CLIENT_ID = os.getenv("CF_ACCESS_CLIENT_ID")
 CF_ACCESS_CLIENT_SECRET = os.getenv("CF_ACCESS_CLIENT_SECRET")
-STOCK_API_BASE = "https://stock-api.righttu.uk"
+STOCK_API_BASE = os.getenv("D1_API_URL", "https://stock-api.righttu.uk")
 
 
 

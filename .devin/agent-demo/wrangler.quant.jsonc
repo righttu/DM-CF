@@ -16,13 +16,18 @@
   "durable_objects": {
     "bindings": [
       { "name": "CONSENT_TRANSACTIONS", "class_name": "ConsentTransaction" },
-      { "name": "EMBEDDING", "class_name": "QuantEmbeddingContainer" }
+      { "name": "EMBEDDING", "class_name": "QuantEmbeddingContainer" },
+      { "name": "ANALYSIS", "class_name": "QuantAnalysisContainer" }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
       "new_sqlite_classes": ["ConsentTransaction", "QuantEmbeddingContainer"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["QuantAnalysisContainer"]
     }
   ],
   "containers": [
@@ -32,7 +37,17 @@
       "image": "../../apps/agent-demo/container/embedding/Dockerfile",
       "instance_type": "standard-1",
       "max_instances": 2
+    },
+    {
+      "class_name": "QuantAnalysisContainer",
+      "name": "abc-quant-analysis-container",
+      "image": "../../apps/agent-demo/container/analysis/Dockerfile",
+      "instance_type": "standard-2",
+      "max_instances": 3
     }
+  ],
+  "r2_buckets": [
+    { "binding": "R2_STOCK_INFOR", "bucket_name": "stock-infor" }
   ],
   "d1_databases": [
     {
@@ -52,20 +67,26 @@
     "MCP_AUTHORIZE_ACCESS_AUD": "8e49e8855f422256e227ad66632a33477839f4de231759fd398061476182513d",
     "PUBLIC_MCP_ORIGIN": "https://abc-quant-mcp-s.righttu.uk",
     "ALLOWED_ORIGINS": "https://agent-demo.righttu.uk,https://portal-demo.righttu.uk",
-    "ENVIRONMENT": "production"
+    "ENVIRONMENT": "production",
+    "CF_ACCOUNT_ID": "ebc4f70211dc33165a239c6018da8e2d"
   },
   "env": {
     "local": {
       "durable_objects": {
         "bindings": [
           { "name": "CONSENT_TRANSACTIONS", "class_name": "ConsentTransaction" },
-          { "name": "EMBEDDING", "class_name": "QuantEmbeddingContainer" }
+          { "name": "EMBEDDING", "class_name": "QuantEmbeddingContainer" },
+          { "name": "ANALYSIS", "class_name": "QuantAnalysisContainer" }
         ]
       },
       "migrations": [
         {
           "tag": "v1",
           "new_sqlite_classes": ["ConsentTransaction", "QuantEmbeddingContainer"]
+        },
+        {
+          "tag": "v2",
+          "new_sqlite_classes": ["QuantAnalysisContainer"]
         }
       ],
       "d1_databases": [
@@ -77,6 +98,9 @@
       ],
       "vectorize": [
         { "binding": "VECTORIZE", "index_name": "stock-knowledge-local" }
+      ],
+      "r2_buckets": [
+        { "binding": "R2_STOCK_INFOR", "bucket_name": "stock-infor-local" }
       ],
       "kv_namespaces": [
         { "binding": "OAUTH_KV", "id": "local-quant-oauth-kv" }
@@ -91,7 +115,8 @@
         "VIEWER_EMAILS": "viewer@local.test",
         "LOCAL_DEV_IDENTITY_ENABLED": "true",
         "LOCAL_ANALYST_EMAIL": "analyst@local.test",
-        "LOCAL_VIEWER_EMAIL": "viewer@local.test"
+        "LOCAL_VIEWER_EMAIL": "viewer@local.test",
+        "CF_ACCOUNT_ID": "local-account"
       }
     }
   }

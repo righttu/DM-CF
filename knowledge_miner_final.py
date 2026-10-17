@@ -32,7 +32,7 @@ logging.getLogger("pdfminer").setLevel(logging.ERROR)
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 
 # ================= 配置区 =================
-D1_API_URL = 'https://stock-api.righttu.uk'
+D1_API_URL = os.getenv("D1_API_URL", "https://stock-api.righttu.uk")
 CF_ACCESS_CLIENT_ID = os.getenv("CF_ACCESS_CLIENT_ID")
 CF_ACCESS_CLIENT_SECRET = os.getenv("CF_ACCESS_CLIENT_SECRET")
 
@@ -51,7 +51,7 @@ def find_local_embedding_model():
         if "config.json" in files: return root
     return "BAAI/bge-small-zh-v1.5"
 
-EMBEDDING_MODEL_PATH = find_local_embedding_model()
+EMBEDDING_MODEL_PATH = os.getenv("EMBEDDING_MODEL_PATH") or find_local_embedding_model()
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",

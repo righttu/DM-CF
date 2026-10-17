@@ -1,8 +1,57 @@
 import agentWorker, { ResearchAgent } from "../src/agent/index.js";
 import mcpWorker, { ConsentTransaction } from "../src/mcp/index.js";
-import quantWorker, { QuantEmbeddingContainer } from "../src/quant/index.js";
+import { DurableObject } from "cloudflare:workers";
+import quantWorker, {
+  QuantEmbeddingContainer,
+  type QuantEnv
+} from "../src/quant/index.js";
+import {
+  AnalysisJobRunner,
+  analysisTransport,
+  type AnalysisEnv,
+  type AnalysisJob
+} from "../src/quant/analysis.js";
 
-export { ResearchAgent, ConsentTransaction, QuantEmbeddingContainer };
+// Test stand-in for the production QuantAnalysisContainer: the container
+// runtime (ctx.container) is unavailable in the local pool, so the ANALYSIS
+// binding maps to a plain Durable Object that runs the same job logic against
+// the injected transport stub.
+class TestQuantAnalysisContainer extends DurableObject<QuantEnv & AnalysisEnv> {
+  private readonly runner = new AnalysisJobRunner(
+    this.ctx.storage,
+    this.env,
+    () =>
+      analysisTransport() ?? {
+        start: () => Promise.reject(new Error("no_transport_stub")),
+        request: () => Promise.reject(new Error("no_transport_stub")),
+        stop: () => Promise.resolve()
+      },
+    () => this.ctx.id.name ?? ""
+  );
+
+  jobContext(): Promise<{ ts_code: string; date: string } | null> {
+    return this.runner.jobContext();
+  }
+
+  startJob(input: { ts_code: string; date: string; requested_by: string }): Promise<AnalysisJob> {
+    return this.runner.startJob(input);
+  }
+
+  status(): Promise<AnalysisJob> {
+    return this.runner.status();
+  }
+
+  alarm(): Promise<void> {
+    return this.runner.alarm();
+  }
+}
+
+export {
+  ResearchAgent,
+  ConsentTransaction,
+  QuantEmbeddingContainer,
+  TestQuantAnalysisContainer as QuantAnalysisContainer
+};
 
 const MCP_PATHS = ["/mcp", "/authorize", "/token", "/register", "/.well-known"];
 const QUANT_PREFIX = "/quant";

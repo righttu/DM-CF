@@ -22,3 +22,5 @@ apps/agent-demo/test/evidence/
 .devin/agent-demo/node_modules
 .devin/agent-demo/*.local.*
 apps/agent-demo/container/embedding/model/
+apps/agent-demo/container/analysis/app/
+apps/agent-demo/container/analysis/model/

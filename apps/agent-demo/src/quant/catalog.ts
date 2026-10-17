@@ -347,6 +347,8 @@ export const QUANT_QUERIES = {
   aiReportList:
     "SELECT report_date, ts_code, name, industry, source_strategy, current_price, target_price, upside_potential, score_certainty, final_score, tags FROM ai_analysis_result WHERE (?1 IS NULL OR report_date = ?1) ORDER BY report_date DESC, final_score DESC LIMIT ?2",
   researchCoverage: "SELECT last_report_sync, last_news_sync FROM sync_status WHERE ts_code = ?1",
+  aiReportToday:
+    "SELECT report_date, ts_code, name, source_strategy, final_score, target_price, upside_potential FROM ai_analysis_result WHERE ts_code = ?1 AND report_date = ?2 LIMIT 1",
   surveys:
     "SELECT survey_date, org_count, org_names, reception_place FROM institutional_surveys WHERE ts_code = ?1 ORDER BY survey_date DESC LIMIT ?2",
   chainByStock:
@@ -372,7 +374,11 @@ export const QUANT_TOOL_DESCRIPTIONS = {
   get_industry_chain:
     "查询热点题材产业链登记信息。传 ts_code 返回该股所属的题材、产业链环节、纯度结论和审计理由；传 sector（如 具身智能）返回该题材下的个股及环节。",
   query_data:
-    "对 ABC 量化数据库执行一条只读 SQL（SQLite 语法，仅 SELECT 或 WITH），用于其他工具无法回答的筛选、排序、统计和跨表关联，例如“最近被两个以上策略同时选中且 ROE>15% 的股票”。先用 describe_data 确认表名、字段和单位；结果最多返回 max_rows 行。不能写入或修改数据。"
+    "对 ABC 量化数据库执行一条只读 SQL（SQLite 语法，仅 SELECT 或 WITH），用于其他工具无法回答的筛选、排序、统计和跨表关联，例如“最近被两个以上策略同时选中且 ROE>15% 的股票”。先用 describe_data 确认表名、字段和单位；结果最多返回 max_rows 行。不能写入或修改数据。",
+  run_analysis:
+    "对一只股票发起深度诊断：运行手工分析引擎（筹码与估值计算、抓取近 90 天研报/公告/机构调研写入知识库、AI 分析师生成目标价、评分和完整报告），结果写入 AI 诊断结果表。只在用户明确要求诊断、深度分析或重新分析某只股票时调用。任务耗时通常数分钟，调用后立即返回任务编号；同一股票当天已有诊断时直接说明已有结果。",
+  get_analysis_status:
+    "查询深度诊断任务的进度和结果。传 job_id（run_analysis 返回的任务编号）或 ts_code（查询该股票当天的任务）。任务完成后用 get_ai_report 读取完整报告。"
 } as const;
 
 export const QUANT_PARAM_DESCRIPTIONS = {
@@ -391,9 +397,11 @@ export const QUANT_PARAM_DESCRIPTIONS = {
   top_k: "最多返回的相关片段数，默认 20，最大 50",
   sector: "题材板块名称，可部分匹配，如 具身智能",
   sql: "一条只读 SQLite 查询，以 SELECT 或 WITH 开头，不要带分号和注释",
-  max_rows: "最多返回的行数，默认 50，最大 200"
+  max_rows: "最多返回的行数，默认 50，最大 200",
+  job_id: "run_analysis 返回的任务编号，格式为 <ts_code>:<YYYYMMDD>，如 600519.SH:20261017"
 } as const;
 
 export const QUANT_SYSTEM_PROMPT_ADDENDUM = `当可用工具中有 ABC 量化数据（工具名以 abc-quant_ 开头）时：这些是 A 股真实市场与财务数据、量化策略结果和 AI 分析结论，不是实时行情，不构成投资建议。
 用户用股票名称提问时，先用 find_stock 确定 ts_code。按问题选择数据：选股和策略信号用 get_signals，财务基本面用 get_fundamentals，AI 诊断用 get_ai_report，研报、公告和新闻用 search_research，机构调研用 get_surveys，题材产业链用 get_industry_chain。现成工具不能回答的筛选、排序、统计和跨表问题，先用 describe_data 了解字段和单位，再用 query_data 写只读 SQL。
-回答时注明数据日期（扫描日、报告期、报告日或发布日期）和来源表；注意不同表的单位不同，例如基本面表的总市值是万元，Hunter 表的总市值是亿元。研报检索返回的是片段，概括时说明依据的是哪些文档。`;
+回答时注明数据日期（扫描日、报告期、报告日或发布日期）和来源表；注意不同表的单位不同，例如基本面表的总市值是万元，Hunter 表的总市值是亿元。研报检索返回的是片段，概括时说明依据的是哪些文档。
+用户明确要求对某只股票做深度诊断时，用 run_analysis 发起任务，告诉用户任务已提交、通常需要数分钟；用户询问进度时再用 get_analysis_status，不要在同一次回答里反复轮询；任务完成后用 get_ai_report 读取报告。`;

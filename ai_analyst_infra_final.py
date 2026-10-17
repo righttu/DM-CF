@@ -16,10 +16,10 @@ import requests
 from langchain_huggingface import HuggingFaceEmbeddings
 
 # ================= 配置区 =================
-D1_API_URL = 'https://stock-api.righttu.uk'
+D1_API_URL = os.getenv("D1_API_URL", "https://stock-api.righttu.uk")
 CF_ACCESS_CLIENT_ID = os.getenv('CF_ACCESS_CLIENT_ID')
 CF_ACCESS_CLIENT_SECRET = os.getenv('CF_ACCESS_CLIENT_SECRET')
-EMBEDDING_MODEL_PATH = "/home/righttu/ai-finance/CloudFlare/models/bge-small-zh-v1.5/BAAI/bge-small-zh-v1___5"
+EMBEDDING_MODEL_PATH = os.getenv("EMBEDDING_MODEL_PATH") or "/home/righttu/ai-finance/CloudFlare/models/bge-small-zh-v1.5/BAAI/bge-small-zh-v1___5"
 
 class CloudAPIClient:
     """统一封装 HTTP 调用 + CF Access 认证"""

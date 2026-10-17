@@ -6,12 +6,14 @@
   "durable_objects": {
     "bindings": [
       { "name": "ResearchAgent", "class_name": "ResearchAgent" },
-      { "name": "CONSENT_TRANSACTIONS", "class_name": "ConsentTransaction" }
+      { "name": "CONSENT_TRANSACTIONS", "class_name": "ConsentTransaction" },
+      { "name": "ANALYSIS", "class_name": "QuantAnalysisContainer" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["ResearchAgent"] },
-    { "tag": "v1-consent", "new_sqlite_classes": ["ConsentTransaction"] }
+    { "tag": "v1-consent", "new_sqlite_classes": ["ConsentTransaction"] },
+    { "tag": "v1-analysis", "new_sqlite_classes": ["QuantAnalysisContainer"] }
   ],
   "d1_databases": [
     {

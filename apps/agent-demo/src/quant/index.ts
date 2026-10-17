@@ -5,14 +5,22 @@ import {
   type McpKitEnv
 } from "../shared/mcp-kit.js";
 import { registerQuantTools } from "./tools.js";
+import { QuantAnalysisContainer } from "./analysis.js";
 
 export { ConsentTransaction };
 export { __setEmbeddingForTests } from "./tools.js";
+export { QuantAnalysisContainer, __setAnalysisTransportForTests } from "./analysis.js";
 
 export interface QuantEnv extends McpKitEnv {
   QUANT_DB: D1Database;
   VECTORIZE?: Vectorize;
   EMBEDDING?: DurableObjectNamespace<QuantEmbeddingContainer>;
+  ANALYSIS?: DurableObjectNamespace<QuantAnalysisContainer>;
+  R2_STOCK_INFOR?: R2Bucket;
+  MY_TUSHARE_TOKEN?: string;
+  DASHSCOPE_API_KEY?: string;
+  CF_AIG_TOKEN?: string;
+  CF_ACCOUNT_ID?: string;
 }
 
 export class QuantEmbeddingContainer extends Container<QuantEnv> {

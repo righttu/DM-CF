@@ -15,12 +15,18 @@ import {
   STRATEGIES,
   TS_CODE_PATTERN
 } from "./catalog.js";
-import type { ToolCall, ToolTextResult } from "../shared/mcp-kit.js";
+import type { McpPrincipal, ToolCall, ToolTextResult } from "../shared/mcp-kit.js";
+import {
+  ANALYSIS_JOB_ID_PATTERN,
+  QuantAnalysisContainer,
+  shanghaiCompactDate
+} from "./analysis.js";
 
 export interface QuantToolsEnv {
   QUANT_DB: D1Database;
   VECTORIZE?: Vectorize;
   EMBEDDING?: DurableObjectNamespace;
+  ANALYSIS?: DurableObjectNamespace<QuantAnalysisContainer>;
 }
 
 export interface Embedder {
@@ -227,6 +233,13 @@ const schemas = {
   query_data: z.object({
     sql: z.string(),
     max_rows: intRange(1, 200, 50)
+  }),
+  run_analysis: z.object({
+    ts_code: tsCode
+  }),
+  get_analysis_status: z.object({
+    job_id: z.string().regex(ANALYSIS_JOB_ID_PATTERN).optional(),
+    ts_code: tsCode.optional()
   })
 } as const;
 
@@ -269,9 +282,9 @@ const optInt = (min: number, max: number, def: number, desc: string) =>
 
 export function registerQuantTools(
   server: McpServer,
-  ctx: { env: QuantToolsEnv; call: ToolCall }
+  ctx: { env: QuantToolsEnv; call: ToolCall; principal: McpPrincipal }
 ): void {
-  const { env, call } = ctx;
+  const { env, call, principal } = ctx;
 
   server.registerTool(
     "describe_data",
@@ -629,6 +642,98 @@ export function registerQuantTools(
             [{ rows: limited }]
           )
         );
+      })
+  );
+
+  server.registerTool(
+    "run_analysis",
+    {
+      description: QUANT_TOOL_DESCRIPTIONS.run_analysis,
+      inputSchema: z.object({
+        ts_code: z.string().describe(D.ts_code)
+      })
+    },
+    async (args, callCtx) =>
+      call("run_analysis", callCtx, async () => {
+        const p = parseArgs("run_analysis", args);
+        if (!p.ok) return p.result;
+        const ts_code = p.data.ts_code;
+        const today = shanghaiCompactDate();
+        const jobId = `${ts_code}:${today}`;
+        const existing = await firstRow(env, QUANT_QUERIES.aiReportToday, [ts_code, today]);
+        if (existing) {
+          return text({ status: "exists", job_id: jobId, report: existing });
+        }
+        if (!env.ANALYSIS) {
+          return toolError({ error: "analysis_unavailable" });
+        }
+        const stub = getContainer(env.ANALYSIS, jobId);
+        try {
+          const view = await stub.startJob({
+            ts_code,
+            date: today,
+            requested_by: principal.actorId
+          });
+          return text({
+            status: view.status,
+            job_id: jobId,
+            phase: view.phase ?? null
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (/capacity|instances|busy|rate.?limit/i.test(message)) {
+            return text({
+              status: "busy",
+              job_id: jobId,
+              message: "诊断任务容量已满，请稍后重试"
+            });
+          }
+          return toolError({
+            error: "analysis_start_failed",
+            message: message.slice(0, 200)
+          });
+        }
+      })
+  );
+
+  server.registerTool(
+    "get_analysis_status",
+    {
+      description: QUANT_TOOL_DESCRIPTIONS.get_analysis_status,
+      inputSchema: z.object({
+        job_id: z.string().optional().describe(D.job_id),
+        ts_code: z.string().optional().describe(D.ts_code)
+      })
+    },
+    async (args, callCtx) =>
+      call("get_analysis_status", callCtx, async () => {
+        const p = parseArgs("get_analysis_status", args);
+        if (!p.ok) return p.result;
+        const { job_id, ts_code } = p.data;
+        if ((job_id === undefined) === (ts_code === undefined)) {
+          return toolError({
+            error: "invalid_arguments",
+            message: "必须且只能提供 job_id 或 ts_code 之一"
+          });
+        }
+        const jobId = job_id ?? `${ts_code}:${shanghaiCompactDate()}`;
+        if (!env.ANALYSIS) {
+          return toolError({ error: "analysis_unavailable" });
+        }
+        const stub = getContainer(env.ANALYSIS, jobId);
+        const view = await stub.status();
+        const elapsed =
+          view.started_at && view.status !== "not_found"
+            ? Math.max(0, Math.round((Date.now() - Date.parse(view.started_at)) / 1000))
+            : null;
+        return text({
+          job_id: jobId,
+          status: view.status,
+          phase: view.phase,
+          elapsed_s: elapsed,
+          result_summary: view.result_summary ?? undefined,
+          error: view.error ?? undefined
+        });
       })
   );
 }
