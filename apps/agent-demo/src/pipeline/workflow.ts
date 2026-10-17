@@ -29,9 +29,9 @@ const POLL_INTERVAL = "2 minutes";
 const FUNDAMENTALS_SCHEDULE = {
   weekday: 5, // 0=周日 ... 5=周五
   windows: [
-    [3, 20, 4, 30],
-    [7, 15, 8, 31],
-    [10, 1, 10, 31]
+    [1, 1, 4, 30], // 1–4 月：年报、一季报
+    [7, 1, 8, 31], // 7–8 月：半年报
+    [10, 1, 10, 31] // 10 月：三季报
   ] as const
 };
 
