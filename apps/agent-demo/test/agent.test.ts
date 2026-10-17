@@ -1611,13 +1611,19 @@ describe("ResearchAgent chat and tools", () => {
     ).toBe("connecting");
   });
 
-  it("stored authenticating delegates to addMcpServer, never blind-returns old URL", async () => {
+  it("authenticating resumes via a fresh authUrl from connectToServer", async () => {
     const sub = "sub-reauth";
     const jwt = await signJwt({ sub, email: ANALYST_EMAIL });
     await connectAgentMcp({ sub, email: ANALYST_EMAIL });
     const stub = await agentStub(sub);
+    const storedUrl = "http://localhost/authorize?state=storedABC";
     await runInDurableObject(stub as never, (instance) => {
       const inst = instance as unknown as {
+        ctx: {
+          storage: {
+            sql: { exec: (q: string, ...args: unknown[]) => unknown };
+          };
+        };
         mcp: {
           mcpConnections: Record<
             string,
@@ -1625,6 +1631,11 @@ describe("ResearchAgent chat and tools", () => {
           >;
         };
       };
+      inst.ctx.storage.sql.exec(
+        "UPDATE cf_agents_mcp_servers SET auth_url = ? WHERE id = ?",
+        storedUrl,
+        "research"
+      );
       const conn = inst.mcp.mcpConnections["research"];
       if (conn) {
         conn.connectionState = "authenticating";
@@ -1632,26 +1643,99 @@ describe("ResearchAgent chat and tools", () => {
       }
     });
     const addSpy = vi.spyOn(Agent.prototype, "addMcpServer");
+    const reconnectSpy = vi.spyOn(
+      MCPClientManager.prototype,
+      "connectToServer"
+    );
+    reconnectSpy.mockImplementation(async function () {
+      return {
+        state: "authenticating",
+        authUrl: "http://localhost/authorize?state=freshXYZ"
+      };
+    } as never);
     const resp = await authedFetch("/api/connect", {
       jwt,
       method: "POST",
       body: {}
     });
     expect(resp.status).toBe(200);
-    expect(addSpy).toHaveBeenCalled();
     const data = (await resp.json()) as {
       status: string;
       authUrl?: string;
       state?: string;
-      detail?: string;
     };
-    if (data.status === "authenticating") {
-      expect(data.authUrl).toBeTruthy();
-      expect(data.state).toBeTruthy();
-      expect(() => new URL(data.authUrl!)).not.toThrow();
-    } else {
-      expect(["ready", "connecting", "failed"]).toContain(data.status);
-    }
+    expect(data.status).toBe("authenticating");
+    expect(data.authUrl).toBe("http://localhost/authorize?state=freshXYZ");
+    expect(data.state).toBe("freshXYZ");
+    expect(data.authUrl).not.toBe(storedUrl);
+    expect(reconnectSpy).toHaveBeenCalled();
+    expect(addSpy).not.toHaveBeenCalled();
+    await runInDurableObject(stub as never, (instance) => {
+      const inst = instance as unknown as {
+        mcp: {
+          mcpConnections: Record<string, unknown>;
+        };
+      };
+      expect(inst.mcp.mcpConnections["research"]).toBeDefined();
+    });
+  });
+
+  it("authenticating without a stored auth_url reconnects via connectToServer", async () => {
+    const sub = "sub-reauth2";
+    const jwt = await signJwt({ sub, email: ANALYST_EMAIL });
+    await connectAgentMcp({ sub, email: ANALYST_EMAIL });
+    const stub = await agentStub(sub);
+    await runInDurableObject(stub as never, (instance) => {
+      const inst = instance as unknown as {
+        ctx: {
+          storage: {
+            sql: { exec: (q: string, ...args: unknown[]) => unknown };
+          };
+        };
+        mcp: {
+          mcpConnections: Record<
+            string,
+            { connectionState: string; connectionError?: string }
+          >;
+        };
+      };
+      inst.ctx.storage.sql.exec(
+        "UPDATE cf_agents_mcp_servers SET auth_url = NULL WHERE id = ?",
+        "research"
+      );
+      const conn = inst.mcp.mcpConnections["research"];
+      if (conn) {
+        conn.connectionState = "authenticating";
+        conn.connectionError = undefined;
+      }
+    });
+    const addSpy = vi.spyOn(Agent.prototype, "addMcpServer");
+    const reconnectSpy = vi.spyOn(
+      MCPClientManager.prototype,
+      "connectToServer"
+    );
+    reconnectSpy.mockImplementation(async function () {
+      return {
+        state: "authenticating",
+        authUrl: "http://localhost/authorize?state=reconnZ"
+      };
+    } as never);
+    const resp = await authedFetch("/api/connect", {
+      jwt,
+      method: "POST",
+      body: {}
+    });
+    expect(resp.status).toBe(200);
+    const data = (await resp.json()) as {
+      status: string;
+      authUrl?: string;
+      state?: string;
+    };
+    expect(data.status).toBe("authenticating");
+    expect(data.authUrl).toBe("http://localhost/authorize?state=reconnZ");
+    expect(data.state).toBe("reconnZ");
+    expect(reconnectSpy).toHaveBeenCalled();
+    expect(addSpy).not.toHaveBeenCalled();
   });
 
   it("diagnostics redact configured env secrets, not only label-shaped values", async () => {

@@ -981,10 +981,48 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     }
     const registered = this.researchRegistration();
     if (registered && registered.server_url === url) {
+      const tryReconnect = async () => {
+        const reconnect = (await this.mcp.connectToServer("research")) as {
+          state: string;
+          authUrl?: string;
+          error?: string;
+        };
+        if (reconnect.state === "authenticating" && reconnect.authUrl) {
+          return authResult(reconnect.authUrl);
+        }
+        if (reconnect.state === "connected") {
+          let discovered: { success?: boolean; error?: unknown } | undefined;
+          try {
+            discovered = (await this.mcp.discoverIfConnected(
+              "research"
+            )) as { success?: boolean; error?: unknown } | undefined;
+          } catch (e) {
+            return failedResult(e);
+          }
+          if (discovered?.success) {
+            this.clearMcpFailure();
+            return finish({ status: "ready" });
+          }
+          return failedResult(discovered?.error);
+        }
+        if (
+          reconnect.state === "connecting" ||
+          reconnect.state === "discovering"
+        ) {
+          return finish({ status: "connecting" });
+        }
+        return failedResult(reconnect.error);
+      };
       switch (existing.state) {
         case "connecting":
         case "discovering":
           return finish({ status: "connecting" });
+        case "authenticating":
+          try {
+            return await tryReconnect();
+          } catch (e) {
+            return failedResult(e);
+          }
         case "connected":
           if (await this.healMcp()) {
             this.clearMcpFailure();
@@ -993,36 +1031,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
           return failedResult("session_recovery_failed");
         case "failed":
           try {
-            const reconnect = (await this.mcp.connectToServer("research")) as {
-              state: string;
-              authUrl?: string;
-              error?: string;
-            };
-            if (reconnect.state === "authenticating" && reconnect.authUrl) {
-              return authResult(reconnect.authUrl);
-            }
-            if (reconnect.state === "connected") {
-              let discovered: { success?: boolean; error?: unknown } | undefined;
-              try {
-                discovered = (await this.mcp.discoverIfConnected(
-                  "research"
-                )) as { success?: boolean; error?: unknown } | undefined;
-              } catch (e) {
-                return failedResult(e);
-              }
-              if (discovered?.success) {
-                this.clearMcpFailure();
-                return finish({ status: "ready" });
-              }
-              return failedResult(discovered?.error);
-            }
-            if (
-              reconnect.state === "connecting" ||
-              reconnect.state === "discovering"
-            ) {
-              return finish({ status: "connecting" });
-            }
-            return failedResult(reconnect.error);
+            return await tryReconnect();
           } catch (e) {
             return failedResult(e);
           }
