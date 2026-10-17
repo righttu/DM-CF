@@ -28,6 +28,13 @@ export interface AnalysisResultSummary {
   miner_chunks: number | null;
 }
 
+export interface AnalysisTimelineEntry {
+  phase: string;
+  started_at: string;
+  ended_at: string | null;
+  duration_s: number;
+}
+
 export interface AnalysisJob {
   ts_code: string;
   date: string;
@@ -38,6 +45,50 @@ export interface AnalysisJob {
   finished_at: string | null;
   result_summary: AnalysisResultSummary | null;
   error: string | null;
+  timeline: AnalysisTimelineEntry[] | null;
+}
+
+export const ANALYSIS_PHASE_LABELS: Record<string, string> = {
+  start: "引擎初始化",
+  chip: "数据与筹码计算",
+  knowledge: "知识库挖掘（研报/公告/调研）",
+  ai: "AI 诊断（千问）",
+  done: "完成"
+};
+
+export interface AnalysisTimelineViewEntry {
+  phase: string;
+  label: string;
+  started_at_bj: string;
+  duration_s: number;
+}
+
+const BEIJING_TIME = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Asia/Shanghai",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false
+});
+
+export function analysisTimelineView(
+  job: Pick<AnalysisJob, "timeline">
+): { timeline: AnalysisTimelineViewEntry[]; total_s: number } | null {
+  if (!job.timeline || job.timeline.length === 0) return null;
+  const timeline = job.timeline.map((e) => ({
+    phase: e.phase,
+    label: ANALYSIS_PHASE_LABELS[e.phase] ?? e.phase,
+    started_at_bj: BEIJING_TIME.format(new Date(e.started_at)),
+    duration_s: e.duration_s
+  }));
+  const first = Date.parse(job.timeline[0].started_at);
+  const last = job.timeline[job.timeline.length - 1];
+  const end = last.ended_at ? Date.parse(last.ended_at) : Date.now();
+  const total_s =
+    Number.isFinite(first) && Number.isFinite(end)
+      ? Math.max(0, Math.round((end - first) / 1000))
+      : 0;
+  return { timeline, total_s };
 }
 
 export interface AnalysisJobView extends AnalysisJob {
@@ -137,7 +188,8 @@ export class AnalysisJobRunner {
       started_at: new Date().toISOString(),
       finished_at: null,
       result_summary: null,
-      error: null
+      error: null,
+      timeline: null
     };
     await this.saveJob(job);
     await this.scheduleTimeout(JOB_TIMEOUT_SECONDS);
@@ -176,7 +228,8 @@ export class AnalysisJobRunner {
         started_at: "",
         finished_at: null,
         result_summary: null,
-        error: null
+        error: null,
+        timeline: null
       };
     }
     if (job.status === "queued" || job.status === "running") {
@@ -192,6 +245,7 @@ export class AnalysisJobRunner {
       result?: unknown;
       error?: string | null;
       log_tail?: unknown;
+      timeline?: unknown;
     };
     try {
       const resp = await this.transport().request("/status");
@@ -202,6 +256,24 @@ export class AnalysisJobRunner {
     }
     if (typeof snap.phase === "string" && snap.phase.length > 0) {
       job.phase = snap.phase;
+    }
+    if (Array.isArray(snap.timeline)) {
+      const tl: AnalysisTimelineEntry[] = [];
+      for (const e of snap.timeline) {
+        if (!e || typeof e !== "object") continue;
+        const o = e as Record<string, unknown>;
+        if (typeof o.phase !== "string" || typeof o.started_at !== "string") continue;
+        tl.push({
+          phase: o.phase,
+          started_at: o.started_at,
+          ended_at: typeof o.ended_at === "string" ? o.ended_at : null,
+          duration_s:
+            typeof o.duration_s === "number" && Number.isFinite(o.duration_s)
+              ? o.duration_s
+              : 0
+        });
+      }
+      if (tl.length > 0) job.timeline = tl;
     }
     if (snap.state === "succeeded") {
       job.status = "succeeded";

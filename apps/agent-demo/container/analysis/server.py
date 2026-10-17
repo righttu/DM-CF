@@ -14,6 +14,10 @@ sys.path.insert(0, "/app")
 from Manual_Analyst_Engine_final import ManualAnalystEngine  # noqa: E402
 
 
+def _utc_iso(ts):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
 def _json_safe(obj):
     try:
         import numpy as np
@@ -66,9 +70,37 @@ class Job:
         self.finished_at = None
         self.result = None
         self.error = None
+        self.timeline = []
         self.log = collections.deque(maxlen=LOG_RING_LINES)
         self.log_lock = threading.Lock()
         self.thread = None
+
+    # timeline entries: {phase, started_at, ended_at, _e0, _e1} (epochs private)
+    def _open_phase(self, name, now):
+        self._close_phases(now)
+        self.timeline.append(
+            {"phase": name, "started_at": _utc_iso(now), "ended_at": None, "_e0": now, "_e1": None}
+        )
+
+    def _close_phases(self, now):
+        for e in self.timeline:
+            if e["ended_at"] is None:
+                e["ended_at"] = _utc_iso(now)
+                e["_e1"] = now
+
+    def _timeline_snapshot(self, now):
+        out = []
+        for e in self.timeline:
+            end = e["_e1"] if e["_e1"] is not None else now
+            out.append(
+                {
+                    "phase": e["phase"],
+                    "started_at": e["started_at"],
+                    "ended_at": e["ended_at"],
+                    "duration_s": round(max(0.0, end - e["_e0"]), 1),
+                }
+            )
+        return out
 
     def snapshot(self):
         with self.lock:
@@ -80,6 +112,7 @@ class Job:
                 "finished_at": self.finished_at,
                 "result": self.result,
                 "error": self.error,
+                "timeline": self._timeline_snapshot(time.time()),
             }
 
     def log_tail(self, n=LOG_TAIL_LINES):
@@ -105,7 +138,9 @@ class Job:
                 p = self._phase_from(line)
                 if p:
                     with self.lock:
-                        self.phase = p
+                        if p != self.phase:
+                            self.phase = p
+                            self._open_phase(p, time.time())
             seen = len(lines)
             time.sleep(0.5)
 
@@ -114,7 +149,9 @@ class Job:
             if self.state == "running":
                 return self.snapshot()
             self.state = "running"
-            self.phase = "chip"
+            self.phase = "start"
+            self.timeline = []
+            self._open_phase("start", time.time())
             self.ts_code = ts_code
             self.started_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
             self.finished_at = None
@@ -149,7 +186,19 @@ class Job:
         finally:
             sys.stdout, sys.stderr = out, err
             with self.lock:
-                self.phase = "done" if self.state == "succeeded" else self.phase
+                now = time.time()
+                self._close_phases(now)
+                if self.state == "succeeded":
+                    self.phase = "done"
+                    self.timeline.append(
+                        {
+                            "phase": "done",
+                            "started_at": _utc_iso(now),
+                            "ended_at": _utc_iso(now),
+                            "_e0": now,
+                            "_e1": now,
+                        }
+                    )
                 self.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
 

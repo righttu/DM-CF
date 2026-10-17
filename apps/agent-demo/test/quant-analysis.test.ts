@@ -3,6 +3,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import schemaSql from "./fixtures/quant-schema.sql?raw";
 import {
   __setAnalysisTransportForTests,
+  analysisTimelineView,
   quantOutboundHandler,
   shanghaiCompactDate,
   type QuantAnalysisContainer
@@ -660,6 +661,129 @@ describe("analysis tools", () => {
       await instance.alarm();
     });
     expect((await stub.status()).status).toBe("succeeded");
+  });
+
+  it("persists the phase timeline and returns labels, Beijing times and totals", async () => {
+    stubTransport();
+    const jobId = `600000.SH:${today()}`;
+    await stubFor(jobId).startJob({
+      ts_code: "600000.SH",
+      date: today(),
+      requested_by: "a"
+    });
+
+    const t0 = Date.now();
+    statusBody = {
+      state: "running",
+      phase: "chip",
+      timeline: [
+        {
+          phase: "start",
+          started_at: new Date(t0 - 30_000).toISOString(),
+          ended_at: new Date(t0 - 25_000).toISOString(),
+          duration_s: 5
+        },
+        {
+          phase: "chip",
+          started_at: new Date(t0 - 25_000).toISOString(),
+          ended_at: null,
+          duration_s: 25
+        }
+      ]
+    };
+    const running = await callTool("get_analysis_status", { job_id: jobId });
+    const tl = running.payload.timeline as {
+      phase: string;
+      label: string;
+      started_at_bj: string;
+      duration_s: number;
+    }[];
+    expect(tl).toHaveLength(2);
+    expect(tl[0].label).toBe("引擎初始化");
+    expect(tl[0].duration_s).toBe(5);
+    expect(tl[1].phase).toBe("chip");
+    expect(tl[1].label).toBe("数据与筹码计算");
+    expect(tl[1].duration_s).toBe(25);
+    expect(tl[0].started_at_bj).toMatch(/^\d{2}:\d{2}:\d{2}$/);
+    const bjStart = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Shanghai",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false
+    }).format(new Date(t0 - 30_000));
+    expect(tl[0].started_at_bj).toBe(bjStart);
+    expect(running.payload.total_s).toBeGreaterThan(0);
+
+    // Finishing keeps the timeline; later status calls return the stored one.
+    statusBody = {
+      state: "succeeded",
+      phase: "done",
+      result: { status: "success" },
+      timeline: [
+        {
+          phase: "start",
+          started_at: new Date(t0 - 30_000).toISOString(),
+          ended_at: new Date(t0 - 25_000).toISOString(),
+          duration_s: 5
+        },
+        {
+          phase: "chip",
+          started_at: new Date(t0 - 25_000).toISOString(),
+          ended_at: new Date(t0 - 5_000).toISOString(),
+          duration_s: 20
+        },
+        {
+          phase: "knowledge",
+          started_at: new Date(t0 - 5_000).toISOString(),
+          ended_at: new Date(t0 - 3_000).toISOString(),
+          duration_s: 2
+        },
+        {
+          phase: "ai",
+          started_at: new Date(t0 - 3_000).toISOString(),
+          ended_at: new Date(t0).toISOString(),
+          duration_s: 3
+        },
+        {
+          phase: "done",
+          started_at: new Date(t0).toISOString(),
+          ended_at: new Date(t0).toISOString(),
+          duration_s: 0
+        }
+      ]
+    };
+    const done = await callTool("get_analysis_status", { job_id: jobId });
+    expect(done.payload.status).toBe("succeeded");
+    const tlDone = done.payload.timeline as { phase: string; label: string }[];
+    expect(tlDone).toHaveLength(5);
+    expect(tlDone.map((e) => e.label)).toEqual([
+      "引擎初始化",
+      "数据与筹码计算",
+      "知识库挖掘（研报/公告/调研）",
+      "AI 诊断（千问）",
+      "完成"
+    ]);
+    expect(done.payload.total_s).toBe(30);
+
+    // No further refresh happens after success: timeline comes from storage.
+    statusBody = { state: "running", phase: "chip" };
+    const again = await callTool("get_analysis_status", { job_id: jobId });
+    expect(again.payload.status).toBe("succeeded");
+    expect((again.payload.timeline as unknown[]).length).toBe(5);
+
+    // run_analysis on an existing job also carries the timeline.
+    const rerun = await callTool("run_analysis", { ts_code: "600000.SH" });
+    expect(rerun.payload.status).toBe("succeeded");
+    expect((rerun.payload.timeline as unknown[]).length).toBe(5);
+    expect(rerun.payload.total_s).toBe(30);
+
+    // A fresh job has no timeline yet — the field is omitted, not empty.
+    const fresh = await callTool("run_analysis", { ts_code: "600004.SH" });
+    expect(fresh.payload.status).toBe("running");
+    expect(fresh.payload.timeline).toBeUndefined();
+    expect(fresh.payload.total_s).toBeUndefined();
+    expect(analysisTimelineView({ timeline: null })).toBeNull();
   });
 
   it("exports ContainerProxy so container outbound interception works", async () => {

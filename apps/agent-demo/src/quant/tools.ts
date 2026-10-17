@@ -19,6 +19,7 @@ import type { McpPrincipal, ToolCall, ToolTextResult } from "../shared/mcp-kit.j
 import {
   ANALYSIS_JOB_ID_PATTERN,
   QuantAnalysisContainer,
+  analysisTimelineView,
   shanghaiCompactDate
 } from "./analysis.js";
 
@@ -674,10 +675,13 @@ export function registerQuantTools(
             date: today,
             requested_by: principal.actorId
           });
+          const tl = analysisTimelineView(view);
           return text({
             status: view.status,
             job_id: jobId,
-            phase: view.phase ?? null
+            phase: view.phase ?? null,
+            timeline: tl?.timeline,
+            total_s: tl?.total_s
           });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -726,11 +730,14 @@ export function registerQuantTools(
           view.started_at && view.status !== "not_found"
             ? Math.max(0, Math.round((Date.now() - Date.parse(view.started_at)) / 1000))
             : null;
+        const tl = analysisTimelineView(view);
         return text({
           job_id: jobId,
           status: view.status,
           phase: view.phase,
           elapsed_s: elapsed,
+          timeline: tl?.timeline,
+          total_s: tl?.total_s,
           result_summary: view.result_summary ?? undefined,
           error: view.error ?? undefined
         });

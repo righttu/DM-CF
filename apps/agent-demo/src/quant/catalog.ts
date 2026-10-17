@@ -378,7 +378,7 @@ export const QUANT_TOOL_DESCRIPTIONS = {
   run_analysis:
     "对一只股票发起深度诊断：运行手工分析引擎（筹码与估值计算、抓取近 90 天研报/公告/机构调研写入知识库、AI 分析师生成目标价、评分和完整报告），结果写入 AI 诊断结果表。只在用户明确要求诊断、深度分析或重新分析某只股票时调用。任务耗时通常数分钟，调用后立即返回任务编号；同一股票当天已有诊断时直接说明已有结果。",
   get_analysis_status:
-    "查询深度诊断任务的进度和结果。传 job_id（run_analysis 返回的任务编号）或 ts_code（查询该股票当天的任务）。任务完成后用 get_ai_report 读取完整报告。"
+    "查询深度诊断任务的进度和结果。传 job_id（run_analysis 返回的任务编号）或 ts_code（查询该股票当天的任务）。返回 timeline：各阶段名称、开始时间（北京时间）和耗时，回答时用简短列表展示这条时间线。任务完成后用 get_ai_report 读取完整报告。"
 } as const;
 
 export const QUANT_PARAM_DESCRIPTIONS = {
