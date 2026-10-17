@@ -1,0 +1,25 @@
+apps/agent-demo/src/quant/analysis.ts
+  s_f348e6176c5922::t_68854be3af7d53 48,86-87,143,227,230-232,256-257,284-285
+apps/agent-demo/src/quant/index.ts
+  s_f348e6176c5922::t_c68587cb657ee6 2-3
+apps/agent-demo/test/entry.ts
+  s_f348e6176c5922::t_a071f46a2eaae1 29-30,46
+apps/agent-demo/test/quant-analysis.test.ts
+  s_f348e6176c5922::t_292b2ebabda7d8 626-627,629-633,641-671
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "120e9324d80dac8239ae45e8649a176de69013ea",
+  "prompts": {},
+  "sessions": {
+    "s_f348e6176c5922": {
+      "agent_id": {
+        "tool": "devin",
+        "id": "s_f348e6176c5922",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
