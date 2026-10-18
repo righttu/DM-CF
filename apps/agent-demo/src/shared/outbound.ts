@@ -98,10 +98,10 @@ export async function readJsonBody(
 // ---------- ai.internal: containers reach Workers AI only through here ----------
 
 export const AI_OUTBOUND_HOST = "ai.internal";
-// Accepts Workers AI models (@cf/...), AI Gateway dynamic routes (dynamic/...)
-// and provider-style names (vendor/model); anything else -> 403.
-export const AI_MODEL_PATTERN =
-  /^(@cf\/[A-Za-z0-9._\-/]+|dynamic\/[A-Za-z0-9._\-]+|[A-Za-z0-9._\-]+\/[A-Za-z0-9._\-/]+)$/;
+// Model is any non-empty string up to 256 chars: Workers AI models (@cf/...),
+// AI Gateway dynamic routes (dynamic/...), provider routes (vendor/model) or
+// bare names resolved by the gateway's default provider route.
+const AI_MODEL_MAX = 256;
 const AI_CHAT_PATH = "/v1/chat/completions";
 const AI_FORWARD_FIELDS = [
   "messages",
@@ -171,7 +171,7 @@ export async function aiChatOutboundHandler(
   const body = await readJsonBody(request, DEFAULT_MAX_BODY);
   if (!body) return outboundDeny(event, "ai_body", hash);
   const model = body.model;
-  if (typeof model !== "string" || model.length > 128 || !AI_MODEL_PATTERN.test(model)) {
+  if (typeof model !== "string" || model.length === 0 || model.length > AI_MODEL_MAX) {
     return outboundDeny(event, "ai_model", hash);
   }
   if (!Array.isArray(body.messages) || body.messages.length === 0) {

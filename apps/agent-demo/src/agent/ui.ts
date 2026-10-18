@@ -771,7 +771,8 @@ function procFinish(chip, totalMs) {
 /* ---------- analysis progress card ---------- */
 const ANALYSIS_PILL = {
   running: '进行中', queued: '进行中', succeeded: '已完成',
-  failed: '失败', timeout: '超时', exists: '今日已有诊断', busy: '容量已满'
+  failed: '失败', timeout: '超时', exists: '今日已有诊断', busy: '容量已满',
+  not_found: '记录已清理'
 };
 const acardState = new WeakMap();
 function fmtDur(s) {
@@ -870,7 +871,7 @@ function renderAnalysisCard(card) {
   const acts = card.querySelector('.acard-actions');
   acts.replaceChildren();
   const ts = card.dataset.job.split(':')[0];
-  if (st.status === 'succeeded' || st.status === 'exists') {
+  if (st.status === 'succeeded' || st.status === 'exists' || st.status === 'not_found') {
     const b = el('button', '', '查看完整报告');
     b.addEventListener('click', () => sendAnalysisPrompt('读取 ' + ts + ' 最新的 AI 诊断报告'));
     acts.appendChild(b);

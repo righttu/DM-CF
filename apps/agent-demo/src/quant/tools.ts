@@ -673,7 +673,10 @@ export function registerQuantTools(
           const view = await stub.startJob({
             ts_code,
             date: today,
-            requested_by: principal.actorId
+            requested_by: principal.actorId,
+            // D1 is the source of truth for "already diagnosed today": no row
+            // means a stale succeeded DO job must re-run, not replay.
+            restart: true
           });
           const tl = analysisTimelineView(view);
           return text({

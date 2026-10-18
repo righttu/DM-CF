@@ -12,6 +12,9 @@ export interface PipelineEnv {
   DASHSCOPE_API_KEY?: string;
   CF_AIG_TOKEN?: string;
   CF_ACCOUNT_ID?: string;
+  AI_ENGINE?: string;
+  BRAIN_AI_MODEL?: string;
+  AUDITOR_AI_MODEL?: string;
 }
 
 export interface DailyParams {
@@ -51,8 +54,9 @@ export function batchTransport(): BatchTransport | undefined {
 }
 
 const CONTAINER_HOST = "http://container";
-// A terminal job's DO storage is wiped 30 days later; a re-run disarms it.
-export const CLEANUP_AFTER_SECONDS = 30 * 24 * 60 * 60;
+// A terminal job's DO storage is wiped 24 h later (the job id contains the
+// run date, so next day's run gets a fresh DO anyway); a re-run disarms it.
+export const CLEANUP_AFTER_SECONDS = 24 * 60 * 60;
 const CLEANUP_TOKEN_KEY = "cleanup_token";
 const TERMINAL_STATUSES = new Set<BatchJobStatus>(["succeeded", "failed"]);
 
@@ -100,6 +104,9 @@ export class BatchJobRunner {
     if (env.DASHSCOPE_API_KEY) vars.DASHSCOPE_API_KEY = env.DASHSCOPE_API_KEY;
     if (env.CF_AIG_TOKEN) vars.CF_AIG_TOKEN = env.CF_AIG_TOKEN;
     if (env.CF_ACCOUNT_ID) vars.CF_ACCOUNT_ID = env.CF_ACCOUNT_ID;
+    if (env.AI_ENGINE) vars.AI_ENGINE = env.AI_ENGINE;
+    if (env.BRAIN_AI_MODEL) vars.BRAIN_AI_MODEL = env.BRAIN_AI_MODEL;
+    if (env.AUDITOR_AI_MODEL) vars.AUDITOR_AI_MODEL = env.AUDITOR_AI_MODEL;
     return vars;
   }
 
@@ -228,8 +235,9 @@ export class BatchJobRunner {
 
 export class QuantBatchContainer extends Container<PipelineEnv> {
   defaultPort = 8080;
-  // Scripts are capped at 4 h by the workflow; keep the container alive for
-  // the whole run (the workflow stops it explicitly when the job finishes).
+  // Steps are capped at 4/8/16 h by the workflow; the workflow polls status
+  // every 2 min which keeps the container awake for the whole run, and it
+  // stops the container explicitly when the job finishes.
   sleepAfter = "4h";
 
   private readonly runner = new BatchJobRunner(

@@ -21,7 +21,9 @@ except ImportError:
     exit(1)
 
 # ================= 配置区 =================
-AI_ENGINE = "BAILIAN"  # 开关: "OLLAMA" / "BAILIAN" / "WORKERS_AI"；切到 WORKERS_AI 用下面这行并注释掉上面的 BAILIAN
+# 开关: "OLLAMA" / "BAILIAN" / "WORKERS_AI"。环境变量 AI_ENGINE 可覆盖默认值；
+# 设为 WORKERS_AI 并把 BRAIN_AI_MODEL 设为 dynamic/<路由名> 即走 AI Gateway 动态路由
+AI_ENGINE = os.getenv("AI_ENGINE") or "BAILIAN"
 # AI_ENGINE = "WORKERS_AI"
 OLLAMA_MODEL = "qwen3:14b"
 BAILIAN_MODEL = "qwen3.8-2.4t-a95b"

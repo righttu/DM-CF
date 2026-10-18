@@ -3,6 +3,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import schemaSql from "./fixtures/quant-schema.sql?raw";
 import { aiOutboundHandler, batchOutboundHandler } from "../src/pipeline/outbound.js";
 import {
+  BatchJobRunner,
   __setBatchTransportForTests,
   type QuantBatchContainer
 } from "../src/pipeline/batch.js";
@@ -636,13 +637,13 @@ describe("ai.internal outbound handler", () => {
     messages: [{ role: "user", content: "hi" }]
   };
 
-  it("denies: malformed model, non-chat path, GET, oversize, non-brain script", async () => {
+  it("denies: non-string/empty/oversize model, non-chat path, GET, oversize, non-brain script", async () => {
     const { jobId, ctx } = await seedJob("j-ai", "ai_brain");
     const env2 = aiEnv();
-    await aiDenied(chat({ ...goodBody, model: "model with spaces" }), jobId);
-    await aiDenied(chat({ ...goodBody, model: "noslash" }), jobId);
-    await aiDenied(chat({ ...goodBody, model: "x".repeat(200) }), jobId);
+    await aiDenied(chat({ ...goodBody, model: "" }), jobId);
+    await aiDenied(chat({ ...goodBody, model: "x".repeat(300) }), jobId);
     await aiDenied(chat({ ...goodBody, model: 42 }), jobId);
+    await aiDenied(chat({ messages: goodBody.messages }), jobId);
     await aiDenied(post("/v1/embeddings", goodBody), jobId);
     await aiDenied(post("/v1/chat/completions/extra", goodBody), jobId);
     const get = await aiOutboundHandler(
@@ -698,22 +699,21 @@ describe("ai.internal outbound handler", () => {
     expect(meta.script).toBe("ai_brain");
     expect(meta.run_date).toBe(RUN_DATE);
 
-    // Any well-formed model passes through (Workers AI, dynamic route,
-    // provider-style names).
-    const rAlt = await aiOutboundHandler(
-      chat({ ...goodBody, model: "dynamic/abc-brain" }),
-      env2,
-      brain.ctx
-    );
-    expect(rAlt.status).toBe(200);
-    expect(fakeAi.calls.at(-1)?.model).toBe("dynamic/abc-brain");
-    const rProv = await aiOutboundHandler(
-      chat({ ...goodBody, model: "dashscope/qwen3.5" }),
-      env2,
-      brain.ctx
-    );
-    expect(rProv.status).toBe(200);
-    expect(fakeAi.calls.at(-1)?.model).toBe("dashscope/qwen3.5");
+    // Any non-empty model string passes through: Workers AI, dynamic routes,
+    // provider routes, bare names.
+    for (const m of [
+      "dynamic/abc-brain",
+      "custom-dashscope-compat/qwen3.8-2.4t-a95b",
+      "qwen3.8-2.4t-a95b"
+    ]) {
+      const rAlt = await aiOutboundHandler(
+        chat({ ...goodBody, model: m }),
+        env2,
+        brain.ctx
+      );
+      expect(rAlt.status).toBe(200);
+      expect(fakeAi.calls.at(-1)?.model).toBe(m);
+    }
 
     // Auditor job allowed too.
     const aud = await seedJob("j-ai-a1", "registry_auditor");
@@ -792,6 +792,51 @@ describe("batch DO cleanup", () => {
       const job = (await ctx.storage.get("job")) as { status: string } | null;
       expect(job?.status).toBe("running");
     });
+  });
+});
+
+describe("batch container env", () => {
+  it("forwards optional AI vars into the container env only when set", async () => {
+    const fakeStorage = () => {
+      const m = new Map<string, unknown>();
+      return {
+        get: async (k: string) => m.get(k) ?? null,
+        put: async (k: string, v: unknown) => void m.set(k, v),
+        delete: async (k: string) => (m.delete(k), true)
+      } as never;
+    };
+    const transport = (seen: Record<string, string>[]) => () => ({
+      async start(envVars: Record<string, string>) { seen.push(envVars); },
+      async request() { return Response.json({ state: "running" }); },
+      async stop() {}
+    });
+    const seen: Record<string, string>[] = [];
+    const runner = new BatchJobRunner(
+      fakeStorage(),
+      {
+        AI_ENGINE: "WORKERS_AI",
+        BRAIN_AI_MODEL: "dynamic/abc-brain",
+        AUDITOR_AI_MODEL: "dynamic/abc-auditor"
+      } as never,
+      transport(seen),
+      () => "jid",
+      { schedule() {}, wipe: async () => {} }
+    );
+    await runner.startJob({ script: "ai_brain", run_date: RUN_DATE });
+    expect(seen[0].AI_ENGINE).toBe("WORKERS_AI");
+    expect(seen[0].BRAIN_AI_MODEL).toBe("dynamic/abc-brain");
+    expect(seen[0].AUDITOR_AI_MODEL).toBe("dynamic/abc-auditor");
+    expect(seen[0].AI_BASE_URL).toBe("http://ai.internal/v1");
+
+    const seen2: Record<string, string>[] = [];
+    const runner2 = new BatchJobRunner(
+      fakeStorage(), {} as never, transport(seen2), () => "jid",
+      { schedule() {}, wipe: async () => {} }
+    );
+    await runner2.startJob({ script: "ai_brain", run_date: RUN_DATE });
+    expect(seen2[0]).not.toHaveProperty("AI_ENGINE");
+    expect(seen2[0]).not.toHaveProperty("BRAIN_AI_MODEL");
+    expect(seen2[0]).not.toHaveProperty("AUDITOR_AI_MODEL");
   });
 });
 

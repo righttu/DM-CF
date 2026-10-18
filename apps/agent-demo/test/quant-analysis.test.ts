@@ -2,6 +2,7 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
 import schemaSql from "./fixtures/quant-schema.sql?raw";
 import {
+  AnalysisJobRunner,
   __setAnalysisTransportForTests,
   analysisTimelineView,
   quantOutboundHandler,
@@ -585,8 +586,13 @@ describe("analysis tools", () => {
     expect(done.payload.phase).toBe("done");
     expect((done.payload.result_summary as { final_score: number }).final_score).toBe(74);
 
+    // D1 has no row for today: a stale succeeded DO job must re-run instead of
+    // replaying the old result.
     const existsAfter = await callTool("run_analysis", { ts_code: OTHER_TS });
-    expect(existsAfter.payload.status).toBe("succeeded");
+    expect(existsAfter.payload.status).toBe("running");
+    statusBody = { state: "running", phase: "chip" };
+    const restarted = await callTool("get_analysis_status", { job_id: jobId });
+    expect(restarted.payload.status).toBe("running");
   });
 
   it("run_analysis returns exists when today's report already exists", async () => {
@@ -661,6 +667,50 @@ describe("analysis tools", () => {
       await instance.alarm();
     });
     expect((await stub.status()).status).toBe("succeeded");
+  });
+
+  it("forwards optional AI vars into the container env only when set", async () => {
+    const fakeStorage = () => {
+      const m = new Map<string, unknown>();
+      return {
+        get: async (k: string) => m.get(k) ?? null,
+        put: async (k: string, v: unknown) => void m.set(k, v),
+        delete: async (k: string) => (m.delete(k), true)
+      } as never;
+    };
+    const seen: Record<string, string>[] = [];
+    const transport = (seen: Record<string, string>[]) => () => ({
+      async start(envVars: Record<string, string>) { seen.push(envVars); },
+      async request() { return Response.json({ state: "running" }); },
+      async stop() {}
+    });
+    const runner = new AnalysisJobRunner(
+      fakeStorage(),
+      {
+        AI_ENGINE: "WORKERS_AI",
+        BRAIN_AI_MODEL: "dynamic/abc-brain",
+        AUDITOR_AI_MODEL: "dynamic/abc-auditor"
+      } as never,
+      transport(seen),
+      () => "jid",
+      () => {},
+      { schedule() {}, wipe: async () => {} }
+    );
+    await runner.startJob({ ts_code: TS, date: today(), requested_by: "a" });
+    expect(seen[0].AI_ENGINE).toBe("WORKERS_AI");
+    expect(seen[0].BRAIN_AI_MODEL).toBe("dynamic/abc-brain");
+    expect(seen[0].AUDITOR_AI_MODEL).toBe("dynamic/abc-auditor");
+    expect(seen[0].AI_BASE_URL).toBe("http://ai.internal/v1");
+
+    const seen2: Record<string, string>[] = [];
+    const runner2 = new AnalysisJobRunner(
+      fakeStorage(), {} as never, transport(seen2), () => "jid",
+      () => {}, { schedule() {}, wipe: async () => {} }
+    );
+    await runner2.startJob({ ts_code: TS, date: today(), requested_by: "a" });
+    expect(seen2[0]).not.toHaveProperty("AI_ENGINE");
+    expect(seen2[0]).not.toHaveProperty("BRAIN_AI_MODEL");
+    expect(seen2[0]).not.toHaveProperty("AUDITOR_AI_MODEL");
   });
 
   it("cleanup wipes a terminal job's storage; a re-run disarms it", async () => {
@@ -806,11 +856,11 @@ describe("analysis tools", () => {
     expect(again.payload.status).toBe("succeeded");
     expect((again.payload.timeline as unknown[]).length).toBe(5);
 
-    // run_analysis on an existing job also carries the timeline.
+    // D1 has no report row: run_analysis on a stale succeeded job re-runs
+    // fresh instead of replaying the stored timeline.
     const rerun = await callTool("run_analysis", { ts_code: "600000.SH" });
-    expect(rerun.payload.status).toBe("succeeded");
-    expect((rerun.payload.timeline as unknown[]).length).toBe(5);
-    expect(rerun.payload.total_s).toBe(30);
+    expect(rerun.payload.status).toBe("running");
+    expect(rerun.payload.timeline).toBeUndefined();
 
     // A fresh job has no timeline yet — the field is omitted, not empty.
     const fresh = await callTool("run_analysis", { ts_code: "600004.SH" });

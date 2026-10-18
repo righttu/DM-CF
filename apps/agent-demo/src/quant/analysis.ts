@@ -23,6 +23,9 @@ export interface AnalysisEnv {
   DASHSCOPE_API_KEY?: string;
   CF_AIG_TOKEN?: string;
   CF_ACCOUNT_ID?: string;
+  AI_ENGINE?: string;
+  BRAIN_AI_MODEL?: string;
+  AUDITOR_AI_MODEL?: string;
 }
 
 export type AnalysisJobStatus =
@@ -110,8 +113,9 @@ export interface AnalysisJobView extends AnalysisJob {
 
 const JOB_TIMEOUT_MS = 20 * 60 * 1000;
 const JOB_TIMEOUT_SECONDS = JOB_TIMEOUT_MS / 1000;
-// A terminal job's DO storage is wiped 30 days later; a re-run disarms it.
-export const CLEANUP_AFTER_SECONDS = 30 * 24 * 60 * 60;
+// A terminal job's DO storage is wiped 24 h later (the job id contains the
+// date, so next day's run gets a fresh DO anyway); a re-run disarms it.
+export const CLEANUP_AFTER_SECONDS = 24 * 60 * 60;
 const CLEANUP_TOKEN_KEY = "cleanup_token";
 const TERMINAL_STATUSES = new Set<AnalysisJobStatus>(["succeeded", "failed", "timeout"]);
 const CONTAINER_HOST = "http://container";
@@ -191,6 +195,9 @@ export class AnalysisJobRunner {
     if (env.DASHSCOPE_API_KEY) vars.DASHSCOPE_API_KEY = env.DASHSCOPE_API_KEY;
     if (env.CF_AIG_TOKEN) vars.CF_AIG_TOKEN = env.CF_AIG_TOKEN;
     if (env.CF_ACCOUNT_ID) vars.CF_ACCOUNT_ID = env.CF_ACCOUNT_ID;
+    if (env.AI_ENGINE) vars.AI_ENGINE = env.AI_ENGINE;
+    if (env.BRAIN_AI_MODEL) vars.BRAIN_AI_MODEL = env.BRAIN_AI_MODEL;
+    if (env.AUDITOR_AI_MODEL) vars.AUDITOR_AI_MODEL = env.AUDITOR_AI_MODEL;
     return vars;
   }
 
@@ -211,13 +218,16 @@ export class AnalysisJobRunner {
     ts_code: string;
     date: string;
     requested_by: string;
+    // restart=true is used when D1 has no report for today even though the DO
+    // still holds a stale "succeeded" job: re-run instead of replaying it.
+    restart?: boolean;
   }): Promise<AnalysisJob> {
     const existing = await this.loadJob();
     if (
       existing &&
       (existing.status === "queued" ||
         existing.status === "running" ||
-        existing.status === "succeeded")
+        (!input.restart && existing.status === "succeeded"))
     ) {
       return existing;
     }
@@ -400,6 +410,7 @@ export class QuantAnalysisContainer extends Container<AnalysisEnv> {
     ts_code: string;
     date: string;
     requested_by: string;
+    restart?: boolean;
   }): Promise<AnalysisJob> {
     return this.runner.startJob(input);
   }

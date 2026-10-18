@@ -134,7 +134,8 @@ const ANALYSIS_JOB_STATUSES = new Set([
   "failed",
   "timeout",
   "exists",
-  "busy"
+  "busy",
+  "not_found"
 ]);
 
 interface AnalysisStatusData {
