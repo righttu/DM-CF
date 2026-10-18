@@ -1938,3 +1938,197 @@ describe("ResearchAgent chat and tools", () => {
     expect(afterLate.history[1].content).not.toContain("不应到达的结尾");
   });
 });
+describe("analysis status endpoint + run_analysis job card", () => {
+  const JOB_ID = "600000.SH:20261017";
+
+  function spyQuantTools(handlers: Record<string, () => Promise<unknown> | unknown>) {
+    const origList = MCPClientManager.prototype.listTools;
+    const origCall = MCPClientManager.prototype.callTool;
+    vi.spyOn(MCPClientManager.prototype, "listTools").mockImplementation(
+      function (this: unknown, options: unknown) {
+        const tools = (origList as (...a: unknown[]) => { name?: string }[]).call(
+          this,
+          options
+        );
+        return [
+          ...tools,
+          { name: "abc-quant_run_analysis" },
+          { name: "abc-quant_get_analysis_status" }
+        ];
+      } as never
+    );
+    const callSpy = vi
+      .spyOn(MCPClientManager.prototype, "callTool")
+      .mockImplementation(function (this: unknown, params: { name: string }) {
+        const h = handlers[params.name];
+        if (h) return Promise.resolve(h()) as never;
+        return (origCall as (...a: unknown[]) => Promise<unknown>).call(
+          this,
+          params
+        ) as never;
+      });
+    return { callSpy };
+  }
+
+  const STATUS_PAYLOAD = {
+    job_id: "600000.SH:20261017",
+    status: "running",
+    phase: "ai",
+    timeline: [
+      { label: "引擎初始化", started_at_bj: "18:31:02", duration_s: 1.2, secret: "drop" },
+      { label: "AI 诊断（Kimi）", started_at_bj: "18:31:03", duration_s: 4.5 }
+    ],
+    total_s: 5.7,
+    result_summary: { final_score: 88, target_price: 12.3, extra: "drop" },
+    error: null,
+    internal_note: "should be dropped"
+  };
+
+  function mcpText(payload: unknown) {
+    return { content: [{ type: "text", text: JSON.stringify(payload) }] };
+  }
+
+  it("requires auth, analyst role and a valid job_id", async () => {
+    expect(
+      (await authedFetch(`/api/analysis/status?job_id=${JOB_ID}`)).status
+    ).toBe(401);
+    const viewerJwt = await signJwt({ sub: "sub-ana-viewer", email: VIEWER_EMAIL });
+    expect(
+      (
+        await authedFetch(`/api/analysis/status?job_id=${JOB_ID}`, {
+          jwt: viewerJwt
+        })
+      ).status
+    ).toBe(403);
+    const jwt = await signJwt({ sub: "sub-ana-1", email: ANALYST_EMAIL });
+    expect(
+      (await authedFetch("/api/analysis/status?job_id=not-a-job", { jwt })).status
+    ).toBe(400);
+    expect(
+      (await authedFetch("/api/analysis/status", { jwt })).status
+    ).toBe(400);
+  });
+
+  it("returns 409 requires_connect when MCP is not connected", async () => {
+    const jwt = await signJwt({ sub: "sub-ana-2", email: ANALYST_EMAIL });
+    const resp = await authedFetch(`/api/analysis/status?job_id=${JOB_ID}`, { jwt });
+    expect(resp.status).toBe(409);
+    const data = (await resp.json()) as { status: string };
+    expect(data.status).toBe("requires_connect");
+  });
+
+  it("calls the *_get_analysis_status tool and returns only sanitized fields", async () => {
+    const jwt = await signJwt({ sub: "sub-ana-3", email: ANALYST_EMAIL });
+    await connectAgentMcp({ sub: "sub-ana-3", email: ANALYST_EMAIL });
+    const { callSpy } = spyQuantTools({
+      "abc-quant_get_analysis_status": () => mcpText(STATUS_PAYLOAD)
+    });
+    const resp = await authedFetch(`/api/analysis/status?job_id=${JOB_ID}`, { jwt });
+    expect(resp.status).toBe(200);
+    const data = (await resp.json()) as {
+      status: string;
+      data: Record<string, unknown>;
+    };
+    expect(data.status).toBe("ok");
+    expect(data.data.job_id).toBe(JOB_ID);
+    expect(data.data.status).toBe("running");
+    expect(data.data.phase).toBe("ai");
+    expect(data.data.total_s).toBe(5.7);
+    expect(data.data.result_summary).toEqual({ final_score: 88, target_price: 12.3 });
+    expect(data.data.timeline).toEqual([
+      { label: "引擎初始化", started_at_bj: "18:31:02", duration_s: 1.2 },
+      { label: "AI 诊断（Kimi）", started_at_bj: "18:31:03", duration_s: 4.5 }
+    ]);
+    expect(Object.keys(data.data).sort()).toEqual(
+      ["error", "job_id", "phase", "result_summary", "status", "timeline", "total_s"].sort()
+    );
+    expect(JSON.stringify(data)).not.toContain("drop");
+    expect(JSON.stringify(data)).not.toContain("internal_note");
+    expect(
+      callSpy.mock.calls.some(
+        (c) => (c[0] as { name: string }).name === "abc-quant_get_analysis_status"
+      )
+    ).toBe(true);
+
+    // 5s cache: a second request does not re-call the tool
+    const callsBefore = callSpy.mock.calls.length;
+    const resp2 = await authedFetch(`/api/analysis/status?job_id=${JOB_ID}`, { jwt });
+    expect(resp2.status).toBe(200);
+    expect(callSpy.mock.calls.length).toBe(callsBefore);
+  });
+
+  it("returns busy for a second job while another status call is in-flight", async () => {
+    const jwt = await signJwt({ sub: "sub-ana-4", email: ANALYST_EMAIL });
+    await connectAgentMcp({ sub: "sub-ana-4", email: ANALYST_EMAIL });
+    let release: (v: unknown) => void = () => {};
+    const gate = new Promise((r) => {
+      release = r;
+    });
+    spyQuantTools({
+      "abc-quant_get_analysis_status": () => gate.then(() => mcpText(STATUS_PAYLOAD))
+    });
+    const first = authedFetch(`/api/analysis/status?job_id=${JOB_ID}`, { jwt });
+    await new Promise((r) => setTimeout(r, 300));
+    const second = await authedFetch(
+      "/api/analysis/status?job_id=600001.SZ:20261017",
+      { jwt }
+    );
+    expect(second.status).toBe(200);
+    expect(((await second.json()) as { status: string }).status).toBe("busy");
+    release(undefined);
+    expect((await first).status).toBe(200);
+  });
+
+  it("attaches job only to *_run_analysis steps and persists it in history", async () => {
+    const jwt = await signJwt({ sub: "sub-ana-5", email: ANALYST_EMAIL });
+    await connectAgentMcp({ sub: "sub-ana-5", email: ANALYST_EMAIL });
+    spyQuantTools({
+      "abc-quant_run_analysis": () =>
+        mcpText({ status: "running", job_id: JOB_ID, secret: "drop" }),
+      "abc-quant_get_signals": () => mcpText({ rows: [] })
+    });
+    let call = 0;
+    __setModelFetchForTests(async () => {
+      call += 1;
+      if (call === 1) {
+        return toolCallResponse([
+          { id: "c1", name: "abc-quant_run_analysis", args: '{"ts_code":"600000.SH"}' },
+          { id: "c2", name: "abc-quant_get_signals", args: "{}" }
+        ]);
+      }
+      return textResponse("已发起深度诊断任务。");
+    });
+    const resp = await authedFetch("/api/chat", {
+      jwt,
+      method: "POST",
+      body: { message: "帮我诊断 600000.SH" }
+    });
+    expect(resp.status).toBe(200);
+    const data = (await resp.json()) as {
+      events: { tool?: string; job?: { job_id: string; status: string } }[];
+    };
+    const withJob = data.events.filter((e) => e.job !== undefined);
+    expect(withJob).toHaveLength(1);
+    expect(withJob[0].tool).toBe("abc-quant_run_analysis");
+    expect(withJob[0].job).toEqual({ job_id: JOB_ID, status: "running" });
+    const signalsDone = data.events.find((e) => e.tool === "abc-quant_get_signals");
+    expect(signalsDone?.job).toBeUndefined();
+    expect(JSON.stringify(withJob[0])).not.toContain("drop");
+
+    // persisted: history assistant turn carries the step with job
+    const session = (await (
+      await authedFetch("/api/session", { jwt })
+    ).json()) as {
+      history: {
+        role: string;
+        content: string;
+        steps?: { tool?: string; job?: { job_id: string } }[];
+      }[];
+    };
+    const assistant = session.history.filter((m) => m.role === "assistant").pop();
+    const persisted = (assistant?.steps ?? []).filter((s) => s.job !== undefined);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].job?.job_id).toBe(JOB_ID);
+    expect(JSON.stringify(assistant?.steps)).not.toContain("secret");
+  });
+});

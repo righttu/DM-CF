@@ -53,6 +53,8 @@ class AnalystBrain:
             self.client = OpenAI(
                 api_key=AI_API_KEY or "unused",
                 base_url=base_url,
+                timeout=1800,
+                max_retries=0,
                 default_headers=(
                     {"cf-aig-authorization": f"Bearer {CF_AIG_TOKEN}"} if CF_AIG_TOKEN else {}
                 )
@@ -574,7 +576,7 @@ def main():
     d1_execute_url = f"{STOCK_API_BASE}/api/db/execute"
 
     # 1. 扫描待处理任务清单 (lookback 设为 5 天确保覆盖)从 hunter/策略筛选表中，拉出最近 5 天内被策略命中的股票作为待分析池
-    all_tasks = db.get_pending_stocks(lookback_days=2)
+    all_tasks = db.get_pending_stocks(lookback_days=0)
     
     # 2. 查重逻辑：仅保留今日尚未分析过的记录
     # 显式查询今天已经存入数据库的 ts_code 名单

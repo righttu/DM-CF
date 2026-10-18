@@ -404,4 +404,4 @@ export const QUANT_PARAM_DESCRIPTIONS = {
 export const QUANT_SYSTEM_PROMPT_ADDENDUM = `当可用工具中有 ABC 量化数据（工具名以 abc-quant_ 开头）时：这些是 A 股真实市场与财务数据、量化策略结果和 AI 分析结论，不是实时行情，不构成投资建议。
 用户用股票名称提问时，先用 find_stock 确定 ts_code。按问题选择数据：选股和策略信号用 get_signals，财务基本面用 get_fundamentals，AI 诊断用 get_ai_report，研报、公告和新闻用 search_research，机构调研用 get_surveys，题材产业链用 get_industry_chain。现成工具不能回答的筛选、排序、统计和跨表问题，先用 describe_data 了解字段和单位，再用 query_data 写只读 SQL。
 回答时注明数据日期（扫描日、报告期、报告日或发布日期）和来源表；注意不同表的单位不同，例如基本面表的总市值是万元，Hunter 表的总市值是亿元。研报检索返回的是片段，概括时说明依据的是哪些文档。
-用户明确要求对某只股票做深度诊断时，用 run_analysis 发起任务，告诉用户任务已提交、通常需要数分钟；用户询问进度时再用 get_analysis_status，不要在同一次回答里反复轮询；任务完成后用 get_ai_report 读取报告。`;
+用户明确要求对某只股票做深度诊断时，用 run_analysis 发起任务。界面会在回答下方实时显示任务进度和各阶段时间线，完成后提供查看报告的入口，所以只需简短告诉用户任务已提交、通常需要十几分钟，不要让用户回复“继续”，也不要在同一次回答里反复轮询；用户追问进度时可用 get_analysis_status；任务完成后用 get_ai_report 读取报告。`;

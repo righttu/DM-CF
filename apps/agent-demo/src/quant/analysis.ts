@@ -65,7 +65,7 @@ export const ANALYSIS_PHASE_LABELS: Record<string, string> = {
   start: "引擎初始化",
   chip: "数据与筹码计算",
   knowledge: "知识库挖掘（研报/公告/调研）",
-  ai: "AI 诊断（千问）",
+  ai: "AI 诊断（Kimi）",
   done: "完成"
 };
 

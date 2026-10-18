@@ -263,6 +263,35 @@ details.proc .proc-body{border-top:1px solid var(--line);padding:6px 12px 10px}
 .msg-actions{display:flex;align-items:center;gap:6px;margin-top:6px;color:var(--faint);font-size:11.5px}
 .msg-actions button.icon{font-size:14px}
 
+/* analysis progress card */
+.acard{border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);
+  padding:12px 14px;margin-top:10px;max-width:560px;box-shadow:var(--shadow)}
+.acard-head{display:flex;align-items:center;gap:8px}
+.acard-title{font-size:13px;font-weight:600;flex:1;min-width:0;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.acard-pill{font-size:11.5px;padding:2px 9px;border-radius:999px;white-space:nowrap;
+  background:var(--warn-soft);color:var(--warn)}
+.acard-pill.ok{background:var(--ok-soft);color:var(--ok)}
+.acard-pill.err{background:var(--warn-soft);color:var(--err)}
+.acard-tl{margin-top:8px;font-size:12.5px;color:var(--muted)}
+.acard-tl:empty{display:none}
+.acard-row{display:flex;gap:10px;padding:3px 0;align-items:baseline}
+.acard-row .tl-label{flex:1;min-width:0;color:var(--text)}
+.acard-row .tl-time{color:var(--faint);font-variant-numeric:tabular-nums;font-size:11.5px}
+.acard-row .tl-dur{color:var(--muted);font-variant-numeric:tabular-nums;min-width:64px;
+  text-align:right;font-size:11.5px}
+.acard-row.live .tl-dur{color:var(--warn)}
+.acard-meta{margin-top:8px;font-size:12.5px;color:var(--faint);display:flex;gap:16px;flex-wrap:wrap}
+.acard-meta:empty{display:none}
+.acard-meta b{color:var(--text);font-weight:600}
+.acard-actions{margin-top:10px;display:flex;gap:8px}
+.acard-actions:empty{display:none}
+.acard-actions button{padding:6px 12px;font-size:12.5px}
+.acard-note{margin-top:8px;font-size:12px;color:var(--warn)}
+.acard-note:empty{display:none}
+.acard-error{margin-top:6px;font-size:12px;color:var(--err);overflow-wrap:anywhere}
+.acard-error:empty{display:none}
+
 /* composer */
 #composer-area{background:transparent;padding:12px 20px 6px}
 #composer{max-width:820px;margin:0 auto;display:flex;gap:10px;align-items:flex-end;
@@ -739,6 +768,141 @@ function procFinish(chip, totalMs) {
   chip.sum.textContent = '调用了 ' + toolRows.length + ' 个工具' + (secs > 0.05 ? ' · ' + secs.toFixed(1) + ' s' : '');
 }
 
+/* ---------- analysis progress card ---------- */
+const ANALYSIS_PILL = {
+  running: '进行中', queued: '进行中', succeeded: '已完成',
+  failed: '失败', timeout: '超时', exists: '今日已有诊断', busy: '容量已满'
+};
+const acardState = new WeakMap();
+function fmtDur(s) {
+  if (typeof s !== 'number' || !isFinite(s)) return '—';
+  const t = Math.max(0, Math.round(s));
+  const m = Math.floor(t / 60);
+  return m ? m + ' 分 ' + (t % 60) + ' 秒' : t + ' 秒';
+}
+function sendAnalysisPrompt(text) {
+  input.value = text;
+  send();
+}
+function mountAnalysisCard(host, job) {
+  if (!job || typeof job.job_id !== 'string') return;
+  let card = host.querySelector('.acard[data-job="' + job.job_id + '"]');
+  if (!card) {
+    card = el('div', 'acard');
+    card.dataset.job = job.job_id;
+    const head = el('div', 'acard-head');
+    head.append(
+      el('div', 'acard-title', '深度诊断 · ' + job.job_id.split(':')[0]),
+      el('span', 'acard-pill', ''));
+    card.appendChild(head);
+    card.appendChild(el('div', 'acard-tl'));
+    card.appendChild(el('div', 'acard-meta'));
+    card.appendChild(el('div', 'acard-error'));
+    card.appendChild(el('div', 'acard-actions'));
+    card.appendChild(el('div', 'acard-note'));
+    host.appendChild(card);
+    acardState.set(card, {
+      status: job.status || 'running', timeline: [], total_s: null,
+      summary: null, error: null, elapsed: 0, started: Date.now(),
+      fetchedAt: Date.now(), stale: false, settled: 0
+    });
+    card._acardTimer = setInterval(() => analysisCardTick(card), 1000);
+    analysisCardPoll(card);
+  }
+  const st = acardState.get(card);
+  if (job.status && !st.settled) { st.status = job.status; renderAnalysisCard(card); }
+}
+async function analysisCardPoll(card) {
+  const st = acardState.get(card);
+  if (!st) return;
+  try {
+    const r = await fetch('/api/analysis/status?job_id=' + encodeURIComponent(card.dataset.job));
+    if (r.ok) {
+      const d = await r.json();
+      if (d && d.status === 'ok' && d.data) paintAnalysisCard(card, d.data);
+    }
+  } catch {}
+}
+function paintAnalysisCard(card, d) {
+  const st = acardState.get(card);
+  if (!st) return;
+  if (d.status) st.status = d.status;
+  if (Array.isArray(d.timeline)) st.timeline = d.timeline;
+  if (typeof d.total_s === 'number') st.total_s = d.total_s;
+  if (d.result_summary !== undefined) st.summary = d.result_summary;
+  if (d.error !== undefined) st.error = d.error;
+  st.fetchedAt = Date.now();
+  renderAnalysisCard(card);
+}
+function renderAnalysisCard(card) {
+  const st = acardState.get(card);
+  if (!st) return;
+  const live = st.status === 'running' || st.status === 'queued';
+  const pill = card.querySelector('.acard-pill');
+  pill.textContent = ANALYSIS_PILL[st.status] || st.status || '—';
+  pill.className = 'acard-pill' +
+    (st.status === 'succeeded' || st.status === 'exists' ? ' ok'
+    : st.status === 'failed' || st.status === 'timeout' || st.status === 'busy' ? ' err' : '');
+  const tl = card.querySelector('.acard-tl');
+  tl.replaceChildren();
+  (st.timeline || []).forEach((t, i) => {
+    const isOpen = live && i === st.timeline.length - 1;
+    const row = el('div', 'acard-row' + (isOpen ? ' live' : ''));
+    const dur = isOpen && typeof t.duration_s === 'number'
+      ? t.duration_s + (Date.now() - st.fetchedAt) / 1000
+      : t.duration_s;
+    row.append(
+      el('span', 'tl-label', t.label || ''),
+      el('span', 'tl-time', t.started_at_bj || ''),
+      el('span', 'tl-dur', fmtDur(dur)));
+    tl.appendChild(row);
+  });
+  const meta = card.querySelector('.acard-meta');
+  meta.replaceChildren();
+  if (typeof st.total_s === 'number') meta.append(el('span', '', '总耗时 ' + fmtDur(st.total_s)));
+  const s = st.summary;
+  if ((st.status === 'succeeded' || st.status === 'exists') && s) {
+    if (s.final_score != null) meta.append(el('span', '', '综合评分 ' + s.final_score));
+    if (s.target_price != null) meta.append(el('span', '', '目标价 ' + s.target_price));
+  }
+  const err = card.querySelector('.acard-error');
+  err.textContent = (st.status === 'failed' || st.status === 'timeout') ? (st.error || '') : '';
+  const acts = card.querySelector('.acard-actions');
+  acts.replaceChildren();
+  const ts = card.dataset.job.split(':')[0];
+  if (st.status === 'succeeded' || st.status === 'exists') {
+    const b = el('button', '', '查看完整报告');
+    b.addEventListener('click', () => sendAnalysisPrompt('读取 ' + ts + ' 最新的 AI 诊断报告'));
+    acts.appendChild(b);
+  } else if (st.status === 'failed' || st.status === 'timeout') {
+    const b = el('button', '', '重新发起诊断');
+    b.addEventListener('click', () => sendAnalysisPrompt('重新对 ' + ts + ' 做深度诊断'));
+    acts.appendChild(b);
+  }
+  const note = card.querySelector('.acard-note');
+  note.textContent = st.stale ? '仍在运行，可稍后刷新查看' : '';
+}
+function analysisCardTick(card) {
+  const st = acardState.get(card);
+  if (!st || !card.isConnected) { clearInterval(card._acardTimer); return; }
+  const live = st.status === 'running' || st.status === 'queued';
+  if (!live) {
+    if (++st.settled > 2) clearInterval(card._acardTimer);
+    return;
+  }
+  st.elapsed++;
+  renderAnalysisCard(card);
+  if (Date.now() - st.started > 40 * 60 * 1000) {
+    st.stale = true;
+    renderAnalysisCard(card);
+    clearInterval(card._acardTimer);
+    return;
+  }
+  if (document.visibilityState === 'visible' && st.elapsed % 15 === 0) {
+    analysisCardPoll(card);
+  }
+}
+
 function addAgentShell() {
   const m = el('div', 'msg agent');
   m.appendChild(el('div', 'm-avatar', 'ABC'));
@@ -756,7 +920,7 @@ function addAgentShell() {
   actions.style.display = 'none';
   m.appendChild(body);
   chat.appendChild(m); scrollChat();
-  return { m, chip, md, actions, copyBtn, time, raw: '' };
+  return { m, body, chip, md, actions, copyBtn, time, raw: '' };
 }
 function finishAgent(sh) {
   sh.chip.det.style.display = sh.chip.tools.size ? '' : 'none';
@@ -864,7 +1028,10 @@ function renderHistory(history) {
     else {
       const sh = addAgentShell();
       const steps = Array.isArray(m.steps) ? m.steps : [];
-      for (const st of steps) procUpdate(sh.chip, st);
+      for (const st of steps) {
+        procUpdate(sh.chip, st);
+        if (st.job) mountAnalysisCard(sh.body, st.job);
+      }
       sh.raw = m.content;
       renderMarkdown(m.content, sh.md);
       finishAgent(sh);
@@ -1172,6 +1339,7 @@ async function send() {
         if (evt.type === 'step') {
           shell.chip.det.style.display = '';
           procUpdate(shell.chip, evt);
+          if (evt.job) mountAnalysisCard(shell.body, evt.job);
           scrollChat();
         } else if (evt.type === 'delta') {
           shell.raw += evt.text; gotDelta = true;

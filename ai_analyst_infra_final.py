@@ -153,9 +153,9 @@ class DBLoader:
         except Exception as e:
             print(f"❌ 读取表 {table_name} 出错: {e}")
             return pd.DataFrame()
-     #change lookback_days to change start date
+     #lookback_days: N 表示“扫描日期 ≥ 今天减 N 天”，0 = 只处理当天选股，1 = 昨天+今天
 
-    def get_pending_stocks(self, lookback_days=2):
+    def get_pending_stocks(self, lookback_days=0):
         start_dt = (datetime.datetime.now() - datetime.timedelta(days=lookback_days)).strftime('%Y%m%d')
         hunter_tables = self._get_hunter_tables()
         if not hunter_tables: return []

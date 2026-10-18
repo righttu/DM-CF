@@ -70,7 +70,11 @@ interface PendingPortal {
   expiresAt: number;
 }
 
-type ChatTurn = { role: "user" | "assistant"; content: string };
+type ChatTurn = {
+  role: "user" | "assistant";
+  content: string;
+  steps?: ChatEvent[];
+};
 
 interface StoredSession {
   id: string;
@@ -119,6 +123,101 @@ interface ChatEvent {
   tool?: string;
   status?: string;
   durationMs?: number;
+  job?: { job_id: string; status: string };
+}
+
+const ANALYSIS_JOB_ID_PATTERN = /^\d{6}\.(SH|SZ|BJ):\d{8}$/;
+const ANALYSIS_JOB_STATUSES = new Set([
+  "running",
+  "queued",
+  "succeeded",
+  "failed",
+  "timeout",
+  "exists",
+  "busy"
+]);
+
+interface AnalysisStatusData {
+  job_id: string;
+  status: string;
+  phase: string | null;
+  timeline: { label: string; started_at_bj: string; duration_s: number | null }[];
+  total_s: number | null;
+  result_summary: {
+    final_score: string | number | null;
+    target_price: string | number | null;
+  } | null;
+  error: string | null;
+}
+
+type AnalysisStatusResult =
+  | { status: "ok"; data: AnalysisStatusData }
+  | { status: "requires_connect" | "unsupported" | "busy" | "error" };
+
+const ANALYSIS_STATUS_CACHE_MS = 5000;
+
+function sanitizeAnalysisStatus(jobId: string, payload: unknown): AnalysisStatusData {
+  const p = (payload && typeof payload === "object" ? payload : {}) as Record<
+    string,
+    unknown
+  >;
+  const str = (v: unknown) => (typeof v === "string" ? v.slice(0, 200) : null);
+  const num = (v: unknown) =>
+    typeof v === "number" && Number.isFinite(v) ? v : null;
+  const summary =
+    p.result_summary && typeof p.result_summary === "object"
+      ? (() => {
+          const s = p.result_summary as Record<string, unknown>;
+          const pick = (v: unknown) =>
+            typeof v === "string" ? v.slice(0, 40) : num(v);
+          return { final_score: pick(s.final_score), target_price: pick(s.target_price) };
+        })()
+      : null;
+  const timeline = Array.isArray(p.timeline)
+    ? p.timeline
+        .map((e) => {
+          const t = (e && typeof e === "object" ? e : {}) as Record<string, unknown>;
+          return {
+            label: str(t.label) ?? "",
+            started_at_bj: str(t.started_at_bj) ?? "",
+            duration_s: num(t.duration_s)
+          };
+        })
+        .filter((t) => t.label !== "")
+        .slice(0, 12)
+    : [];
+  const status = str(p.status);
+  return {
+    job_id: jobId,
+    status: status && ANALYSIS_JOB_STATUSES.has(status) ? status : "unknown",
+    phase: str(p.phase),
+    timeline,
+    total_s: num(p.total_s),
+    result_summary: summary,
+    error: str(p.error)
+  };
+}
+
+function analysisJobRef(
+  toolName: string,
+  payload: unknown
+): { job_id: string; status: string } | null {
+  if (!toolName.endsWith("_run_analysis")) return null;
+  const p = (payload && typeof payload === "object" ? payload : {}) as Record<
+    string,
+    unknown
+  >;
+  const jobId = p.job_id;
+  const status = p.status;
+  if (
+    typeof jobId === "string" &&
+    ANALYSIS_JOB_ID_PATTERN.test(jobId) &&
+    typeof status === "string" &&
+    ANALYSIS_JOB_STATUSES.has(status)
+  ) {
+    return { job_id: jobId, status };
+  }
+  return null;
 }
 
 const SERVER_LABELS: Record<string, string> = {
@@ -453,7 +552,7 @@ function buildChatModel(
 }
 
 type ChatSignal =
-  | { type: "step"; text: string; kind: ChatEvent["kind"] }
+  | ({ type: "step" } & ChatEvent)
   | { type: "delta"; text: string };
 
 interface ChatOutcome {
@@ -498,6 +597,8 @@ function buildTools(
         if (result.status === "ok") seen.set(key, result.payload);
         agent.audit(context, "tool-execute", tool.name, result.status);
         const kind = result.status === "ok" ? "ok" : "denied";
+        const job =
+          result.status === "ok" ? analysisJobRef(tool.name, result.payload) : null;
         record({
           text:
             result.status === "ok"
@@ -507,7 +608,8 @@ function buildTools(
           server: tool.server,
           tool: tool.name,
           status: result.status,
-          durationMs
+          durationMs,
+          ...(job ? { job } : {})
         });
         return result.payload ?? { error: result.status };
       }
@@ -1248,6 +1350,66 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     }
   }
 
+  private analysisStatusInflight: Promise<AnalysisStatusResult> | null = null;
+  private analysisStatusJob: string | null = null;
+  private analysisStatusCache = new Map<
+    string,
+    { at: number; result: AnalysisStatusResult }
+  >();
+
+  async analysisStatus(
+    jobId: string,
+    context: AuditContext
+  ): Promise<AnalysisStatusResult> {
+    const cached = this.analysisStatusCache.get(jobId);
+    if (cached && Date.now() - cached.at < ANALYSIS_STATUS_CACHE_MS) {
+      return cached.result;
+    }
+    if (!this.mcpStatus().connected) {
+      this.audit(context, "analysis_status", "analysis_status", "requires_connect");
+      return { status: "requires_connect" };
+    }
+    const tool = this
+      .discoveredTools()
+      .find((t) => t.name.endsWith("_get_analysis_status"));
+    if (!tool) {
+      this.audit(context, "analysis_status", "analysis_status", "unsupported");
+      return { status: "unsupported" };
+    }
+    if (this.analysisStatusInflight && this.analysisStatusJob !== jobId) {
+      this.audit(context, "analysis_status", "analysis_status", "busy");
+      return { status: "busy" };
+    }
+    if (!this.analysisStatusInflight) {
+      this.analysisStatusJob = jobId;
+      this.analysisStatusInflight = this.fetchAnalysisStatus(
+        tool.name,
+        jobId,
+        context
+      ).finally(() => {
+        this.analysisStatusInflight = null;
+        this.analysisStatusJob = null;
+      });
+    }
+    const result = await this.analysisStatusInflight;
+    if (result.status === "ok") {
+      this.analysisStatusCache.set(jobId, { at: Date.now(), result });
+    }
+    this.audit(context, "analysis_status", "analysis_status", result.status);
+    return result;
+  }
+
+  private async fetchAnalysisStatus(
+    toolName: string,
+    jobId: string,
+    context: AuditContext
+  ): Promise<AnalysisStatusResult> {
+    const result = await this.callPortalTool(toolName, { job_id: jobId }, context);
+    if (result.status === "unavailable") return { status: "requires_connect" };
+    if (result.status !== "ok") return { status: "error" };
+    return { status: "ok", data: sanitizeAnalysisStatus(jobId, result.payload) };
+  }
+
   audit(
     context: AuditContext,
     action: string,
@@ -1432,7 +1594,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
         const partial = text.trim();
         if (!partial) return { reply: "", events, stopped: true };
         const reply = `${partial}\n\n（已停止生成）`;
-        this.persistTurn(userMessage, reply);
+        this.persistTurn(userMessage, reply, events);
         record({ text: "已停止生成", kind: "denied" });
         return { reply, events, stopped: true };
       }
@@ -1449,7 +1611,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
       }
       const flag = [...dlpSink].reverse().find((o) => o.action === "FLAG");
       if (flag) record({ text: "DLP 标记（未拦截，云端确认）", kind: "denied" });
-      this.persistTurn(userMessage, reply);
+      this.persistTurn(userMessage, reply, events);
       return { reply, events, dlp: flag };
     } finally {
       this.busy = false;
@@ -1458,12 +1620,26 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
 
   private persistTurn(
     userMessage: { role: "user"; content: string },
-    reply: string
+    reply: string,
+    events: ChatEvent[]
   ): void {
+    const steps = events.map((e) => {
+      const step: ChatEvent = { text: e.text, kind: e.kind };
+      if (e.server !== undefined) step.server = e.server;
+      if (e.tool !== undefined) step.tool = e.tool;
+      if (e.status !== undefined) step.status = e.status;
+      if (e.durationMs !== undefined) step.durationMs = e.durationMs;
+      if (e.job !== undefined) step.job = e.job;
+      return step;
+    });
     const next = [
       ...this.state.history,
       userMessage,
-      { role: "assistant" as const, content: reply }
+      {
+        role: "assistant" as const,
+        content: reply,
+        ...(steps.length ? { steps } : {})
+      }
     ].slice(-MAX_STORED_MESSAGES);
     this.setState({ ...this.state, history: next });
   }
@@ -1611,6 +1787,21 @@ async function handleRequest(
         accessLogoutUrl: accessLogoutUrl(env)
       }
     });
+  }
+
+  if (url.pathname === "/api/analysis/status" && request.method === "GET") {
+    if (identity.role !== "analyst") {
+      return json({ error: "forbidden" }, 403);
+    }
+    const jobId = url.searchParams.get("job_id") ?? "";
+    if (!ANALYSIS_JOB_ID_PATTERN.test(jobId)) {
+      return json({ error: "invalid_job_id" }, 400);
+    }
+    const result = await stub.analysisStatus(jobId, auditContext);
+    return json(
+      { ...result, requestId: auditContext.requestId },
+      result.status === "requires_connect" ? 409 : 200
+    );
   }
 
   if (["POST", "PUT", "DELETE", "PATCH"].includes(request.method)) {

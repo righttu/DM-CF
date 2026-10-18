@@ -761,7 +761,7 @@ describe("analysis tools", () => {
       "引擎初始化",
       "数据与筹码计算",
       "知识库挖掘（研报/公告/调研）",
-      "AI 诊断（千问）",
+      "AI 诊断（Kimi）",
       "完成"
     ]);
     expect(done.payload.total_s).toBe(30);

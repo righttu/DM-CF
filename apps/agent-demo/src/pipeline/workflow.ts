@@ -19,9 +19,11 @@ export const BATCH_SCRIPTS = [
   "ai_brain"
 ] as const;
 
-const STEP_CAP_MS = 4 * 60 * 60 * 1000;
-const LONG_STEP_CAP_MS = 8 * 60 * 60 * 1000;
-const LONG_STEPS = new Set<string>(["knowledge_miner", "ai_brain"]);
+const STEP_CAP_HOURS: Record<string, number> = {
+  knowledge_miner: 8,
+  ai_brain: 16
+};
+const capMsFor = (name: string) => (STEP_CAP_HOURS[name] ?? 4) * 60 * 60 * 1000;
 const POLL_INTERVAL = "2 minutes";
 
 // fundamentals 只在财报季运行：北京时间周五 且 处于以下窗口（月-日，闭区间）。
@@ -126,7 +128,7 @@ async function runScriptOnce(
   clock: () => number
 ): Promise<ScriptOutcome> {
   const stub = stubFor(env, jobName);
-  const capMs = LONG_STEPS.has(name) ? LONG_STEP_CAP_MS : STEP_CAP_MS;
+  const capMs = capMsFor(name);
   const t0 = await step.do(`t0 ${name} #${attempt}`, () => clock());
   await step.do(`start ${name} #${attempt}`, () =>
     stub.startJob({ script: name, run_date: runDate })
@@ -145,7 +147,7 @@ async function runScriptOnce(
       await step.do(`stop ${name} #${attempt}`, () => stub.stopJob());
       return {
         status: "failed",
-        error: `step_timeout_${capMs === LONG_STEP_CAP_MS ? "8h" : "4h"}`
+        error: `step_timeout_${capMs / 3600000}h`
       };
     }
   }

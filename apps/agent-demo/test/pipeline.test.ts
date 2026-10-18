@@ -969,6 +969,22 @@ describe("daily workflow", () => {
     // First poll (elapsed 5h) did NOT stop: a second poll ran before the cap.
     expect(step.calls).toContain("do:poll knowledge_miner #1 1");
     expect(step.calls).toContain("do:poll knowledge_miner #1 0");
+
+    // ai_brain gets 16h: polls at 5h/10h/15h continue, 20h caps.
+    const step2 = fakeStep();
+    now = 1_000_000;
+    const batch2 = fakeBatch({ ai_brain: { statuses: ["running"] } });
+    const res2 = await runDailyPipeline(
+      { BATCH: batch2 as never, QUANT_DB: tenv.QUANT_DB, MY_TUSHARE_TOKEN: "t" },
+      "w8",
+      { date: "20261017", force: true, only: ["ai_brain"] },
+      step2,
+      { fetcher: openCal, clock }
+    );
+    expect(res2.steps[0].error).toBe("step_timeout_16h");
+    expect(step2.calls).toContain("do:poll ai_brain #1 2");
+    expect(step2.calls).toContain("do:poll ai_brain #1 3"); // elapsed 20h -> cap fires here
+    expect(step2.calls).not.toContain("do:poll ai_brain #1 4");
   });
 
   it("force runs on a non-trading day; a failed step reports its error", async () => {

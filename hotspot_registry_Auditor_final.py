@@ -49,6 +49,8 @@ class RegistryAuditor:
             self.client = OpenAI(
                 api_key=AI_API_KEY or "unused",
                 base_url=base_url,
+                timeout=1800,
+                max_retries=0,
                 default_headers=(
                     {"cf-aig-authorization": f"Bearer {CF_AIG_TOKEN}"} if CF_AIG_TOKEN else {}
                 )
