@@ -1,0 +1,61 @@
+.devin/agent-demo/vitest.config.ts
+  s_02649a17b7b371::t_eea80dedf0da58 42
+.devin/agent-demo/wrangler.agent.jsonc
+  s_02649a17b7b371::t_1ba3f1e0bac8f5 28-35,57-64,77
+.devin/agent-demo/wrangler.mcp.jsonc
+  s_02649a17b7b371::t_7959d019941ed5 30-35,65-70
+.devin/agent-demo/wrangler.quant.jsonc
+  s_02649a17b7b371::t_18f8234848aca3 57-62,104-109
+.devin/agent-demo/wrangler.test.jsonc
+  s_02649a17b7b371::t_694a117c86f1ef 31-35,51
+apps/agent-demo/src/agent/index.ts
+  s_02649a17b7b371::t_368f503411f89c 17-18,23-25,46-47,579,581,612-627,1544-1560,1562,1574-1583,1587-1589,1642-1649,1652-1655,1659,1666-1670,1676-1680,1686,1770-1800,1828-1829,1842-1843,1879-1880
+apps/agent-demo/src/mcp/index.ts
+  s_02649a17b7b371::t_4f94b0123801c5 48,52-58,68-69,73-81,91-92,96-104,112
+apps/agent-demo/src/quant/analysis.ts
+  s_02649a17b7b371::t_ec708c4865b332 3,30,221,223,414,418-423,525,528-534,536,539,542-555,570-600,602-620,623,628-629,633-636,641,644-647,652,655-656,659,667-668,672-675,679,685,689,694,698,701,708-709,713-716,718-721,744,752-753,759,762-765,767-769,775-776,790,805,809-812,821,828-829,844,847-850,856-859,866-867,876,881-896,898
+apps/agent-demo/src/quant/tools.ts
+  s_02649a17b7b371::t_0bb7afdea75401 19,298,301-304,312,322,332-337,339,354,373-378,390,403,411-417,431,446,454-459,469-474,481-486,488,504,529-534,592-596,601,614,621-626,628,642,659-664,673-678,680,693,698-703,712-717,723-728,735,747,753,755-760,799,812,843
+apps/agent-demo/src/shared/access.ts
+  s_02649a17b7b371::t_628ca736e81104 2,86,90,118,124-151
+apps/agent-demo/src/shared/mcp-kit.ts
+  s_02649a17b7b371::t_5bb4231563b0b3 19,27,40-50,54-55,61,293,324,712,715-769,771-774,787
+apps/agent-demo/test/audit.test.ts
+  s_02649a17b7b371::t_9baa448383cd1b 1-547
+apps/agent-demo/migrations/audit/0001_audit.sql
+  s_0faf68534a56fd::t_6c9bcab855a973 1-27
+apps/agent-demo/src/agent/audit-page.ts
+  s_0faf68534a56fd::t_0f80ce0af8fbd3 1-234
+apps/agent-demo/src/agent/audit.ts
+  s_0faf68534a56fd::t_f7faf4dff8a101 1-90
+apps/agent-demo/src/agent/ui.ts
+  s_0faf68534a56fd::t_326d0d8256a3b4 394,1070,1419,1430
+apps/agent-demo/src/quant/index.ts
+  s_0faf68534a56fd::t_89cc100da561f1 36
+apps/agent-demo/src/shared/audit.ts
+  s_0faf68534a56fd::t_d6b49c460c568b 1-153
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2fcb9e05e665903f66382019152a9c02b02f1934",
+  "prompts": {},
+  "sessions": {
+    "s_02649a17b7b371": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "calm-noun",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    },
+    "s_0faf68534a56fd": {
+      "agent_id": {
+        "tool": "devin",
+        "id": "s_0faf68534a56fd",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
