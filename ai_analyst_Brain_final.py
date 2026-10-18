@@ -21,11 +21,12 @@ except ImportError:
     exit(1)
 
 # ================= 配置区 =================
-# AI_ENGINE = "BAILIAN"  # 开关: "OLLAMA" 或 "BAILIAN" 或 "WORKERS_AI"；改回 BAILIAN 用下面这行并注释掉 WORKERS_AI
-AI_ENGINE = "WORKERS_AI"
+AI_ENGINE = "BAILIAN"  # 开关: "OLLAMA" / "BAILIAN" / "WORKERS_AI"；切到 WORKERS_AI 用下面这行并注释掉上面的 BAILIAN
+# AI_ENGINE = "WORKERS_AI"
 OLLAMA_MODEL = "qwen3:14b"
 BAILIAN_MODEL = "qwen3.8-2.4t-a95b"
-WORKERS_AI_MODEL = "@cf/moonshotai/kimi-k2.6"
+# BRAIN_AI_MODEL 可覆盖默认模型；填 "dynamic/abc-brain" 等值则走 AI Gateway 动态路由
+WORKERS_AI_MODEL = os.getenv("BRAIN_AI_MODEL", "@cf/moonshotai/kimi-k2.6")
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY") # 从环境变量读取
 AI_BASE_URL = os.getenv("AI_BASE_URL")  # 容器内走出站处理器（ai.internal）；未设置时直连 AI Gateway
 AI_API_KEY = os.getenv("AI_API_KEY") or os.getenv("CLOUDFLARE_API_TOKEN") or ""
@@ -71,6 +72,8 @@ class AnalystBrain:
             self.client = OpenAI(
                 api_key=DASHSCOPE_API_KEY,
                 base_url=f"https://gateway.ai.cloudflare.com/v1/{CF_ACCOUNT_ID}/ai-gateway/custom-dashscope/compatible-mode/v1",
+                timeout=1800,
+                max_retries=0,
                 default_headers={
                     "cf-aig-authorization": f"Bearer {CF_AIG_TOKEN}",
                     "cf-aig-metadata": json.dumps({"project": "PoC"})  #请求metadata中插入标签用于ai gateway中过虑分析

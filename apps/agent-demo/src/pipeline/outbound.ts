@@ -2,7 +2,6 @@
 // the allowlist is resolved by script name. Everything else -> 403 + audit log
 // of kind + sha256 (never SQL text or bodies).
 import {
-  AI_CHAT_MODEL,
   AI_OUTBOUND_HOST,
   TS_CODE_PATTERN,
   aiChatOutboundHandler,
@@ -191,7 +190,7 @@ export async function batchOutboundHandler(
   }
 }
 
-export { AI_OUTBOUND_HOST, AI_CHAT_MODEL };
+export { AI_OUTBOUND_HOST };
 
 const AI_SCRIPTS = new Set(["ai_brain", "registry_auditor"]);
 

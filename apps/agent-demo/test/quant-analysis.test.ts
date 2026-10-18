@@ -663,6 +663,40 @@ describe("analysis tools", () => {
     expect((await stub.status()).status).toBe("succeeded");
   });
 
+  it("cleanup wipes a terminal job's storage; a re-run disarms it", async () => {
+    stubTransport();
+    // Terminal -> armed -> runCleanup deletes all storage.
+    const doneId = `000776.SZ:${today()}`;
+    const doneStub = stubFor(doneId);
+    await doneStub.startJob({ ts_code: "000776.SZ", date: today(), requested_by: "a" });
+    statusBody = { state: "succeeded", phase: "done", result: { status: "success" } };
+    await doneStub.status();
+    await runInDurableObject(doneStub, async (instance) => {
+      await (instance as unknown as { runCleanup(): Promise<void> }).runCleanup();
+    });
+    await runInDurableObject(doneStub, async (_i, ctx) => {
+      expect(await ctx.storage.get("job")).toBeFalsy();
+      expect(await ctx.storage.get("cleanup_scheduled")).toBeFalsy();
+    });
+
+    // Failed -> armed; a re-run removes the token so the scheduled cleanup is
+    // a no-op for the live job.
+    const retryId = `000777.SZ:${today()}`;
+    const retryStub = stubFor(retryId);
+    await retryStub.startJob({ ts_code: "000777.SZ", date: today(), requested_by: "a" });
+    statusBody = { state: "failed", error: "boom" };
+    await retryStub.status();
+    statusBody = { state: "running", phase: "chip" };
+    await retryStub.startJob({ ts_code: "000777.SZ", date: today(), requested_by: "a" });
+    await runInDurableObject(retryStub, async (instance) => {
+      await (instance as unknown as { runCleanup(): Promise<void> }).runCleanup();
+    });
+    await runInDurableObject(retryStub, async (_i, ctx) => {
+      const job = (await ctx.storage.get("job")) as { status: string } | null;
+      expect(job?.status).toBe("running");
+    });
+  });
+
   it("persists the phase timeline and returns labels, Beijing times and totals", async () => {
     stubTransport();
     const jobId = `600000.SH:${today()}`;
@@ -761,7 +795,7 @@ describe("analysis tools", () => {
       "引擎初始化",
       "数据与筹码计算",
       "知识库挖掘（研报/公告/调研）",
-      "AI 诊断（Kimi）",
+      "AI 诊断",
       "完成"
     ]);
     expect(done.payload.total_s).toBe(30);

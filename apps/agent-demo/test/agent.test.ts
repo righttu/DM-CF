@@ -1976,7 +1976,7 @@ describe("analysis status endpoint + run_analysis job card", () => {
     phase: "ai",
     timeline: [
       { label: "引擎初始化", started_at_bj: "18:31:02", duration_s: 1.2, secret: "drop" },
-      { label: "AI 诊断（Kimi）", started_at_bj: "18:31:03", duration_s: 4.5 }
+      { label: "AI 诊断", started_at_bj: "18:31:03", duration_s: 4.5 }
     ],
     total_s: 5.7,
     result_summary: { final_score: 88, target_price: 12.3, extra: "drop" },
@@ -2037,7 +2037,7 @@ describe("analysis status endpoint + run_analysis job card", () => {
     expect(data.data.result_summary).toEqual({ final_score: 88, target_price: 12.3 });
     expect(data.data.timeline).toEqual([
       { label: "引擎初始化", started_at_bj: "18:31:02", duration_s: 1.2 },
-      { label: "AI 诊断（Kimi）", started_at_bj: "18:31:03", duration_s: 4.5 }
+      { label: "AI 诊断", started_at_bj: "18:31:03", duration_s: 4.5 }
     ]);
     expect(Object.keys(data.data).sort()).toEqual(
       ["error", "job_id", "phase", "result_summary", "status", "timeline", "total_s"].sort()

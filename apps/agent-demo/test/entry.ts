@@ -27,7 +27,13 @@ class TestQuantAnalysisContainer extends DurableObject<QuantEnv & AnalysisEnv> {
         stop: () => Promise.resolve()
       },
     () => this.ctx.id.name ?? "",
-    (seconds) => this.ctx.storage.setAlarm(Date.now() + seconds * 1000)
+    (seconds) => this.ctx.storage.setAlarm(Date.now() + seconds * 1000),
+    {
+      // No library schedule() in the local pool: record the armed token and let
+      // tests trigger the same runCleanup path via runCleanup().
+      schedule: (token) => this.ctx.storage.put("cleanup_scheduled", token),
+      wipe: () => this.ctx.storage.deleteAll().then(() => this.ctx.storage.deleteAlarm())
+    }
   );
 
   jobContext(): Promise<{ ts_code: string; date: string } | null> {
@@ -44,6 +50,11 @@ class TestQuantAnalysisContainer extends DurableObject<QuantEnv & AnalysisEnv> {
 
   alarm(): Promise<void> {
     return this.runner.onTimeout();
+  }
+
+  async runCleanup(): Promise<void> {
+    const token = await this.ctx.storage.get("cleanup_scheduled");
+    await this.runner.runCleanup({ token });
   }
 }
 
@@ -66,7 +77,11 @@ class TestQuantBatchContainer extends DurableObject<PipelineEnv> {
         request: () => Promise.reject(new Error("no_transport_stub")),
         stop: () => Promise.resolve()
       },
-    () => this.ctx.id.name ?? ""
+    () => this.ctx.id.name ?? "",
+    {
+      schedule: (token) => this.ctx.storage.put("cleanup_scheduled", token),
+      wipe: () => this.ctx.storage.deleteAll().then(() => this.ctx.storage.deleteAlarm())
+    }
   );
 
   jobContext(): Promise<{ script: string; run_date: string } | null> {
@@ -83,6 +98,11 @@ class TestQuantBatchContainer extends DurableObject<PipelineEnv> {
 
   stopJob(): Promise<void> {
     return this.runner.stop();
+  }
+
+  async runCleanup(): Promise<void> {
+    const token = await this.ctx.storage.get("cleanup_scheduled");
+    await this.runner.runCleanup({ token });
   }
 }
 

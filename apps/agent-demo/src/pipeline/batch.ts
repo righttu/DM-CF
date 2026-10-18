@@ -51,14 +51,41 @@ export function batchTransport(): BatchTransport | undefined {
 }
 
 const CONTAINER_HOST = "http://container";
+// A terminal job's DO storage is wiped 30 days later; a re-run disarms it.
+export const CLEANUP_AFTER_SECONDS = 30 * 24 * 60 * 60;
+const CLEANUP_TOKEN_KEY = "cleanup_token";
+const TERMINAL_STATUSES = new Set<BatchJobStatus>(["succeeded", "failed"]);
+
+export interface CleanupHooks {
+  schedule(token: string): Promise<void> | void;
+  wipe(): Promise<void>;
+}
 
 export class BatchJobRunner {
   constructor(
     private readonly storage: DurableObjectStorage,
     private readonly env: PipelineEnv,
     private readonly transport: () => BatchTransport,
-    private readonly jobId: () => string
+    private readonly jobId: () => string,
+    private readonly cleanup: CleanupHooks
   ) {}
+
+  private async armCleanup(): Promise<void> {
+    const token = crypto.randomUUID();
+    await this.storage.put(CLEANUP_TOKEN_KEY, token);
+    await this.cleanup.schedule(token);
+  }
+
+  async runCleanup(payload: unknown): Promise<void> {
+    const token =
+      payload && typeof payload === "object"
+        ? (payload as Record<string, unknown>).token
+        : payload;
+    if (!token || token !== (await this.storage.get(CLEANUP_TOKEN_KEY))) return;
+    const job = await this.loadJob();
+    if (!job || !TERMINAL_STATUSES.has(job.status)) return;
+    await this.cleanup.wipe();
+  }
 
   private containerEnvVars(): Record<string, string> {
     const env = this.env;
@@ -99,6 +126,8 @@ export class BatchJobRunner {
     ) {
       return existing;
     }
+    // A re-run must disarm any cleanup scheduled by the previous terminal job.
+    await this.storage.delete(CLEANUP_TOKEN_KEY);
     const job: BatchJob = {
       script: input.script,
       run_date: input.run_date,
@@ -125,6 +154,7 @@ export class BatchJobRunner {
         `container_start: ${error instanceof Error ? error.message : String(error)}`.slice(0, 300)
       ];
       await this.saveJob(job);
+      await this.armCleanup();
       throw error;
     }
     return job;
@@ -183,6 +213,7 @@ export class BatchJobRunner {
         );
       }
       await this.saveJob(job);
+      await this.armCleanup();
     }
   }
 
@@ -205,7 +236,13 @@ export class QuantBatchContainer extends Container<PipelineEnv> {
     this.ctx.storage,
     this.env,
     () => transportOverride ?? this.defaultTransport(),
-    () => this.ctx.id.name ?? ""
+    () => this.ctx.id.name ?? "",
+    {
+      schedule: (token) =>
+        this.schedule(CLEANUP_AFTER_SECONDS, "onJobCleanup", { token }).then(() => undefined),
+      wipe: () =>
+        this.ctx.storage.deleteAll().then(() => this.ctx.storage.deleteAlarm())
+    }
   );
 
   private defaultTransport(): BatchTransport {
@@ -239,6 +276,10 @@ export class QuantBatchContainer extends Container<PipelineEnv> {
 
   stopJob(): Promise<void> {
     return this.runner.stop();
+  }
+
+  async onJobCleanup(payload: unknown): Promise<void> {
+    await this.runner.runCleanup(payload);
   }
 }
 

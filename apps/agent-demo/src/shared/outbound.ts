@@ -98,7 +98,10 @@ export async function readJsonBody(
 // ---------- ai.internal: containers reach Workers AI only through here ----------
 
 export const AI_OUTBOUND_HOST = "ai.internal";
-export const AI_CHAT_MODEL = "@cf/moonshotai/kimi-k2.6";
+// Accepts Workers AI models (@cf/...), AI Gateway dynamic routes (dynamic/...)
+// and provider-style names (vendor/model); anything else -> 403.
+export const AI_MODEL_PATTERN =
+  /^(@cf\/[A-Za-z0-9._\-/]+|dynamic\/[A-Za-z0-9._\-]+|[A-Za-z0-9._\-]+\/[A-Za-z0-9._\-/]+)$/;
 const AI_CHAT_PATH = "/v1/chat/completions";
 const AI_FORWARD_FIELDS = [
   "messages",
@@ -124,7 +127,7 @@ export interface AiJobMeta {
   ts_code?: string;
 }
 
-function normalizeAiResult(result: unknown): Record<string, unknown> {
+function normalizeAiResult(result: unknown, model: string): Record<string, unknown> {
   const r = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
   if (Array.isArray(r.choices)) return r;
   // Workers AI text-generation shape: {response: string | {content, reasoning_content}, usage}
@@ -144,14 +147,14 @@ function normalizeAiResult(result: unknown): Record<string, unknown> {
     id: "chatcmpl-workers-ai",
     object: "chat.completion",
     created: Math.floor(Date.now() / 1000),
-    model: AI_CHAT_MODEL,
+    model,
     choices: [{ index: 0, message, finish_reason: "stop" }]
   };
   if (r.usage && typeof r.usage === "object") out.usage = r.usage;
   return out;
 }
 
-// Shared POST /v1/chat/completions handler: fixed model, whitelisted fields,
+// Shared POST /v1/chat/completions handler: validated model, whitelisted fields,
 // AI Gateway metadata carries only job identifiers -- never message content.
 export async function aiChatOutboundHandler(
   request: Request,
@@ -167,7 +170,10 @@ export async function aiChatOutboundHandler(
   if (length > DEFAULT_MAX_BODY) return outboundDeny(event, "ai_size", hash);
   const body = await readJsonBody(request, DEFAULT_MAX_BODY);
   if (!body) return outboundDeny(event, "ai_body", hash);
-  if (body.model !== AI_CHAT_MODEL) return outboundDeny(event, "ai_model", hash);
+  const model = body.model;
+  if (typeof model !== "string" || model.length > 128 || !AI_MODEL_PATTERN.test(model)) {
+    return outboundDeny(event, "ai_model", hash);
+  }
   if (!Array.isArray(body.messages) || body.messages.length === 0) {
     return outboundDeny(event, "ai_messages", hash);
   }
@@ -181,13 +187,13 @@ export async function aiChatOutboundHandler(
   if (meta.run_date) metadata.run_date = meta.run_date;
   if (meta.ts_code) metadata.ts_code = meta.ts_code;
   console.info(
-    JSON.stringify({ event, action: "ai_chat", model: AI_CHAT_MODEL, prompt_bytes: length })
+    JSON.stringify({ event, action: "ai_chat", model, prompt_bytes: length })
   );
   try {
-    const result = await ai.run(AI_CHAT_MODEL, input, {
+    const result = await ai.run(model, input, {
       gateway: { id: "ai-gateway", metadata }
     });
-    return Response.json(normalizeAiResult(result));
+    return Response.json(normalizeAiResult(result, model));
   } catch (error) {
     return Response.json(
       { error: { message: `ai_error: ${error instanceof Error ? error.message : String(error)}`.slice(0, 200), type: "server_error" } },

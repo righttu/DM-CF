@@ -5,11 +5,12 @@ import requests
 from openai import OpenAI
 
 # --- 配置提取 ---
-# AI_ENGINE = "BAILIAN"  # 开关: "OLLAMA" 或 "BAILIAN" 或 "WORKERS_AI"；改回 BAILIAN 用下面这行并注释掉 WORKERS_AI
-AI_ENGINE = "WORKERS_AI"
+AI_ENGINE = "BAILIAN"  # 开关: "OLLAMA" / "BAILIAN" / "WORKERS_AI"；切到 WORKERS_AI 用下面这行并注释掉上面的 BAILIAN
+# AI_ENGINE = "WORKERS_AI"
 OLLAMA_MODEL = "qwen3:14b"
 BAILIAN_MODEL = "qwen3.5-flash"
-WORKERS_AI_MODEL = "@cf/moonshotai/kimi-k2.6"
+# AUDITOR_AI_MODEL 可覆盖默认模型；填 "dynamic/abc-auditor" 等值则走 AI Gateway 动态路由
+WORKERS_AI_MODEL = os.getenv("AUDITOR_AI_MODEL", "@cf/moonshotai/kimi-k2.6")
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
 CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID")
 CF_AIG_TOKEN = os.getenv("CF_AIG_TOKEN")
@@ -61,7 +62,9 @@ class RegistryAuditor:
                 print("❌ 未设置环境变量 DASHSCOPE_API_KEY"); exit(1)
             self.client = OpenAI(
                 api_key=DASHSCOPE_API_KEY,
-                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                timeout=1800,
+                max_retries=0
             )
             self.active_model = BAILIAN_MODEL
         else:

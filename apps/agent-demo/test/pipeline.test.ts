@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import schemaSql from "./fixtures/quant-schema.sql?raw";
 import { aiOutboundHandler, batchOutboundHandler } from "../src/pipeline/outbound.js";
 import {
@@ -636,10 +636,13 @@ describe("ai.internal outbound handler", () => {
     messages: [{ role: "user", content: "hi" }]
   };
 
-  it("denies: wrong model, non-chat path, GET, oversize, non-brain script", async () => {
+  it("denies: malformed model, non-chat path, GET, oversize, non-brain script", async () => {
     const { jobId, ctx } = await seedJob("j-ai", "ai_brain");
     const env2 = aiEnv();
-    await aiDenied(chat({ ...goodBody, model: "@cf/other/x" }), jobId);
+    await aiDenied(chat({ ...goodBody, model: "model with spaces" }), jobId);
+    await aiDenied(chat({ ...goodBody, model: "noslash" }), jobId);
+    await aiDenied(chat({ ...goodBody, model: "x".repeat(200) }), jobId);
+    await aiDenied(chat({ ...goodBody, model: 42 }), jobId);
     await aiDenied(post("/v1/embeddings", goodBody), jobId);
     await aiDenied(post("/v1/chat/completions/extra", goodBody), jobId);
     const get = await aiOutboundHandler(
@@ -695,11 +698,28 @@ describe("ai.internal outbound handler", () => {
     expect(meta.script).toBe("ai_brain");
     expect(meta.run_date).toBe(RUN_DATE);
 
+    // Any well-formed model passes through (Workers AI, dynamic route,
+    // provider-style names).
+    const rAlt = await aiOutboundHandler(
+      chat({ ...goodBody, model: "dynamic/abc-brain" }),
+      env2,
+      brain.ctx
+    );
+    expect(rAlt.status).toBe(200);
+    expect(fakeAi.calls.at(-1)?.model).toBe("dynamic/abc-brain");
+    const rProv = await aiOutboundHandler(
+      chat({ ...goodBody, model: "dashscope/qwen3.5" }),
+      env2,
+      brain.ctx
+    );
+    expect(rProv.status).toBe(200);
+    expect(fakeAi.calls.at(-1)?.model).toBe("dashscope/qwen3.5");
+
     // Auditor job allowed too.
     const aud = await seedJob("j-ai-a1", "registry_auditor");
     const r2 = await aiOutboundHandler(chat(goodBody), env2, aud.ctx);
     expect(r2.status).toBe(200);
-    expect((fakeAi.calls[1].options as never as { gateway: { metadata: { script: string } } })
+    expect((fakeAi.calls.at(-1)?.options as never as { gateway: { metadata: { script: string } } })
       .gateway.metadata.script).toBe("registry_auditor");
 
     // OpenAI-shaped binding result is passed through (reasoning preserved).
@@ -729,6 +749,49 @@ describe("ai.internal outbound handler", () => {
     };
     expect(b4.choices[0].message.content).toBe("wrapped");
     expect(b4.choices[0].message.reasoning_content).toBe("r");
+  });
+});
+
+describe("batch DO cleanup", () => {
+  it("wipes storage for a terminal job; no-op while running or after a re-run", async () => {
+    // A running job has no armed token: cleanup is a no-op.
+    const running = await seedJob("j-clean-run", "chip_hunter");
+    const runStub = batchStub(running.jobId);
+    await runInDurableObject(runStub, async (instance) => {
+      await (instance as unknown as { runCleanup(): Promise<void> }).runCleanup();
+    });
+    await runInDurableObject(runStub, async (_i, ctx) => {
+      expect(await ctx.storage.get("job")).toBeTruthy();
+    });
+
+    // Terminal -> cleanup armed -> wipe removes all storage.
+    const done = await seedJob("j-clean-done", "chip_hunter");
+    const doneStub = batchStub(done.jobId);
+    statusBody = { state: "finished", exit_code: 0 };
+    expect((await doneStub.status()).status).toBe("succeeded");
+    await runInDurableObject(doneStub, async (instance) => {
+      await (instance as unknown as { runCleanup(): Promise<void> }).runCleanup();
+    });
+    await runInDurableObject(doneStub, async (_i, ctx) => {
+      expect(await ctx.storage.get("job")).toBeFalsy();
+      expect(await ctx.storage.get("cleanup_scheduled")).toBeFalsy();
+    });
+
+    // Terminal -> armed, but a re-run disarms: cleanup must not touch the
+    // live job.
+    const retried = await seedJob("j-clean-retry", "chip_hunter");
+    const retryStub = batchStub(retried.jobId);
+    statusBody = { state: "finished", exit_code: 1, error_tail: ["boom"] };
+    expect((await retryStub.status()).status).toBe("failed");
+    statusBody = { state: "running" };
+    await retryStub.startJob({ script: "chip_hunter", run_date: RUN_DATE });
+    await runInDurableObject(retryStub, async (instance) => {
+      await (instance as unknown as { runCleanup(): Promise<void> }).runCleanup();
+    });
+    await runInDurableObject(retryStub, async (_i, ctx) => {
+      const job = (await ctx.storage.get("job")) as { status: string } | null;
+      expect(job?.status).toBe("running");
+    });
   });
 });
 

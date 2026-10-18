@@ -65,7 +65,7 @@ export const ANALYSIS_PHASE_LABELS: Record<string, string> = {
   start: "引擎初始化",
   chip: "数据与筹码计算",
   knowledge: "知识库挖掘（研报/公告/调研）",
-  ai: "AI 诊断（Kimi）",
+  ai: "AI 诊断",
   done: "完成"
 };
 
@@ -110,7 +110,16 @@ export interface AnalysisJobView extends AnalysisJob {
 
 const JOB_TIMEOUT_MS = 20 * 60 * 1000;
 const JOB_TIMEOUT_SECONDS = JOB_TIMEOUT_MS / 1000;
+// A terminal job's DO storage is wiped 30 days later; a re-run disarms it.
+export const CLEANUP_AFTER_SECONDS = 30 * 24 * 60 * 60;
+const CLEANUP_TOKEN_KEY = "cleanup_token";
+const TERMINAL_STATUSES = new Set<AnalysisJobStatus>(["succeeded", "failed", "timeout"]);
 const CONTAINER_HOST = "http://container";
+
+export interface CleanupHooks {
+  schedule(token: string): Promise<void> | void;
+  wipe(): Promise<void>;
+}
 
 export function shanghaiCompactDate(now = new Date()): string {
   return new Intl.DateTimeFormat("en-CA", {
@@ -148,8 +157,26 @@ export class AnalysisJobRunner {
     private readonly env: AnalysisEnv,
     private readonly transport: () => AnalysisTransport,
     private readonly jobId: () => string,
-    private readonly scheduleTimeout: (seconds: number) => void | Promise<void>
+    private readonly scheduleTimeout: (seconds: number) => void | Promise<void>,
+    private readonly cleanup: CleanupHooks
   ) {}
+
+  private async armCleanup(): Promise<void> {
+    const token = crypto.randomUUID();
+    await this.storage.put(CLEANUP_TOKEN_KEY, token);
+    await this.cleanup.schedule(token);
+  }
+
+  async runCleanup(payload: unknown): Promise<void> {
+    const token =
+      payload && typeof payload === "object"
+        ? (payload as Record<string, unknown>).token
+        : payload;
+    if (!token || token !== (await this.storage.get(CLEANUP_TOKEN_KEY))) return;
+    const job = await this.loadJob();
+    if (!job || !TERMINAL_STATUSES.has(job.status)) return;
+    await this.cleanup.wipe();
+  }
 
   private containerEnvVars(): Record<string, string> {
     const env = this.env;
@@ -194,6 +221,8 @@ export class AnalysisJobRunner {
     ) {
       return existing;
     }
+    // A re-run must disarm any cleanup scheduled by the previous terminal job.
+    await this.storage.delete(CLEANUP_TOKEN_KEY);
     const job: AnalysisJob = {
       ts_code: input.ts_code,
       date: input.date,
@@ -226,6 +255,7 @@ export class AnalysisJobRunner {
         300
       );
       await this.saveJob(job);
+      await this.armCleanup();
       throw error;
     }
     return job;
@@ -309,6 +339,9 @@ export class AnalysisJobRunner {
       );
     }
     await this.saveJob(job);
+    if (job.status === "succeeded" || job.status === "failed") {
+      await this.armCleanup();
+    }
   }
 
   async onTimeout(): Promise<void> {
@@ -321,6 +354,7 @@ export class AnalysisJobRunner {
     job.finished_at = new Date().toISOString();
     job.error = "analysis_timeout";
     await this.saveJob(job);
+    await this.armCleanup();
     console.error(
       JSON.stringify({ event: "quant_analysis_timeout", job_id: this.jobId() })
     );
@@ -341,7 +375,13 @@ export class QuantAnalysisContainer extends Container<AnalysisEnv> {
     this.env,
     () => transportOverride ?? this.defaultTransport(),
     () => this.ctx.id.name ?? "",
-    (seconds) => this.schedule(seconds, "onJobTimeout").then(() => undefined)
+    (seconds) => this.schedule(seconds, "onJobTimeout").then(() => undefined),
+    {
+      schedule: (token) =>
+        this.schedule(CLEANUP_AFTER_SECONDS, "onJobCleanup", { token }).then(() => undefined),
+      wipe: () =>
+        this.ctx.storage.deleteAll().then(() => this.ctx.storage.deleteAlarm())
+    }
   );
 
   private defaultTransport(): AnalysisTransport {
@@ -371,6 +411,10 @@ export class QuantAnalysisContainer extends Container<AnalysisEnv> {
   async onJobTimeout(): Promise<void> {
     await this.runner.onTimeout();
   }
+
+  async onJobCleanup(payload: unknown): Promise<void> {
+    await this.runner.runCleanup(payload);
+  }
 }
 
 QuantAnalysisContainer.outboundByHost = {
@@ -378,8 +422,8 @@ QuantAnalysisContainer.outboundByHost = {
   [AI_OUTBOUND_HOST]: analysisAiOutboundHandler
 };
 
-// ai.internal handler: any job on this container may call Workers AI (fixed
-// model + whitelisted fields inside the shared handler).
+// ai.internal handler: any job on this container may call Workers AI
+// (validated model + whitelisted fields inside the shared handler).
 export async function analysisAiOutboundHandler(
   request: Request,
   env: OutboundEnv & { AI?: AiRunLike },
