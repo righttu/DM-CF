@@ -1,0 +1,21 @@
+.devin/agent-demo/wrangler.pipeline.jsonc
+  s_02649a17b7b371::t_100ec26c4d7370 14
+AGENTS.md
+  s_02649a17b7b371::t_38a0d00a47ccff 228-231
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "afa0643c2cdb9ba40b7460097a23a63ef49f322a",
+  "prompts": {},
+  "sessions": {
+    "s_02649a17b7b371": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "calm-noun",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
