@@ -229,3 +229,15 @@ Agent tracing documents three identity fields: agent name (`functionId`, shared:
 ## Cron weekday numbering (2026-10-18)
 
 - Cloudflare cron weekdays are 1 = Sunday … 7 = Saturday, so the old `30 10 * * 1-5` meant Sunday–Thursday and would have skipped Friday. On Sunday 2026-10-18 it fired at 18:30 Beijing time; `trade_day` returned `open:false` and every step was skipped (instance `daily-20261018`, 6 s). The schedule is now `30 10 * * MON-FRI`, in `wrangler.pipeline.jsonc` and live through `PUT /workers/scripts/abc-quant-pipeline/schedules`. Always use three-letter weekday names.
+
+## Audit trail (2026-10-18, commit `2fcb9e0`)
+
+- Deployed Agent `6501c80b`, Research MCP `7fe4d829`, Quant MCP-S `a666a426`. These services write to a separate D1 database `abc-audit` (`9eac7020-e816-4095-947d-4829df2b6e88`, binding `AUDIT_DB`, table `audit_events`, migration `migrations/audit/0001_audit.sql` applied remotely):
+  - the Agent DO writes question, tool_call, reply and dlp_block events;
+  - both MCP servers write tool_call and data_access events (SQL, tables, row count, deny reason) through `mcp-kit`;
+  - the Quant diagnosis Outbound Handler writes data_access events keyed by `job_id`.
+- Writes go through `waitUntil` and never fail the user path. DLP-blocked content is never stored.
+- The admin view `/audit` and `/api/audit` are gated only by the secret `AUDIT_ADMIN_EMAILS` (set to the admin's email; never commit it). Non-admins get 404.
+- The ABC Agent Access app (`4ddbea30-…`) got a separate allow policy `audit-admin` for the admin email.
+- Not yet verified live: whether the Portal forwards MCP `_meta` request IDs to MCP-S. The page falls back to matching on user + tool within ±15 s.
+- No retention purge yet. The batch pipeline is not audited (system activity).
