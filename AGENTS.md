@@ -225,3 +225,7 @@ Agent tracing documents three identity fields: agent name (`functionId`, shared:
 - `container/*/app` are untracked staging copies created by `scripts/prepare-*.sh` from the repo root; edit the root Python files only.
 - MCP Portal `research-portal` has Code Mode policy `off` and the Agent URL has no `optimize_context`, so the model sees all tool definitions (normal mode).
 - Not yet exercised end to end after this deploy: a container Brain run through `ai.internal` → HTTPS → `abc-brain` (needs a deep diagnosis or Monday's batch), and an Auditor run (no pending registry rows on 2026-10-18).
+
+## Cron weekday numbering (2026-10-18)
+
+- Cloudflare cron weekdays are 1 = Sunday … 7 = Saturday, so the old `30 10 * * 1-5` meant Sunday–Thursday and would have skipped Friday. On Sunday 2026-10-18 it fired at 18:30 Beijing time; `trade_day` returned `open:false` and every step was skipped (instance `daily-20261018`, 6 s). The schedule is now `30 10 * * MON-FRI`, in `wrangler.pipeline.jsonc` and live through `PUT /workers/scripts/abc-quant-pipeline/schedules`. Always use three-letter weekday names.

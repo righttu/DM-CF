@@ -11,7 +11,7 @@
     "traces": { "enabled": true }
   },
   "triggers": {
-    "crons": ["30 10 * * 1-5"]
+    "crons": ["30 10 * * MON-FRI"]
   },
   "ai": { "binding": "AI" },
   "durable_objects": {
