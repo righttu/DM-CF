@@ -39,7 +39,7 @@ export default defineConfig({
             modules: true,
             compatibilityDate: "2026-08-22",
             compatibilityFlags: ["nodejs_compat"],
-            d1Databases: { DEMO_DB: "demo-agent-db-test" },
+            d1Databases: { DEMO_DB: "demo-agent-db-test", AUDIT_DB: "audit-db-test" },
             kvNamespaces: {
               OAUTH_KV: "test-oauth-kv",
               CONSENT_KV: "test-consent-kv"

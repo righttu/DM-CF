@@ -16,6 +16,7 @@ import {
   type DemoRole
 } from "./access.js";
 import { readBoundedText } from "./body.js";
+import { recordAudit, sanitizeArgs, truncateSql, type AuditEvent } from "./audit.js";
 
 export interface McpKitEnv extends AccessEnv {
   OAUTH_KV: KVNamespace;
@@ -23,6 +24,7 @@ export interface McpKitEnv extends AccessEnv {
   MCP_AUTHORIZE_ACCESS_AUD?: string;
   PUBLIC_MCP_ORIGIN?: string;
   ALLOWED_ORIGINS?: string;
+  AUDIT_DB?: D1Database;
 }
 
 export interface McpPrincipal {
@@ -35,15 +37,28 @@ export type ToolTextResult = {
   content: { type: "text"; text: string }[];
 };
 
+export type ToolAccessAudit = {
+  access(ev: {
+    tables: string[];
+    sql?: string;
+    rowCount?: number;
+    status: string;
+    reason?: string;
+  }): void;
+  job(id: string): void;
+};
+
 export type ToolCall = (
   toolName: string,
   ctx: unknown,
-  run: () => Promise<ToolTextResult>
+  run: (audit: ToolAccessAudit) => Promise<ToolTextResult>,
+  details?: { args?: unknown }
 ) => Promise<ToolTextResult & { _meta?: Record<string, unknown> }>;
 
 export interface McpKitConfig<E extends McpKitEnv> {
   serverName: string;
   serverVersion: string;
+  auditServer: "research" | "abc-quant";
   consent: { title: string; resourceDescription: string };
   allowedRoles: readonly DemoRole[];
   registerTools(
@@ -275,6 +290,7 @@ export class ConsentTransaction extends DurableObject<McpKitEnv> {
         providerOptions(env, {
           serverName: resourceName,
           serverVersion: "",
+          auditServer: "research",
           consent: { title: "", resourceDescription: "" },
           allowedRoles: [],
           registerTools() {}
@@ -305,6 +321,7 @@ export class ConsentTransaction extends DurableObject<McpKitEnv> {
                 ({ redirectTo } = await oauthApi(env, {
           serverName: resourceName,
           serverVersion: "",
+          auditServer: "research",
           consent: { title: "", resourceDescription: "" },
           allowedRoles: [],
           registerTools() {}
@@ -692,12 +709,69 @@ async function handleMcpApi<E extends McpKitEnv>(
     } catch {
     }
   }
-  const call: ToolCall = async (toolName, callCtx, run) => {
+  const call: ToolCall = async (toolName, callCtx, run, details) => {
     const meta = (callCtx as { mcpReq?: { _meta?: unknown } } | undefined)?.mcpReq?._meta;
     const ids = auditIds(meta);
+    const accesses: AuditEvent[] = [];
+    let jobId: string | null = null;
+    const audit: ToolAccessAudit = {
+      access: (e) =>
+        accesses.push({
+          source: config.auditServer === "research" ? "mcp-research" : "mcp-quant",
+          event: "data_access",
+          user_email: email || null,
+          actor_id: principal.actorId,
+          role: principal.role,
+          conversation_id:
+            ids.correlationSource === "client_meta" ? ids.conversationId : null,
+          request_id: ids.correlationSource === "client_meta" ? ids.requestId : null,
+          server: config.auditServer,
+          tool: toolName,
+          tables: e.tables.join(","),
+          sql_text: e.sql ? truncateSql(e.sql) : null,
+          row_count: e.rowCount ?? null,
+          status: e.status,
+          reason: e.reason ?? null
+        }),
+      job: (id) => {
+        jobId = id;
+      }
+    };
+    const started = Date.now();
+    const toolRow = (status: string, reason?: string | null): AuditEvent => ({
+      source: config.auditServer === "research" ? "mcp-research" : "mcp-quant",
+      event: "tool_call",
+      user_email: email || null,
+      actor_id: principal.actorId,
+      role: principal.role,
+      conversation_id:
+        ids.correlationSource === "client_meta" ? ids.conversationId : null,
+      request_id: ids.correlationSource === "client_meta" ? ids.requestId : null,
+      server: config.auditServer,
+      tool: toolName,
+      args_json: sanitizeArgs(details?.args),
+      status,
+      reason: reason ?? null,
+      duration_ms: Date.now() - started,
+      job_id: jobId
+    });
+    const flush = (rows: AuditEvent[]) => {
+      ctx.waitUntil(recordAudit(env.AUDIT_DB, rows));
+    };
+    const errorReason = (result: ToolTextResult): string | null => {
+      try {
+        const body = JSON.parse(result.content[0]?.text ?? "{}") as Record<string, unknown>;
+        const r = body.reason ?? body.error;
+        return typeof r === "string" ? r.slice(0, 200) : null;
+      } catch {
+        return null;
+      }
+    };
     try {
-      const result = await run();
-      mcpToolAudit(principal, toolName, result.isError ? "denied" : "ok", ids);
+      const result = await run(audit);
+      const status = result.isError ? "denied" : "ok";
+      flush([toolRow(status, status === "denied" ? errorReason(result) : null), ...accesses]);
+      mcpToolAudit(principal, toolName, status, ids);
       return {
         ...result,
         _meta: {
@@ -710,6 +784,7 @@ async function handleMcpApi<E extends McpKitEnv>(
         }
       };
     } catch (error) {
+      flush([toolRow("error"), ...accesses]);
       mcpToolAudit(principal, toolName, "error", ids);
       throw error;
     }

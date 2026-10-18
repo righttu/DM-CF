@@ -27,6 +27,12 @@
       "database_name": "demo-agent-db",
       "database_id": "52a8d901-e4fe-4234-8d0c-e28179a56b8e",
       "migrations_dir": "../../apps/agent-demo/migrations"
+    },
+    {
+      "binding": "AUDIT_DB",
+      "database_name": "abc-audit",
+        "database_id": "9eac7020-e816-4095-947d-4829df2b6e88",
+      "migrations_dir": "../../apps/agent-demo/migrations/audit"
     }
   ],
   "kv_namespaces": [
@@ -56,6 +62,12 @@
           "database_name": "demo-agent-db-local",
           "database_id": "local-demo-agent-db",
           "migrations_dir": "../../apps/agent-demo/migrations"
+        },
+        {
+          "binding": "AUDIT_DB",
+          "database_name": "audit-db-local",
+          "database_id": "local-audit-db",
+          "migrations_dir": "../../apps/agent-demo/migrations/audit"
         }
       ],
       "kv_namespaces": [

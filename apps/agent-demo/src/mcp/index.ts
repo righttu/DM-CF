@@ -45,11 +45,17 @@ function registerResearchTools(
       inputSchema: z.object({})
     },
     async (_args, callCtx) =>
-      call("list_demo_companies", callCtx, async () => {
+      call("list_demo_companies", callCtx, async (audit) => {
         if (!resolveRole(env, email)) {
           return { isError: true, ...text({ error: "permission_denied" }) };
         }
-        return text(await listDemoCompanies(db));
+        const r = await listDemoCompanies(db);
+        audit.access({
+          tables: ["demo_reports"],
+          rowCount: Array.isArray(r.companies) ? r.companies.length : 0,
+          status: "ok"
+        });
+        return text(r);
       })
   );
 
@@ -59,13 +65,20 @@ function registerResearchTools(
       description: TOOL_DESCRIPTIONS.get_latest_analysis,
       inputSchema: z.object({ company_id: z.enum(COMPANY_IDS) })
     },
-    async ({ company_id }, callCtx) =>
-      call("get_latest_analysis", callCtx, async () => {
+    async (args, callCtx) =>
+      call("get_latest_analysis", callCtx, async (audit) => {
         if (!resolveRole(env, email)) {
           return { isError: true, ...text({ error: "permission_denied" }) };
         }
-        return text(await getLatestAnalysis(db, company_id));
-      })
+        const r = await getLatestAnalysis(db, args.company_id);
+        audit.access({
+          tables: ["demo_reports"],
+          rowCount: r.report ? 1 : 0,
+          status: r.error ? "error" : "ok",
+          reason: typeof r.error === "string" ? r.error : undefined
+        });
+        return text(r);
+      }, { args })
   );
 
   if (resolveRole(env, email) === "analyst") {
@@ -75,13 +88,20 @@ function registerResearchTools(
         description: TOOL_DESCRIPTIONS.read_research_document,
         inputSchema: z.object({ document_id: z.enum(DOCUMENT_IDS) })
       },
-      async ({ document_id }, callCtx) =>
-        call("read_research_document", callCtx, async () => {
+      async (args, callCtx) =>
+        call("read_research_document", callCtx, async (audit) => {
           if (resolveRole(env, email) !== "analyst") {
             return { isError: true, ...text({ error: "permission_denied" }) };
           }
-          return text(await readResearchDocument(db, document_id));
-        })
+          const r = await readResearchDocument(db, args.document_id);
+          audit.access({
+            tables: ["demo_documents"],
+            rowCount: r.document ? 1 : 0,
+            status: r.error ? "error" : "ok",
+            reason: typeof r.error === "string" ? r.error : undefined
+          });
+          return text(r);
+        }, { args })
     );
   }
 }
@@ -89,6 +109,7 @@ function registerResearchTools(
 export default createMcpWorker<McpEnv>({
   serverName: "demo-research-mcp",
   serverVersion: "0.1.0",
+  auditServer: "research",
   consent: {
     title: "ABC MCP 访问授权",
     resourceDescription: "请求访问隔离的模拟研究数据。"

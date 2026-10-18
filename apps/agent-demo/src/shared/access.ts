@@ -1,5 +1,5 @@
 import { createLocalJWKSet, createRemoteJWKSet, jwtVerify } from "jose";
-import type { JWTVerifyResult } from "jose";
+import type { JWTPayload, JWTVerifyResult } from "jose";
 
 export type DemoRole = "analyst" | "viewer";
 
@@ -83,11 +83,11 @@ export function extractAccessToken(request: Request): string | null {
   return null;
 }
 
-export async function verifyAccessJwt(
+async function verifyJwtPayload(
   request: Request,
   env: AccessEnv,
   audience: string | undefined
-): Promise<AccessIdentity | null> {
+): Promise<JWTPayload | null> {
   if (!audience || !env.TEAM_DOMAIN) return null;
   if (looksLikePlaceholder(env.TEAM_DOMAIN)) return null;
   if (!isLocalEnvironment(env)) {
@@ -115,17 +115,38 @@ export async function verifyAccessJwt(
     }
     if (typeof payload.sub !== "string" || payload.sub.length === 0) return null;
     if (typeof payload.email !== "string" || payload.email.length === 0) return null;
-    const role = resolveRole(env, payload.email);
-    if (!role) return null;
-    return {
-      sub: payload.sub,
-      email: normalizeEmail(payload.email),
-      role,
-      localSimulation: false
-    };
+    return payload;
   } catch {
     return null;
   }
+}
+
+export async function verifyAccessJwt(
+  request: Request,
+  env: AccessEnv,
+  audience: string | undefined
+): Promise<AccessIdentity | null> {
+  const payload = await verifyJwtPayload(request, env, audience);
+  if (!payload) return null;
+  const role = resolveRole(env, payload.email as string);
+  if (!role) return null;
+  return {
+    sub: payload.sub as string,
+    email: normalizeEmail(payload.email as string),
+    role,
+    localSimulation: false
+  };
+}
+
+// Audit-admin check must not depend on the Analyst/Viewer role: verify the
+// Access JWT but return only the normalized email, no role requirement.
+export async function verifyAccessEmail(
+  request: Request,
+  env: AccessEnv,
+  audience: string | undefined
+): Promise<string | null> {
+  const payload = await verifyJwtPayload(request, env, audience);
+  return payload ? normalizeEmail(payload.email as string) : null;
 }
 
 export function localSimulatedIdentity(

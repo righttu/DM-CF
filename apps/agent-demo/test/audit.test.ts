@@ -1,0 +1,547 @@
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { env } from "cloudflare:test";
+import { MCPClientManager } from "agents/mcp/client";
+import { setModelFake } from "./model-fake.js";
+import {
+  extractTables,
+  recordAudit,
+  sanitizeArgs
+} from "../src/shared/audit.js";
+import { quantOutboundHandler } from "../src/quant/analysis.js";
+import auditMigration from "../migrations/audit/0001_audit.sql?raw";
+import {
+  AGENT_AUD,
+  ANALYST_EMAIL,
+  MCP_AUD,
+  VIEWER_EMAIL,
+  authedFetch,
+  connectAgentMcp,
+  getSetCookies,
+  mergeCookieHeader,
+  mcpFetch,
+  signJwt
+} from "./helpers.js";
+
+const ADMIN_EMAIL = "audit-admin@example.com";
+const QUANT = "/quant";
+
+const AUDIT_DB = () => (env as { AUDIT_DB: D1Database }).AUDIT_DB;
+const QUANT_DB = () => (env as { QUANT_DB: D1Database }).QUANT_DB;
+
+type AuditRow = Record<string, unknown>;
+
+async function auditRows(where: string, binds: unknown[]): Promise<AuditRow[]> {
+  const { results } = await AUDIT_DB()
+    .prepare(`SELECT * FROM audit_events WHERE ${where}`)
+    .bind(...binds)
+    .all();
+  return (results ?? []) as AuditRow[];
+}
+
+// DO/Worker audit writes run under waitUntil — poll briefly.
+async function waitForRows(where: string, binds: unknown[], min = 1): Promise<AuditRow[]> {
+  for (let i = 0; i < 40; i++) {
+    const rows = await auditRows(where, binds);
+    if (rows.length >= min) return rows;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return auditRows(where, binds);
+}
+
+function openAiResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "content-type": "application/json" }
+  });
+}
+
+function toolCallResponse(calls: { id: string; name: string; args: string }[]) {
+  return openAiResponse({
+    id: "r1",
+    object: "chat.completion",
+    created: 0,
+    model: "x",
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: calls.map((c) => ({
+            id: c.id,
+            type: "function",
+            function: { name: c.name, arguments: c.args }
+          }))
+        },
+        finish_reason: "tool_calls"
+      }
+    ],
+    usage: {}
+  });
+}
+
+function textResponse(text: string) {
+  return openAiResponse({
+    id: "r2",
+    object: "chat.completion",
+    created: 0,
+    model: "x",
+    choices: [
+      { index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }
+    ],
+    usage: {}
+  });
+}
+
+beforeAll(async () => {
+  for (const stmt of auditMigration.split(";")) {
+    const sql = stmt.trim();
+    if (sql) await AUDIT_DB().prepare(sql).run();
+  }
+  await QUANT_DB()
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS stock_basic (
+        ts_code TEXT PRIMARY KEY, symbol TEXT, name TEXT, fullname TEXT, cnspell TEXT,
+        area TEXT, industry TEXT, market TEXT, exchange TEXT, list_status TEXT,
+        list_date TEXT, delist_date TEXT, is_hs TEXT, update_time TEXT
+      )`
+    )
+    .run();
+  await QUANT_DB()
+    .prepare(
+      "INSERT OR IGNORE INTO stock_basic (ts_code, symbol, name, cnspell, industry, market, exchange, list_status, list_date) " +
+        "VALUES ('600519.SH','600519','贵州茅台','GZMT','白酒','主板','SSE','L','20010827')"
+    )
+    .run();
+});
+
+afterEach(() => {
+  setModelFake(undefined);
+  vi.restoreAllMocks();
+});
+
+// ---------- shared writer ----------
+
+describe("recordAudit", () => {
+  it("writes a batch of events and never throws", async () => {
+    const marker = `unit-${crypto.randomUUID()}`;
+    await recordAudit(AUDIT_DB(), [
+      { source: "agent", event: "question", request_id: marker, text_excerpt: "你好" },
+      { source: "agent", event: "reply", request_id: marker, status: "ok", text_excerpt: "答" }
+    ]);
+    const rows = await auditRows("request_id = ?", [marker]);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.event).sort()).toEqual(["question", "reply"]);
+    expect(typeof rows[0].id).toBe("string");
+    expect(typeof rows[0].ts).toBe("number");
+    // missing db -> no-op, throwing db -> swallowed + one warn line
+    await recordAudit(undefined, { source: "agent", event: "question" });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const bad = { batch: () => Promise.reject(new Error("d1 down")) } as unknown as D1Database;
+    await recordAudit(bad, { source: "agent", event: "question" });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain("audit_write_failed");
+    expect(warn.mock.calls[0][0]).not.toContain("你好");
+  });
+
+  it("sanitizeArgs drops secret-like keys and truncates", () => {
+    const out = sanitizeArgs({
+      query: "茅台",
+      api_key: "SECRET",
+      nested: { authorization: "Bearer x", ok: 1 },
+      long: "y".repeat(600)
+    })!;
+    expect(out).toContain("query");
+    expect(out).not.toContain("SECRET");
+    expect(out).not.toContain("api_key");
+    expect(out).not.toContain("Bearer x");
+    expect(out.length).toBeLessThanOrEqual(2000);
+    expect(sanitizeArgs(undefined)).toBeNull();
+  });
+
+  it("extractTables pulls FROM/JOIN identifiers conservatively", () => {
+    expect(extractTables("SELECT * FROM stock_basic WHERE ts_code='1'")).toEqual(["stock_basic"]);
+    expect(extractTables("select a.* from chip_hunter a join alpha_hunter b on 1=1").sort()).toEqual(
+      ["alpha_hunter", "chip_hunter"]
+    );
+    expect(extractTables("SELECT 1")).toEqual([]);
+  });
+});
+
+// ---------- agent (ResearchAgent DO) ----------
+
+describe("agent chat audit trail", () => {
+  it("writes question, tool_call and reply rows for a turn", async () => {
+    const sub = "sub-audit-1";
+    const jwt = await signJwt({ sub, email: ANALYST_EMAIL });
+    await connectAgentMcp({ sub, email: ANALYST_EMAIL });
+    let call = 0;
+    setModelFake(async () => {
+      call += 1;
+      if (call === 1) {
+        return toolCallResponse([{ id: "c1", name: "list_demo_companies", args: "{}" }]);
+      }
+      return textResponse("演示公司列表如上。");
+    });
+    const resp = await authedFetch("/api/chat", {
+      jwt,
+      method: "POST",
+      body: { message: "有哪些模拟公司？" }
+    });
+    expect(resp.status).toBe(200);
+    const rows = await waitForRows("user_email = ?", [ANALYST_EMAIL], 3);
+    const byReq = rows.filter((r) => r.source === "agent");
+    const question = byReq.find((r) => r.event === "question");
+    const reply = byReq.find((r) => r.event === "reply");
+    const toolCall = byReq.find((r) => r.event === "tool_call");
+    expect(question?.text_excerpt).toBe("有哪些模拟公司？");
+    expect(reply?.status).toBe("ok");
+    expect(reply?.text_excerpt).toBe("演示公司列表如上。");
+    expect(toolCall?.tool).toBe("list_demo_companies");
+    expect(toolCall?.status).toBe("ok");
+    expect(toolCall?.duration_ms).toBeGreaterThanOrEqual(0);
+    expect(question?.request_id).toBeTruthy();
+    expect(question?.request_id).toBe(reply?.request_id);
+    expect(question?.conversation_id).toBe(reply?.conversation_id);
+    // MCP side of the same tool call (request id forwarded through _meta)
+    const mcpRows = rows.filter((r) => r.source === "mcp-research");
+    const mcpCall = mcpRows.find(
+      (r) => r.event === "tool_call" && r.tool === "list_demo_companies"
+    );
+    expect(mcpCall).toBeTruthy();
+    expect(mcpCall?.request_id).toBe(question?.request_id);
+    expect(mcpCall?.user_email).toBe(ANALYST_EMAIL);
+    const access = mcpRows.find((r) => r.event === "data_access");
+    expect(access?.tables).toBe("demo_reports");
+    expect(access?.status).toBe("ok");
+  });
+
+  it("DLP-blocked turns store no content and a dlp_block row", async () => {
+    const sub = "sub-audit-dlp";
+    const jwt = await signJwt({ sub, email: ANALYST_EMAIL });
+    await connectAgentMcp({ sub, email: ANALYST_EMAIL });
+    setModelFake(
+      async () =>
+        new Response(
+          JSON.stringify({ name: "AiGatewayError", internalCode: 2030, error: [] }),
+          { status: 424, headers: { "content-type": "application/json" } }
+        )
+    );
+    const resp = await authedFetch("/api/chat", {
+      jwt,
+      method: "POST",
+      body: { message: "CF_DEMO_SECRET_9274" }
+    });
+    expect(resp.status).toBe(200);
+    const data = (await resp.json()) as { reply: string };
+    expect(data.reply).toContain("DLP");
+    const rows = await waitForRows(
+      "user_email = ? AND event = 'dlp_block'",
+      [ANALYST_EMAIL],
+      1
+    );
+    expect(rows[0].reason).toBe("error_2030_gateway");
+    const q = await auditRows(
+      "user_email = ? AND event = 'question' AND request_id = ?",
+      [ANALYST_EMAIL, rows[0].request_id]
+    );
+    expect(q[0].text_excerpt).toBeNull();
+    expect(q[0].reason).toBe("dlp_blocked");
+    expect(JSON.stringify(rows)).not.toContain("CF_DEMO_SECRET_9274");
+  });
+});
+
+// ---------- MCP server (abc-quant) ----------
+
+async function quantToken(sub: string, email: string): Promise<string> {
+  const reg = await mcpFetch(`${QUANT}/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      client_name: "audit-test-client",
+      token_endpoint_auth_method: "none",
+      grant_types: ["authorization_code"],
+      response_types: ["code"],
+      redirect_uris: ["http://localhost/mcp-oauth-callback"]
+    })
+  });
+  const { client_id: clientId } = (await reg.json()) as { client_id: string };
+  const jwt = await signJwt({ sub, email, aud: MCP_AUD });
+  const verifier = "v-" + crypto.randomUUID().replaceAll("-", "");
+  const challenge = btoa(
+    String.fromCharCode(
+      ...new Uint8Array(
+        await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))
+      )
+    )
+  )
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+  const getResp = await mcpFetch(
+    `${QUANT}/authorize?response_type=code&client_id=${clientId}` +
+      `&redirect_uri=${encodeURIComponent("http://localhost/mcp-oauth-callback")}` +
+      `&scope=mcp%3Aread&state=s&code_challenge=${challenge}&code_challenge_method=S256` +
+      `&resource=${encodeURIComponent("http://localhost/mcp")}`,
+    { headers: { "cf-access-jwt-assertion": jwt } }
+  );
+  const html = await getResp.text();
+  const handle = /name="handle" value="([^"]+)"/.exec(html)?.[1]!;
+  const cookies = mergeCookieHeader(getSetCookies(getResp));
+  const post = await mcpFetch(`${QUANT}/authorize`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      cookie: cookies,
+      "cf-access-jwt-assertion": jwt,
+      origin: "http://localhost"
+    },
+    body: `handle=${encodeURIComponent(handle)}&decision=approve`
+  });
+  const code = new URL(post.headers.get("location")!).searchParams.get("code")!;
+  const tokenResp = await mcpFetch(`${QUANT}/token`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body:
+      `grant_type=authorization_code&code=${code}` +
+      `&redirect_uri=${encodeURIComponent("http://localhost/mcp-oauth-callback")}` +
+      `&client_id=${clientId}&code_verifier=${verifier}`
+  });
+  const tok = (await tokenResp.json()) as { access_token: string };
+  return tok.access_token;
+}
+
+let rpcId = 500;
+async function quantTool(
+  token: string,
+  name: string,
+  args: unknown,
+  meta?: Record<string, string>
+) {
+  const r = await mcpFetch(`${QUANT}/mcp`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      authorization: `Bearer ${token}`
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: ++rpcId,
+      method: "tools/call",
+      params: { name, arguments: args, ...(meta ? { _meta: meta } : {}) }
+    })
+  });
+  const text = await r.text();
+  const dataLine = text
+    .split("\n")
+    .find((l) => l.startsWith("data:"))
+    ?.slice(5)
+    .trim();
+  return JSON.parse(dataLine ?? text) as Record<string, unknown>;
+}
+
+describe("mcp quant audit trail", () => {
+  it("writes tool_call + data_access with _meta correlation and sanitized args", async () => {
+    const token = await quantToken("sub-audit-q", ANALYST_EMAIL);
+    const rid = crypto.randomUUID();
+    const cid = crypto.randomUUID();
+    await quantTool(token, "find_stock", { query: "茅台", api_key: "SECRET-XYZ" }, {
+      "uk.righttu.demo/request_id": rid,
+      "uk.righttu.demo/conversation_id": cid
+    });
+    const rows = await waitForRows("request_id = ?", [rid], 2);
+    const call = rows.find((r) => r.event === "tool_call");
+    const access = rows.find((r) => r.event === "data_access");
+    expect(call?.source).toBe("mcp-quant");
+    expect(call?.server).toBe("abc-quant");
+    expect(call?.tool).toBe("find_stock");
+    expect(call?.status).toBe("ok");
+    expect(call?.user_email).toBe(ANALYST_EMAIL);
+    expect(call?.conversation_id).toBe(cid);
+    expect(call?.args_json).toContain("茅台");
+    expect(call?.args_json).not.toContain("SECRET-XYZ");
+    expect(call?.args_json).not.toContain("api_key");
+    expect(access?.source).toBe("mcp-quant");
+    expect(access?.tables).toBe("stock_basic");
+    expect(access?.row_count).toBe(1);
+    expect(access?.status).toBe("ok");
+  });
+
+  it("records SQL denials with the rejection reason", async () => {
+    const token = await quantToken("sub-audit-q2", ANALYST_EMAIL);
+    const rid = crypto.randomUUID();
+    await quantTool(
+      token,
+      "query_data",
+      { sql: "DROP TABLE stock_basic" },
+      { "uk.righttu.demo/request_id": rid }
+    );
+    const rows = await waitForRows("request_id = ?", [rid], 2);
+    const call = rows.find((r) => r.event === "tool_call");
+    const access = rows.find((r) => r.event === "data_access");
+    expect(call?.status).toBe("denied");
+    expect(access?.status).toBe("denied");
+    expect(access?.reason).toBeTruthy();
+    expect(access?.sql_text).toContain("DROP TABLE");
+  });
+
+  it("keeps request_id null when _meta is absent", async () => {
+    const token = await quantToken("sub-audit-q3", ANALYST_EMAIL);
+    const marker = crypto.randomUUID();
+    await quantTool(token, "find_stock", { query: marker });
+    const rows = await waitForRows("tool = 'find_stock' AND args_json LIKE ?", [
+      `%${marker}%`
+    ]);
+    expect(rows[0].request_id).toBeNull();
+  });
+});
+
+// ---------- quant-outbound (container -> Worker) ----------
+
+describe("quant outbound audit", () => {
+  const stub = (captured: AuditRow[]) => ({
+    jobContext: async () => ({
+      ts_code: "600519.SH",
+      date: "20261017",
+      requested_by: "reqhash123"
+    }),
+    auditAccess: (events: AuditRow[]) => captured.push(...events)
+  });
+  const fakeEnv = (captured: AuditRow[]) =>
+    ({
+      QUANT_DB: QUANT_DB(),
+      ANALYSIS: {
+        idFromString: () => ({}) as never,
+        get: () => stub(captured) as never
+      }
+    }) as never;
+  const req = (path: string, body: unknown) =>
+    new Request(`http://quant-data.internal${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+
+  it("records an allowed db query with tables and row count", async () => {
+    const captured: AuditRow[] = [];
+    const resp = await quantOutboundHandler(
+      req("/api/db/query", { sql: "SELECT * FROM stock_basic" }),
+      fakeEnv(captured),
+      { containerId: "cid-1" }
+    );
+    expect(resp.status).toBe(200);
+    expect(captured).toHaveLength(1);
+    const ev = captured[0];
+    expect(ev.source).toBe("quant-outbound");
+    expect(ev.event).toBe("data_access");
+    expect(ev.status).toBe("ok");
+    expect(ev.job_id).toBe("600519.SH:20261017");
+    expect(ev.actor_id).toBe("reqhash123");
+    expect(ev.tables).toBe("stock_basic");
+    expect(ev.row_count).toBe(1);
+    expect(ev.sql_text).toContain("SELECT");
+  });
+
+  it("records a denied query with reason and no rows", async () => {
+    const captured: AuditRow[] = [];
+    const resp = await quantOutboundHandler(
+      req("/api/db/query", { sql: "DROP TABLE stock_basic" }),
+      fakeEnv(captured),
+      { containerId: "cid-1" }
+    );
+    expect(resp.status).toBe(403);
+    expect(captured).toHaveLength(1);
+    expect(captured[0].status).toBe("denied");
+    expect(captured[0].reason).toBe("db_query_sql");
+    expect(captured[0].row_count).toBeNull();
+  });
+});
+
+// ---------- admin view ----------
+
+describe("admin audit surface", () => {
+  const adminJwt = () =>
+    signJwt({ sub: "sub-admin", email: ADMIN_EMAIL, aud: AGENT_AUD });
+
+  it("gates /api/audit and /audit to AUDIT_ADMIN_EMAILS (404 otherwise)", async () => {
+    const admin = await adminJwt();
+    const analyst = await signJwt({ sub: "sub-n", email: ANALYST_EMAIL, aud: AGENT_AUD });
+    expect((await authedFetch("/api/audit", { jwt: admin })).status).toBe(200);
+    expect((await authedFetch("/audit", { jwt: admin })).status).toBe(200);
+    const page = await (await authedFetch("/audit", { jwt: admin })).text();
+    expect(page).toContain("审计视图");
+    expect((await authedFetch("/api/audit", { jwt: analyst })).status).toBe(404);
+    expect((await authedFetch("/audit", { jwt: analyst })).status).toBe(404);
+    expect((await authedFetch("/api/audit")).status).toBe(404);
+    const e = env as { AUDIT_ADMIN_EMAILS?: string };
+    const saved = e.AUDIT_ADMIN_EMAILS;
+    e.AUDIT_ADMIN_EMAILS = undefined;
+    try {
+      expect((await authedFetch("/api/audit", { jwt: admin })).status).toBe(404);
+    } finally {
+      e.AUDIT_ADMIN_EMAILS = saved;
+    }
+  });
+
+  it("filters by Beijing dates, clamps limit and queries by job", async () => {
+    const admin = await adminJwt();
+    const rid = `f-${crypto.randomUUID()}`;
+    // Beijing 2026-10-20 00:30 == 2026-10-19T16:30:00Z
+    const ts = Date.parse("2026-10-19T16:30:00Z");
+    await recordAudit(AUDIT_DB(), [
+      { source: "agent", event: "question", request_id: rid, user_email: "x@t", ts },
+      {
+        source: "quant-outbound",
+        event: "data_access",
+        job_id: "600519.SH:20261017",
+        tables: "sync_status",
+        status: "ok",
+        ts
+      }
+    ]);
+    const q = (s: string) => authedFetch(`/api/audit?${s}`, { jwt: admin });
+    const inDay = (await (await q(`request=${rid}&from=2026-10-20&to=2026-10-20`)).json()) as {
+      events: AuditRow[];
+    };
+    expect(inDay.events).toHaveLength(1);
+    const nextDay = (await (
+      await q(`request=${rid}&from=2026-10-21&to=2026-10-21`)
+    ).json()) as { events: AuditRow[] };
+    expect(nextDay.events).toHaveLength(0);
+    const prevDay = (await (
+      await q(`request=${rid}&from=2026-10-19&to=2026-10-19`)
+    ).json()) as { events: AuditRow[] };
+    expect(prevDay.events).toHaveLength(0);
+    const clamp = await q("limit=99999&user=nobody@t");
+    expect(clamp.status).toBe(200);
+    const jobRows = (await (
+      await q("job=600519.SH:20261017")
+    ).json()) as { events: AuditRow[] };
+    expect(jobRows.events.length).toBeGreaterThan(0);
+    expect(jobRows.events.every((r) => r.job_id === "600519.SH:20261017")).toBe(true);
+    expect(jobRows.events.every((r) => r.source === "quant-outbound")).toBe(true);
+  });
+
+  it("session payload exposes auditAdmin only for admins", async () => {
+    // Admins without an app role still reach the audit surfaces (verified
+    // above); the session payload flag is for admins who also hold a role.
+    const e = env as { VIEWER_EMAILS?: string };
+    const saved = e.VIEWER_EMAILS;
+    e.VIEWER_EMAILS = `${saved},${ADMIN_EMAIL}`;
+    try {
+      const admin = await adminJwt();
+      const analyst = await signJwt({ sub: "sub-n2", email: ANALYST_EMAIL, aud: AGENT_AUD });
+      const s1 = (await (await authedFetch("/api/session", { jwt: admin })).json()) as {
+        user: { auditAdmin?: boolean };
+      };
+      const s2 = (await (await authedFetch("/api/session", { jwt: analyst })).json()) as {
+        user: { auditAdmin?: boolean };
+      };
+      expect(s1.user.auditAdmin).toBe(true);
+      expect(s2.user.auditAdmin).toBe(false);
+    } finally {
+      e.VIEWER_EMAILS = saved;
+    }
+  });
+});

@@ -16,6 +16,7 @@ import {
   TS_CODE_PATTERN
 } from "./catalog.js";
 import type { McpPrincipal, ToolCall, ToolTextResult } from "../shared/mcp-kit.js";
+import { extractTables } from "../shared/audit.js";
 import {
   ANALYSIS_JOB_ID_PATTERN,
   QuantAnalysisContainer,
@@ -294,9 +295,13 @@ export function registerQuantTools(
       inputSchema: z.object({ table: z.enum([...QUANT_TABLES, "research"]).optional().describe(D.table) })
     },
     async (args, callCtx) =>
-      call("describe_data", callCtx, async () => {
+      call("describe_data", callCtx, async (audit) => {
         const p = parseArgs("describe_data", args);
         if (!p.ok) return p.result;
+        audit.access({
+          tables: p.data.table ? [p.data.table] : [...QUANT_TABLES, "research"],
+          status: "ok"
+        });
         if (!p.data.table) {
           return text({ tables: DATA_DICTIONARY, research: RESEARCH_DOC });
         }
@@ -304,7 +309,7 @@ export function registerQuantTools(
           return text({ table: "research", doc: RESEARCH_DOC });
         }
         return text({ table: p.data.table, doc: DATA_DICTIONARY[p.data.table] });
-      })
+      }, { args })
   );
 
   server.registerTool(
@@ -314,7 +319,7 @@ export function registerQuantTools(
       inputSchema: z.object({ query: z.string().describe(D.find_query) })
     },
     async (args, callCtx) =>
-      call("find_stock", callCtx, async () => {
+      call("find_stock", callCtx, async (audit) => {
         const p = parseArgs("find_stock", args);
         if (!p.ok) return p.result;
         const q = p.data.query;
@@ -324,8 +329,14 @@ export function registerQuantTools(
           `%${likeEscape(q)}%`,
           q
         ]);
+        audit.access({
+          tables: ["stock_basic"],
+          sql: QUANT_QUERIES.findStock,
+          rowCount: found.length,
+          status: "ok"
+        });
         return text(capPayload({ query: q, results: found }, [{ rows: found }]));
-      })
+      }, { args })
   );
 
   server.registerTool(
@@ -340,7 +351,7 @@ export function registerQuantTools(
       })
     },
     async (args, callCtx) =>
-      call("get_signals", callCtx, async () => {
+      call("get_signals", callCtx, async (audit) => {
         const p = parseArgs("get_signals", args);
         if (!p.ok) return p.result;
         const { ts_code, strategy, scan_date, limit } = p.data;
@@ -359,6 +370,12 @@ export function registerQuantTools(
           const group = { rows: await rows(env, sql, binds, exempt) };
           results[name] = group;
           groups.push(group);
+          audit.access({
+            tables: extractTables(sql),
+            sql,
+            rowCount: group.rows.length,
+            status: "ok"
+          });
         }
         const payload: Record<string, unknown> = { results };
         if (ts_code) {
@@ -370,7 +387,7 @@ export function registerQuantTools(
           ? "返回该股票被各量化策略选中的记录；各 Hunter 表目前只保留最近一次扫描"
           : "返回最近一次（或 scan_date 指定日期）扫描命中的股票，按策略评分排序";
         return text(capPayload(payload, groups));
-      })
+      }, { args })
   );
 
   server.registerTool(
@@ -383,7 +400,7 @@ export function registerQuantTools(
       })
     },
     async (args, callCtx) =>
-      call("get_fundamentals", callCtx, async () => {
+      call("get_fundamentals", callCtx, async (audit) => {
         const p = parseArgs("get_fundamentals", args);
         if (!p.ok) return p.result;
         const { ts_code, periods } = p.data;
@@ -391,6 +408,13 @@ export function registerQuantTools(
           stockName(env, ts_code),
           rows(env, QUANT_QUERIES.fundamentals, [ts_code, periods])
         ]);
+        audit.access({ tables: ["stock_basic"], sql: QUANT_QUERIES.stockName, status: "ok" });
+        audit.access({
+          tables: extractTables(QUANT_QUERIES.fundamentals),
+          sql: QUANT_QUERIES.fundamentals,
+          rowCount: periodRows.length,
+          status: "ok"
+        });
         return text(
           capPayload(
             {
@@ -404,7 +428,7 @@ export function registerQuantTools(
             [{ rows: periodRows }]
           )
         );
-      })
+      }, { args })
   );
 
   server.registerTool(
@@ -419,7 +443,7 @@ export function registerQuantTools(
       })
     },
     async (args, callCtx) =>
-      call("get_ai_report", callCtx, async () => {
+      call("get_ai_report", callCtx, async (audit) => {
         const p = parseArgs("get_ai_report", args);
         if (!p.ok) return p.result;
         const { ts_code, history, report_date, limit } = p.data;
@@ -427,6 +451,12 @@ export function registerQuantTools(
           const report = (
             await rows(env, QUANT_QUERIES.aiReportLatest, [ts_code], new Set(["ai_report"]))
           )[0] ?? null;
+          audit.access({
+            tables: ["ai_analysis_result"],
+            sql: QUANT_QUERIES.aiReportLatest,
+            rowCount: report ? 1 : 0,
+            status: "ok"
+          });
           const payload: Record<string, unknown> = { ts_code, report };
           const full = typeof report?.ai_report_length === "number" ? report.ai_report_length : 0;
           if (report && full > QUERY_LIMITS.maxReportChars) {
@@ -436,14 +466,26 @@ export function registerQuantTools(
         }
         if (ts_code) {
           const list = await rows(env, QUANT_QUERIES.aiReportHistory, [ts_code, limit]);
+          audit.access({
+            tables: ["ai_analysis_result"],
+            sql: QUANT_QUERIES.aiReportHistory,
+            rowCount: list.length,
+            status: "ok"
+          });
           return text(capPayload({ ts_code, reports: list }, [{ rows: list }]));
         }
         const list = await rows(env, QUANT_QUERIES.aiReportList, [
           report_date ?? null,
           limit
         ]);
+        audit.access({
+          tables: ["ai_analysis_result"],
+          sql: QUANT_QUERIES.aiReportList,
+          rowCount: list.length,
+          status: "ok"
+        });
         return text(capPayload({ reports: list }, [{ rows: list }]));
-      })
+      }, { args })
   );
 
   server.registerTool(
@@ -459,7 +501,7 @@ export function registerQuantTools(
       })
     },
     async (args, callCtx) =>
-      call("search_research", callCtx, async () => {
+      call("search_research", callCtx, async (audit) => {
         const p = parseArgs("search_research", args);
         if (!p.ok) return p.result;
         const { ts_code, query, since, source_type, top_k } = p.data;
@@ -484,6 +526,12 @@ export function registerQuantTools(
           namespace: ts_code
         });
         const coverage = await firstRow(env, QUANT_QUERIES.researchCoverage, [ts_code]);
+        audit.access({
+          tables: ["sync_status"],
+          sql: QUANT_QUERIES.researchCoverage,
+          rowCount: coverage ? 1 : 0,
+          status: "ok"
+        });
         const matches = (raw.matches ?? [])
           .filter((m) => {
             const md = m.metadata ?? {};
@@ -541,11 +589,16 @@ export function registerQuantTools(
             usedChars += chunk.length;
           }
         }
+        audit.access({
+          tables: ["vectorize:stock-knowledge"],
+          rowCount: matches.length,
+          status: "ok"
+        });
         const documents = [...docs.values()]
           .filter((d) => d.excerpts.length > 0)
           .sort((a, b) => b.publish_date.localeCompare(a.publish_date));
         return text({ ts_code, name: name ?? null, documents, coverage: coverage ?? null });
-      })
+      }, { args })
   );
 
   server.registerTool(
@@ -558,15 +611,21 @@ export function registerQuantTools(
       })
     },
     async (args, callCtx) =>
-      call("get_surveys", callCtx, async () => {
+      call("get_surveys", callCtx, async (audit) => {
         const p = parseArgs("get_surveys", args);
         if (!p.ok) return p.result;
         const surveys = await rows(env, QUANT_QUERIES.surveys, [
           p.data.ts_code,
           p.data.limit
         ]);
+        audit.access({
+          tables: extractTables(QUANT_QUERIES.surveys),
+          sql: QUANT_QUERIES.surveys,
+          rowCount: surveys.length,
+          status: "ok"
+        });
         return text(capPayload({ ts_code: p.data.ts_code, surveys }, [{ rows: surveys }]));
-      })
+      }, { args })
   );
 
   server.registerTool(
@@ -580,7 +639,7 @@ export function registerQuantTools(
       })
     },
     async (args, callCtx) =>
-      call("get_industry_chain", callCtx, async () => {
+      call("get_industry_chain", callCtx, async (audit) => {
         const p = parseArgs("get_industry_chain", args);
         if (!p.ok) return p.result;
         const { ts_code, sector, limit } = p.data;
@@ -597,6 +656,12 @@ export function registerQuantTools(
             [ts_code, limit],
             new Set(["remark", "ts_main_biz"])
           );
+          audit.access({
+            tables: extractTables(QUANT_QUERIES.chainByStock),
+            sql: QUANT_QUERIES.chainByStock,
+            rowCount: list.length,
+            status: "ok"
+          });
           return text(capPayload({ ts_code, rows: list }, [{ rows: list }]));
         }
         const list = await rows(
@@ -605,8 +670,14 @@ export function registerQuantTools(
           [`%${likeEscape(sector!)}%`, limit],
           new Set(["remark"])
         );
+        audit.access({
+          tables: extractTables(QUANT_QUERIES.chainBySector),
+          sql: QUANT_QUERIES.chainBySector,
+          rowCount: list.length,
+          status: "ok"
+        });
         return text(capPayload({ sector, rows: list }, [{ rows: list }]));
-      })
+      }, { args })
   );
 
   server.registerTool(
@@ -619,11 +690,17 @@ export function registerQuantTools(
       })
     },
     async (args, callCtx) =>
-      call("query_data", callCtx, async () => {
+      call("query_data", callCtx, async (audit) => {
         const p = parseArgs("query_data", args);
         if (!p.ok) return p.result;
         const guard = checkReadOnlySql(p.data.sql);
         if (!guard.ok) {
+          audit.access({
+            tables: extractTables(p.data.sql),
+            sql: p.data.sql,
+            status: "denied",
+            reason: guard.reason
+          });
           return toolError({ error: "sql_rejected", reason: guard.reason });
         }
         const maxRows = p.data.max_rows;
@@ -632,18 +709,30 @@ export function registerQuantTools(
           resultRows = await rows(env, `SELECT * FROM (${guard.sql}) LIMIT ?1`, [maxRows + 1]);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
+          audit.access({
+            tables: extractTables(guard.sql),
+            sql: guard.sql,
+            status: "error",
+            reason: message.slice(0, 200)
+          });
           return toolError({ error: "sql_error", message: message.slice(0, 300) });
         }
         const truncated = resultRows.length > maxRows;
         const limited = resultRows.slice(0, maxRows);
         const columns = limited.length > 0 ? Object.keys(limited[0]) : [];
+        audit.access({
+          tables: extractTables(guard.sql),
+          sql: guard.sql,
+          rowCount: limited.length,
+          status: "ok"
+        });
         return text(
           capPayload(
             { columns, rows: limited, row_count: limited.length, truncated },
             [{ rows: limited }]
           )
         );
-      })
+      }, { args })
   );
 
   server.registerTool(
@@ -655,13 +744,20 @@ export function registerQuantTools(
       })
     },
     async (args, callCtx) =>
-      call("run_analysis", callCtx, async () => {
+      call("run_analysis", callCtx, async (audit) => {
         const p = parseArgs("run_analysis", args);
         if (!p.ok) return p.result;
         const ts_code = p.data.ts_code;
         const today = shanghaiCompactDate();
         const jobId = `${ts_code}:${today}`;
+        audit.job(jobId);
         const existing = await firstRow(env, QUANT_QUERIES.aiReportToday, [ts_code, today]);
+        audit.access({
+          tables: extractTables(QUANT_QUERIES.aiReportToday),
+          sql: QUANT_QUERIES.aiReportToday,
+          rowCount: existing ? 1 : 0,
+          status: "ok"
+        });
         if (existing) {
           return text({ status: "exists", job_id: jobId, report: existing });
         }
@@ -700,7 +796,7 @@ export function registerQuantTools(
             message: message.slice(0, 200)
           });
         }
-      })
+      }, { args })
   );
 
   server.registerTool(
@@ -713,7 +809,7 @@ export function registerQuantTools(
       })
     },
     async (args, callCtx) =>
-      call("get_analysis_status", callCtx, async () => {
+      call("get_analysis_status", callCtx, async (audit) => {
         const p = parseArgs("get_analysis_status", args);
         if (!p.ok) return p.result;
         const { job_id, ts_code } = p.data;
@@ -744,6 +840,6 @@ export function registerQuantTools(
           result_summary: view.result_summary ?? undefined,
           error: view.error ?? undefined
         });
-      })
+      }, { args })
   );
 }

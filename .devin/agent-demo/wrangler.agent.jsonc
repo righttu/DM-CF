@@ -25,6 +25,14 @@
   "kv_namespaces": [
     { "binding": "CALLBACK_KV", "id": "1fa8c3f84ff44ddda1e9a9764b981fb0" }
   ],
+  "d1_databases": [
+    {
+      "binding": "AUDIT_DB",
+      "database_name": "abc-audit",
+      "database_id": "9eac7020-e816-4095-947d-4829df2b6e88",
+      "migrations_dir": "../../apps/agent-demo/migrations/audit"
+    }
+  ],
   "vars": {
     "TEAM_DOMAIN": "https://righttu.cloudflareaccess.com",
     "AGENT_ACCESS_AUD": "82ba84b6961e0a2deb1eb0e40c5a57f40ae90d2c45586db370a089200a673ed0",
@@ -46,6 +54,14 @@
       "kv_namespaces": [
         { "binding": "CALLBACK_KV", "id": "local-callback-kv" }
       ],
+      "d1_databases": [
+        {
+          "binding": "AUDIT_DB",
+          "database_name": "audit-db-local",
+          "database_id": "local-audit-db",
+          "migrations_dir": "../../apps/agent-demo/migrations/audit"
+        }
+      ],
       "vars": {
         "ENVIRONMENT": "local",
         "PUBLIC_ORIGIN": "http://localhost:8787",
@@ -58,6 +74,7 @@
         "ANALYST_EMAILS": "analyst@local.test",
         "VIEWER_EMAILS": "viewer@local.test",
         "LOCAL_DEV_IDENTITY_ENABLED": "true",
+        "AUDIT_ADMIN_EMAILS": "audit-admin@local.test",
         "LOCAL_ANALYST_EMAIL": "analyst@local.test",
         "LOCAL_VIEWER_EMAIL": "viewer@local.test"
       }

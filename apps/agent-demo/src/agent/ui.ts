@@ -391,6 +391,7 @@ details.proc .proc-body{border-top:1px solid var(--line);padding:6px 12px 10px}
     <button class="icon" id="menu-btn" aria-label="打开会话列表">☰</button>
     <div id="session-title">新会话</div>
     <span id="mcp-pill"><span class="dot"></span><span id="mcp-pill-text">未连接</span></span>
+    <a id="audit-link" href="/audit" hidden style="font-size:13px;color:var(--accent);text-decoration:none">审计</a>
     <button class="icon" id="theme-btn" aria-label="切换主题">◐</button>
   </div>
   <div id="chat-wrap"><div id="chat"></div></div>
@@ -1066,6 +1067,7 @@ function logEvent(action, tool, status) {
 }
 function refreshSession(s) {
   const user = s.user || boot.user;
+  $('audit-link').hidden = !user.auditAdmin;
   if (Array.isArray(s.suggestions)) sessionSuggestions = s.suggestions.slice();
   applyIdentity(user);
   const identityChanged = user.actorId !== currentActorId || user.role !== currentRole;
@@ -1414,6 +1416,7 @@ $('new-session').addEventListener('click', () => { openSidebar(false); sessionAc
 
 /* ---------- init ---------- */
 applyIdentity(boot.user);
+$('audit-link').hidden = !boot.user.auditAdmin;
 $('conversation-id').textContent = currentConversationId;
 renderHistory(boot.history);
 renderSessions(boot.sessions);
@@ -1424,7 +1427,7 @@ loadSession();
 </html>`;
 
 export interface BootstrapData {
-  user: { email: string; role: string; localSimulation: boolean; actorId: string };
+  user: { email: string; role: string; localSimulation: boolean; actorId: string; auditAdmin?: boolean };
   history: { role: string; content: string }[];
   mcp: { connected: boolean; state: string; error?: string | null; detail?: string | null };
   servers: { id: string; label: string; tools: string[] }[];

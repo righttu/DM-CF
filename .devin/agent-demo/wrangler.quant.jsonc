@@ -54,6 +54,12 @@
       "binding": "QUANT_DB",
       "database_name": "quant-data",
       "database_id": "85914a38-2ba4-4e85-b229-e1e1a043a266"
+    },
+    {
+      "binding": "AUDIT_DB",
+      "database_name": "abc-audit",
+        "database_id": "9eac7020-e816-4095-947d-4829df2b6e88",
+      "migrations_dir": "../../apps/agent-demo/migrations/audit"
     }
   ],
   "vectorize": [
@@ -95,6 +101,12 @@
           "binding": "QUANT_DB",
           "database_name": "quant-data-local",
           "database_id": "local-quant-db"
+        },
+        {
+          "binding": "AUDIT_DB",
+          "database_name": "audit-db-local",
+          "database_id": "local-audit-db",
+          "migrations_dir": "../../apps/agent-demo/migrations/audit"
         }
       ],
       "vectorize": [

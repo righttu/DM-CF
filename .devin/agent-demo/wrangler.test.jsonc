@@ -28,6 +28,11 @@
       "binding": "QUANT_DB",
       "database_name": "quant-db-test",
       "database_id": "quant-db-test"
+    },
+    {
+      "binding": "AUDIT_DB",
+      "database_name": "audit-db-test",
+      "database_id": "audit-db-test"
     }
   ],
   "kv_namespaces": [
@@ -43,6 +48,7 @@
     "PUBLIC_ORIGIN": "http://localhost",
     "PUBLIC_MCP_ORIGIN": "http://localhost",
     "ALLOWED_ORIGINS": "http://localhost",
+    "AUDIT_ADMIN_EMAILS": "audit-admin@example.com",
     "ANALYST_EMAILS": "analyst@example.com",
     "VIEWER_EMAILS": "viewer@example.com",
     "MCP_SERVER_URL": "http://localhost/mcp",

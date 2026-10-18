@@ -33,6 +33,7 @@ export class QuantEmbeddingContainer extends Container<QuantEnv> {
 export default createMcpWorker<QuantEnv>({
   serverName: "abc-quant-mcp-s",
   serverVersion: "0.1.0",
+  auditServer: "abc-quant",
   consent: {
     title: "ABC Quant MCP-S 访问授权",
     resourceDescription:

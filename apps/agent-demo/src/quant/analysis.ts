@@ -1,5 +1,6 @@
 import { Container } from "@cloudflare/containers";
 import { QUANT_QUERIES } from "./catalog.js";
+import { extractTables, recordAudit, truncateSql, type AuditEvent } from "../shared/audit.js";
 import {
   AI_OUTBOUND_HOST,
   aiChatOutboundHandler,
@@ -26,6 +27,7 @@ export interface AnalysisEnv {
   AI_ENGINE?: string;
   BRAIN_AI_MODEL?: string;
   AUDITOR_AI_MODEL?: string;
+  AUDIT_DB?: D1Database;
 }
 
 export type AnalysisJobStatus =
@@ -216,9 +218,9 @@ export class AnalysisJobRunner {
     await this.storage.put("job", job);
   }
 
-  async jobContext(): Promise<{ ts_code: string; date: string } | null> {
+  async jobContext(): Promise<{ ts_code: string; date: string; requested_by: string } | null> {
     const job = await this.loadJob();
-    return job ? { ts_code: job.ts_code, date: job.date } : null;
+    return job ? { ts_code: job.ts_code, date: job.date, requested_by: job.requested_by } : null;
   }
 
   async startJob(input: {
@@ -409,8 +411,14 @@ export class QuantAnalysisContainer extends Container<AnalysisEnv> {
     };
   }
 
-  jobContext(): Promise<{ ts_code: string; date: string } | null> {
+  jobContext(): Promise<{ ts_code: string; date: string; requested_by: string } | null> {
     return this.runner.jobContext();
+  }
+
+  // Outbound handler -> audit: RPC is void-returning; the D1 write itself runs
+  // under waitUntil so an audit failure can never fail the container request.
+  auditAccess(events: AuditEvent[]): void {
+    this.ctx.waitUntil(recordAudit(this.env.AUDIT_DB, events));
   }
 
   startJob(input: {
@@ -514,16 +522,37 @@ type OutboundEnv = {
   ANALYSIS?: DurableObjectNamespace<QuantAnalysisContainer>;
   VECTORIZE?: VectorizeLike;
   R2_STOCK_INFOR?: R2Bucket;
+  AUDIT_DB?: D1Database;
 };
+
+type OaPush = (e: {
+  tables: string[];
+  sql?: string | null;
+  rowCount?: number;
+  status: "ok" | "denied" | "error";
+  reason?: string;
+}) => void;
+
+function analysisStub(
+  env: OutboundEnv,
+  containerId: string
+): DurableObjectStub<QuantAnalysisContainer> | null {
+  if (!env.ANALYSIS || !containerId) return null;
+  try {
+    return env.ANALYSIS.get(env.ANALYSIS.idFromString(containerId));
+  } catch {
+    return null;
+  }
+}
 
 
 async function resolveJob(
   env: OutboundEnv,
   containerId: string
-): Promise<{ ts_code: string; date: string } | null> {
-  if (!env.ANALYSIS || !containerId) return null;
+): Promise<{ ts_code: string; date: string; requested_by: string } | null> {
+  const stub = analysisStub(env, containerId);
+  if (!stub) return null;
   try {
-    const stub = env.ANALYSIS.get(env.ANALYSIS.idFromString(containerId));
     return await stub.jobContext();
   } catch {
     return null;
@@ -538,54 +567,96 @@ export async function quantOutboundHandler(
   const url = new URL(request.url);
   const job = await resolveJob(env, ctx.containerId);
   if (!job) return deny("no_job");
-  if (request.method !== "POST") return deny("method");
-  const path = url.pathname;
-  switch (path) {
-    case "/api/db/query":
-      return handleDbQuery(request, env, job);
-    case "/api/db/execute":
-      return handleDbExecute(request, env, job);
-    case "/api/db/save":
-      return handleDbSave(request, env, job);
-    case "/api/vector/check":
-      return handleVectorCheck(request, env, job);
-    case "/api/vector/upsert":
-      return handleVectorUpsert(request, env, job);
-    case "/api/vector/query":
-      return handleVectorQuery(request, env, job);
-    case "/api/r2/upload":
-      return handleR2Upload(request, env, job);
-    default:
-      return deny("path", await sha256Short(path));
+  const oaEvents: AuditEvent[] = [];
+  const oa: OaPush = (e) =>
+    oaEvents.push({
+      source: "quant-outbound",
+      event: "data_access",
+      actor_id: job.requested_by || null,
+      job_id: `${job.ts_code}:${job.date}`,
+      server: "quant-outbound",
+      tables: e.tables.join(","),
+      sql_text: e.sql ? truncateSql(e.sql) : null,
+      row_count: e.rowCount ?? null,
+      status: e.status,
+      reason: e.reason ?? null
+    });
+  const flushOa = async () => {
+    const stub = analysisStub(env, ctx.containerId);
+    if (oaEvents.length === 0 || !stub) return;
+    try {
+      await stub.auditAccess(oaEvents);
+    } catch {
+      // audit must never break the container request path
+    }
+  };
+  const denyOa = (kind: string, hash?: string) => {
+    oa({ tables: [url.pathname], status: "denied", reason: kind });
+    return deny(kind, hash);
+  };
+  if (request.method !== "POST") {
+    const resp = denyOa("method");
+    await flushOa();
+    return resp;
   }
+  const path = url.pathname;
+  const handlers: Record<
+    string,
+    (request: Request, env: OutboundEnv, job: Job, oa: OaPush) => Promise<Response>
+  > = {
+    "/api/db/query": handleDbQuery,
+    "/api/db/execute": handleDbExecute,
+    "/api/db/save": handleDbSave,
+    "/api/vector/check": handleVectorCheck,
+    "/api/vector/upsert": handleVectorUpsert,
+    "/api/vector/query": handleVectorQuery,
+    "/api/r2/upload": handleR2Upload
+  };
+  const handler = handlers[path];
+  const resp = handler
+    ? await handler(request, env, job, oa)
+    : denyOa("path", await sha256Short(path));
+  await flushOa();
+  return resp;
 }
 
-type Job = { ts_code: string; date: string };
+type Job = { ts_code: string; date: string; requested_by?: string };
 
 async function handleDbQuery(
   request: Request,
   env: OutboundEnv,
-  _job: Job
+  _job: Job,
+  oa: OaPush
 ): Promise<Response> {
   const body = await readJsonBody(request);
   const sql = typeof body?.sql === "string" ? normalizeSql(body.sql) : null;
-  if (!sql) return deny("db_query_sql");
+  if (!sql) {
+    oa({ tables: [], status: "denied", reason: "db_query_sql" });
+    return deny("db_query_sql");
+  }
   const params = Array.isArray(body?.params) ? body.params : [];
   const hash = await sha256Short(sql);
   if (sql === PRAGMA_SYNC_STATUS) {
     const { results } = await env.QUANT_DB.prepare(sql).all();
+    oa({ tables: ["sync_status"], sql, rowCount: results.length, status: "ok" });
     return allow("db_query_pragma", hash, { success: true, results });
   }
-  if (!checkReadOnlyOutbound(sql)) return deny("db_query_sql", hash);
+  if (!checkReadOnlyOutbound(sql)) {
+    oa({ tables: extractTables(sql), sql, status: "denied", reason: "db_query_sql" });
+    return deny("db_query_sql", hash);
+  }
   try {
     const { results } = await env.QUANT_DB.prepare(`SELECT * FROM (${sql})`)
       .bind(...params)
       .all();
+    oa({ tables: extractTables(sql), sql, rowCount: results.length, status: "ok" });
     return allow("db_query", hash, { success: true, results });
   } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    oa({ tables: extractTables(sql), sql, status: "error", reason: msg.slice(0, 200) });
     return Response.json({
       success: false,
-      error: `d1_error: ${error instanceof Error ? error.message : String(error)}`.slice(0, 200)
+      error: `d1_error: ${msg}`.slice(0, 200)
     });
   }
 }
@@ -593,44 +664,61 @@ async function handleDbQuery(
 async function handleDbExecute(
   request: Request,
   env: OutboundEnv,
-  job: Job
+  job: Job,
+  oa: OaPush
 ): Promise<Response> {
   const body = await readJsonBody(request);
   const sql = typeof body?.sql === "string" ? normalizeSql(body.sql) : null;
-  if (!sql) return deny("db_execute_sql");
+  if (!sql) {
+    oa({ tables: [], status: "denied", reason: "db_execute_sql" });
+    return deny("db_execute_sql");
+  }
   const params = Array.isArray(body?.params) ? body.params : [];
   const hash = await sha256Short(sql);
   if (DDL_NOOP.some((re) => re.test(sql))) {
+    oa({ tables: extractTables(sql), sql, status: "ok" });
     return allow("db_execute_ddl_noop", hash, { success: true });
   }
   const syncMatch = SYNC_UPSERT.exec(sql);
   if (syncMatch) {
     if (params.length !== 2 || params[0] !== job.ts_code) {
+      oa({ tables: ["sync_status"], sql, status: "denied", reason: "db_execute_sync_params" });
       return deny("db_execute_sync_params", hash);
     }
     await env.QUANT_DB.prepare(sql).bind(...params).run();
+    oa({ tables: ["sync_status"], sql, status: "ok" });
     return allow("db_execute_sync", hash, { success: true });
   }
   if (AI_RESULT_INSERT.test(sql)) {
     if (params.length !== 24 || params[0] !== job.date || params[2] !== job.ts_code) {
+      oa({ tables: ["ai_analysis_result"], sql, status: "denied", reason: "db_execute_ai_params" });
       return deny("db_execute_ai_params", hash);
     }
     await env.QUANT_DB.prepare(sql).bind(...params).run();
+    oa({ tables: ["ai_analysis_result"], sql, status: "ok" });
     return allow("db_execute_ai", hash, { success: true });
   }
+  oa({ tables: extractTables(sql), sql, status: "denied", reason: "db_execute_sql" });
   return deny("db_execute_sql", hash);
 }
 
 async function handleDbSave(
   request: Request,
   env: OutboundEnv,
-  job: Job
+  job: Job,
+  oa: OaPush
 ): Promise<Response> {
   const body = await readJsonBody(request);
   const hash = await sha256Short(`save:${String(body?.table)}`);
-  if (body?.table !== "institutional_surveys") return deny("db_save_table", hash);
+  if (body?.table !== "institutional_surveys") {
+    oa({ tables: [typeof body?.table === "string" ? body.table : "?"], status: "denied", reason: "db_save_table" });
+    return deny("db_save_table", hash);
+  }
   const data = body.data;
-  if (!Array.isArray(data) || data.length > 500) return deny("db_save_rows", hash);
+  if (!Array.isArray(data) || data.length > 500) {
+    oa({ tables: ["institutional_surveys"], status: "denied", reason: "db_save_rows" });
+    return deny("db_save_rows", hash);
+  }
   for (const row of data) {
     if (!row || typeof row !== "object" || Array.isArray(row)) return deny("db_save_row", hash);
     const keys = Object.keys(row as Record<string, unknown>).sort();
@@ -653,6 +741,7 @@ async function handleDbSave(
     )
   );
   if (statements.length > 0) await env.QUANT_DB.batch(statements);
+  oa({ tables: ["institutional_surveys"], rowCount: data.length, status: "ok" });
   return allow("db_save", hash, { success: true, count: data.length });
 }
 
@@ -660,23 +749,31 @@ async function handleDbSave(
 async function handleVectorCheck(
   request: Request,
   env: OutboundEnv,
-  job: Job
+  job: Job,
+  oa: OaPush
 ): Promise<Response> {
   const body = await readJsonBody(request);
   const id = body?.id;
   const hash = await sha256Short(`vector_check`);
   if (typeof id !== "string" || id.length > 64 || !id.startsWith(`${job.ts_code}_`)) {
+    oa({ tables: ["vectorize:stock-knowledge"], status: "denied", reason: "vector_check_id" });
     return deny("vector_check_id", hash);
   }
-  if (!env.VECTORIZE?.getByIds) return deny("vector_unavailable", hash);
+  if (!env.VECTORIZE?.getByIds) {
+    oa({ tables: ["vectorize:stock-knowledge"], status: "denied", reason: "vector_unavailable" });
+    return deny("vector_unavailable", hash);
+  }
   const found = await env.VECTORIZE.getByIds([id]);
-  return allow("vector_check", hash, { success: true, exists: Array.isArray(found) && found.length > 0 });
+  const exists = Array.isArray(found) && found.length > 0;
+  oa({ tables: ["vectorize:stock-knowledge"], rowCount: exists ? 1 : 0, status: "ok" });
+  return allow("vector_check", hash, { success: true, exists });
 }
 
 async function handleVectorUpsert(
   request: Request,
   env: OutboundEnv,
-  job: Job
+  job: Job,
+  oa: OaPush
 ): Promise<Response> {
   const body = await readJsonBody(request);
   const hash = await sha256Short("vector_upsert");
@@ -690,6 +787,7 @@ async function handleVectorUpsert(
     ids.length !== embeddings.length ||
     ids.length !== metadatas.length
   ) {
+    oa({ tables: ["vectorize:stock-knowledge"], status: "denied", reason: "vector_upsert_shape" });
     return deny("vector_upsert_shape", hash);
   }
   for (let i = 0; i < ids.length; i++) {
@@ -704,10 +802,14 @@ async function handleVectorUpsert(
       typeof meta !== "object" ||
       (meta as Record<string, unknown>).ts_code !== job.ts_code
     ) {
+      oa({ tables: ["vectorize:stock-knowledge"], status: "denied", reason: "vector_upsert_item" });
       return deny("vector_upsert_item", hash);
     }
   }
-  if (!env.VECTORIZE) return deny("vector_unavailable", hash);
+  if (!env.VECTORIZE) {
+    oa({ tables: ["vectorize:stock-knowledge"], status: "denied", reason: "vector_unavailable" });
+    return deny("vector_unavailable", hash);
+  }
   await env.VECTORIZE.upsert(
     ids.map((id, i) => ({
       id: id as string,
@@ -716,13 +818,15 @@ async function handleVectorUpsert(
       namespace: job.ts_code
     }))
   );
+  oa({ tables: ["vectorize:stock-knowledge"], rowCount: ids.length, status: "ok" });
   return allow("vector_upsert", hash, { success: true, count: ids.length });
 }
 
 async function handleVectorQuery(
   request: Request,
   env: OutboundEnv,
-  job: Job
+  job: Job,
+  oa: OaPush
 ): Promise<Response> {
   const body = await readJsonBody(request);
   const hash = await sha256Short("vector_query");
@@ -737,21 +841,30 @@ async function handleVectorQuery(
     topK < 1 ||
     topK > 50
   ) {
+    oa({ tables: ["vectorize:stock-knowledge"], status: "denied", reason: "vector_query_params" });
     return deny("vector_query_params", hash);
   }
-  if (!env.VECTORIZE) return deny("vector_unavailable", hash);
+  if (!env.VECTORIZE) {
+    oa({ tables: ["vectorize:stock-knowledge"], status: "denied", reason: "vector_unavailable" });
+    return deny("vector_unavailable", hash);
+  }
   const results = await env.VECTORIZE.query(body!.vector as number[], {
     topK,
     returnMetadata: "all",
     namespace: job.ts_code
   });
+  const matchCount = Array.isArray((results as { matches?: unknown[] })?.matches)
+    ? (results as { matches: unknown[] }).matches.length
+    : 0;
+  oa({ tables: ["vectorize:stock-knowledge"], rowCount: matchCount, status: "ok" });
   return allow("vector_query", hash, { success: true, results });
 }
 
 async function handleR2Upload(
   request: Request,
   env: OutboundEnv,
-  job: Job
+  job: Job,
+  oa: OaPush
 ): Promise<Response> {
   const hash = await sha256Short("r2_upload");
   const escaped = job.ts_code.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -760,14 +873,28 @@ async function handleR2Upload(
   try {
     form = await request.formData();
   } catch {
+    oa({ tables: ["r2:prompt_logs"], status: "denied", reason: "r2_form" });
     return deny("r2_form", hash);
   }
   const key = form.get("key");
   const file = form.get("file");
-  if (typeof key !== "string" || !keyRe.test(key)) return deny("r2_key", hash);
-  if (!(file instanceof File)) return deny("r2_file", hash);
-  if (file.size > R2_MAX_BYTES) return deny("r2_size", hash);
-  if (!env.R2_STOCK_INFOR) return deny("r2_unavailable", hash);
+  if (typeof key !== "string" || !keyRe.test(key)) {
+    oa({ tables: ["r2:prompt_logs"], status: "denied", reason: "r2_key" });
+    return deny("r2_key", hash);
+  }
+  if (!(file instanceof File)) {
+    oa({ tables: ["r2:prompt_logs"], status: "denied", reason: "r2_file" });
+    return deny("r2_file", hash);
+  }
+  if (file.size > R2_MAX_BYTES) {
+    oa({ tables: ["r2:prompt_logs"], status: "denied", reason: "r2_size" });
+    return deny("r2_size", hash);
+  }
+  if (!env.R2_STOCK_INFOR) {
+    oa({ tables: ["r2:prompt_logs"], status: "denied", reason: "r2_unavailable" });
+    return deny("r2_unavailable", hash);
+  }
   await env.R2_STOCK_INFOR.put(key, file.stream());
+  oa({ tables: ["r2:prompt_logs"], status: "ok" });
   return allow("r2_upload", hash, { success: true, key });
 }

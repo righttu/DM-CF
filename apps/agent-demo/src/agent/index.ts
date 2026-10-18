@@ -14,11 +14,15 @@ import {
   sha256Hex,
   type AccessEnv,
   type AuditContext,
-  type DemoRole
+  type DemoRole,
+  verifyAccessEmail
 } from "../shared/access.js";
 import { readBoundedText } from "../shared/body.js";
 import { captureDlpFromError, lastBlock, type DlpOutcome } from "./dlp.js";
 import { renderPage, pageScriptHash } from "./ui.js";
+import { excerpt, recordAudit, sanitizeArgs, type AuditEvent } from "../shared/audit.js";
+import { isAuditAdmin, queryAuditEvents } from "./audit.js";
+import { auditPageScriptHash, renderAuditPage } from "./audit-page.js";
 import {
   MAX_HISTORY_MESSAGES,
   MAX_MESSAGE_CHARACTERS,
@@ -39,6 +43,8 @@ interface AgentDemoEnv extends AccessEnv {
   AI?: Ai;
   DASHSCOPE_API_KEY?: string;
   CF_AIG_TOKEN?: string;
+  AUDIT_DB?: D1Database;
+  AUDIT_ADMIN_EMAILS?: string;
 }
 
 type ModelBinding = { run: (...args: unknown[]) => Promise<unknown> };
@@ -570,7 +576,9 @@ const BLOCKED_REPLY = "该请求被 AI Gateway DLP 策略拦截（云端确认�
 function buildTools(
   agent: ResearchAgent,
   context: AuditContext,
+  conversationId: string,
   events: ChatEvent[],
+  trail: AuditEvent[],
   onEvent?: (event: ChatEvent) => void
 ): ai.ToolSet {
   const seen = new Map<string, unknown>();
@@ -601,6 +609,22 @@ function buildTools(
         const kind = result.status === "ok" ? "ok" : "denied";
         const job =
           result.status === "ok" ? analysisJobRef(tool.name, result.payload) : null;
+        trail.push({
+          source: "agent",
+          event: "tool_call",
+          user_email: context.userEmail ?? null,
+          actor_id: context.actorId,
+          role: context.role,
+          conversation_id: conversationId,
+          request_id: context.requestId,
+          server: tool.server,
+          tool: tool.name,
+          args_json: sanitizeArgs(args),
+          status:
+            result.status === "ok" ? "ok" : result.status === "denied" ? "denied" : "error",
+          duration_ms: durationMs,
+          job_id: job?.job_id ?? null
+        });
         record({
           text:
             result.status === "ok"
@@ -1517,14 +1541,25 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     }
     this.busy = true;
     const dlpSink: DlpOutcome[] = [];
+    const conversationId = this.ensureConversationId();
+    const toolTrail: AuditEvent[] = [];
+    const agentRow = (
+      event: AuditEvent["event"],
+      extra: Partial<AuditEvent>
+    ): AuditEvent => ({
+      source: "agent",
+      event,
+      user_email: context.userEmail ?? null,
+      actor_id: context.actorId,
+      role: context.role,
+      conversation_id: conversationId,
+      request_id: context.requestId,
+      ...extra
+    });
+    const flushTrail = (rows: AuditEvent[]) =>
+      this.ctx.waitUntil(recordAudit(this.env.AUDIT_DB, rows));
     try {
-      const model = buildChatModel(
-        this.env,
-        dlpSink,
-        context,
-        this.ensureConversationId(),
-        "chat"
-      );
+      const model = buildChatModel(this.env, dlpSink, context, conversationId, "chat");
       if (!model) {
         return { reply: "模型网关未配置，演示无法调用模型。", events };
       }
@@ -1536,10 +1571,22 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
         const blocked = lastBlock(dlpSink);
         if (!blocked) return null;
         record({ text: "DLP 拦截（云端确认）", kind: "denied" });
+        flushTrail([
+          // never store blocked prompt/reply content
+          agentRow("question", { status: "denied", reason: "dlp_blocked" }),
+          ...toolTrail,
+          agentRow("dlp_block", {
+            status: "denied",
+            reason: blocked.detail ?? "dlp_blocked",
+            duration_ms: null
+          })
+        ]);
         return { reply: BLOCKED_REPLY, events, dlp: blocked };
       };
 
-      const tools = buildTools(this, context, events, (e) => emit({ type: "step", ...e }));
+      const tools = buildTools(this, context, conversationId, events, toolTrail, (e) =>
+        emit({ type: "step", ...e })
+      );
       const result = traced.streamText({
         model,
         system: SYSTEM_PROMPT,
@@ -1592,28 +1639,51 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
       } catch (streamError) {
         if (!signal?.aborted) throw streamError;
       }
+      const questionRow = (blockedQ: boolean): AuditEvent =>
+        agentRow("question", {
+          status: "ok",
+          reason: blockedQ ? "dlp_blocked" : null,
+          text_excerpt: blockedQ ? null : excerpt(message, 300)
+        });
+      const replyRow = (replyText: string, status: string): AuditEvent =>
+        agentRow("reply", { status, text_excerpt: excerpt(replyText, 300) });
       if (signal?.aborted) {
         const partial = text.trim();
-        if (!partial) return { reply: "", events, stopped: true };
+        if (!partial) {
+          flushTrail([questionRow(false), ...toolTrail, agentRow("reply", { status: "stopped" })]);
+          return { reply: "", events, stopped: true };
+        }
         const reply = `${partial}\n\n（已停止生成）`;
         this.persistTurn(userMessage, reply, events);
         record({ text: "已停止生成", kind: "denied" });
+        flushTrail([questionRow(false), ...toolTrail, replyRow(reply, "stopped")]);
         return { reply, events, stopped: true };
       }
       const blocked = blockedOutcome();
       if (blocked) return blocked;
       if (errored && !text.trim()) {
         record({ text: "模型调用失败", kind: "denied" });
+        flushTrail([
+          questionRow(false),
+          ...toolTrail,
+          agentRow("reply", { status: "error", reason: "model_error" })
+        ]);
         return { reply: "模型调用失败，请稍后重试。", events };
       }
       const reply = text.trim();
       if (!reply) {
         record({ text: "模型未给出文字回答", kind: "denied" });
+        flushTrail([
+          questionRow(false),
+          ...toolTrail,
+          agentRow("reply", { status: "error", reason: "empty_reply" })
+        ]);
         return { reply: "模型没有给出回答，请换一种问法重试。", events };
       }
       const flag = [...dlpSink].reverse().find((o) => o.action === "FLAG");
       if (flag) record({ text: "DLP 标记（未拦截，云端确认）", kind: "denied" });
       this.persistTurn(userMessage, reply, events);
+      flushTrail([questionRow(false), ...toolTrail, replyRow(reply, "ok")]);
       return { reply, events, dlp: flag };
     } finally {
       this.busy = false;
@@ -1697,6 +1767,37 @@ async function handleRequest(
   if (!requestHostAllowed(request, env)) {
     return json({ error: "host_not_allowed" }, 403);
   }
+  // Admin audit surface first: gated by AUDIT_ADMIN_EMAILS only (verified
+  // email, independent of the Analyst/Viewer role). Always 404 when not an
+  // admin — existence is never revealed.
+  if (
+    request.method === "GET" &&
+    (url.pathname === "/audit" || url.pathname === "/api/audit")
+  ) {
+    const email =
+      (await authenticate(request, env, env.AGENT_ACCESS_AUD))?.email ??
+      (await verifyAccessEmail(request, env, env.AGENT_ACCESS_AUD));
+    if (!isAuditAdmin(env, email ?? undefined)) {
+      return json({ error: "not_found" }, 404);
+    }
+    if (url.pathname === "/audit") {
+      const nonce = crypto.randomUUID();
+      return new Response(renderAuditPage(nonce), {
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          ...SECURITY_HEADERS,
+          "content-security-policy": `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}' 'sha256-${await auditPageScriptHash()}'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
+        }
+      });
+    }
+    try {
+      const events = await queryAuditEvents(env, url.searchParams);
+      return json({ events });
+    } catch {
+      return json({ error: "audit_query_failed" }, 500);
+    }
+  }
+
   const identity = await authenticate(request, env, env.AGENT_ACCESS_AUD);
   if (!identity) {
     return json({ error: "unauthorized" }, 401);
@@ -1724,6 +1825,8 @@ async function handleRequest(
     return stub.fetch(request);
   }
 
+  const auditAdmin = isAuditAdmin(env, identity.email);
+
   const stub = await getAgentByName(env.ResearchAgent, doName);
 
   if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
@@ -1736,7 +1839,8 @@ async function handleRequest(
             email: identity.email,
             role: identity.role,
             localSimulation: identity.localSimulation,
-            actorId: doName
+            actorId: doName,
+            auditAdmin
           },
           history: session.history,
           mcp: session.mcp,
@@ -1772,7 +1876,8 @@ async function handleRequest(
         email: identity.email,
         role: identity.role,
         localSimulation: identity.localSimulation,
-        actorId: doName
+        actorId: doName,
+        auditAdmin
       },
       history: session.history,
       conversationId: session.conversationId,
