@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
 import schemaSql from "./fixtures/quant-schema.sql?raw";
+import { analysisCleanupEvents } from "./entry.js";
 import {
   AnalysisJobRunner,
   __setAnalysisTransportForTests,
@@ -33,6 +34,7 @@ let statusBody: Record<string, unknown> = { state: "running", phase: "chip" };
 let runBody: Record<string, unknown> = { state: "running", phase: "chip" };
 let startError: Error | null = null;
 let stopCalls = 0;
+let stopThrows = false;
 
 function stubTransport() {
   __setAnalysisTransportForTests({
@@ -50,6 +52,8 @@ function stubTransport() {
     },
     async stop() {
       stopCalls += 1;
+      analysisCleanupEvents.push("stop");
+      if (stopThrows) throw new Error("stop boom");
     }
   });
 }
@@ -59,6 +63,7 @@ afterEach(() => {
   statusBody = { state: "running", phase: "chip" };
   runBody = { state: "running", phase: "chip" };
   startError = null;
+  stopThrows = false;
 });
 
 function stubFor(jobId: string) {
@@ -721,12 +726,32 @@ describe("analysis tools", () => {
     await doneStub.startJob({ ts_code: "000776.SZ", date: today(), requested_by: "a" });
     statusBody = { state: "succeeded", phase: "done", result: { status: "success" } };
     await doneStub.status();
+    // Cleanup stops the container first, then wipes storage.
+    analysisCleanupEvents.length = 0;
     await runInDurableObject(doneStub, async (instance) => {
       await (instance as unknown as { runCleanup(): Promise<void> }).runCleanup();
     });
+    expect(analysisCleanupEvents).toEqual(["stop", "wipe"]);
     await runInDurableObject(doneStub, async (_i, ctx) => {
       expect(await ctx.storage.get("job")).toBeFalsy();
       expect(await ctx.storage.get("cleanup_scheduled")).toBeFalsy();
+    });
+
+    // stop() is best-effort: a failing stop does not block the wipe.
+    const boomId = `000778.SZ:${today()}`;
+    const boomStub = stubFor(boomId);
+    await boomStub.startJob({ ts_code: "000778.SZ", date: today(), requested_by: "a" });
+    statusBody = { state: "succeeded", phase: "done", result: { status: "success" } };
+    await boomStub.status();
+    stopThrows = true;
+    analysisCleanupEvents.length = 0;
+    await runInDurableObject(boomStub, async (instance) => {
+      await (instance as unknown as { runCleanup(): Promise<void> }).runCleanup();
+    });
+    stopThrows = false;
+    expect(analysisCleanupEvents).toEqual(["stop", "wipe"]);
+    await runInDurableObject(boomStub, async (_i, ctx) => {
+      expect(await ctx.storage.get("job")).toBeFalsy();
     });
 
     // Failed -> armed; a re-run removes the token so the scheduled cleanup is

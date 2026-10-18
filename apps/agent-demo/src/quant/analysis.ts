@@ -113,9 +113,11 @@ export interface AnalysisJobView extends AnalysisJob {
 
 const JOB_TIMEOUT_MS = 20 * 60 * 1000;
 const JOB_TIMEOUT_SECONDS = JOB_TIMEOUT_MS / 1000;
-// A terminal job's DO storage is wiped 24 h later (the job id contains the
-// date, so next day's run gets a fresh DO anyway); a re-run disarms it.
-export const CLEANUP_AFTER_SECONDS = 24 * 60 * 60;
+// 用完即毁: a terminal job's DO storage is wiped 5 minutes later — the job id
+// contains the date so the DO is never reused, and the short grace lets the
+// Agent progress card and the model read the final status/timeline once. A
+// re-run disarms it.
+export const ANALYSIS_CLEANUP_AFTER_SECONDS = 5 * 60;
 const CLEANUP_TOKEN_KEY = "cleanup_token";
 const TERMINAL_STATUSES = new Set<AnalysisJobStatus>(["succeeded", "failed", "timeout"]);
 const CONTAINER_HOST = "http://container";
@@ -179,6 +181,13 @@ export class AnalysisJobRunner {
     if (!token || token !== (await this.storage.get(CLEANUP_TOKEN_KEY))) return;
     const job = await this.loadJob();
     if (!job || !TERMINAL_STATUSES.has(job.status)) return;
+    // Stop the container first (best effort — it may already be asleep or
+    // gone), then wipe storage so the DO no longer exists.
+    try {
+      await this.transport().stop();
+    } catch {
+      /* best effort */
+    }
     await this.cleanup.wipe();
   }
 
@@ -388,7 +397,7 @@ export class QuantAnalysisContainer extends Container<AnalysisEnv> {
     (seconds) => this.schedule(seconds, "onJobTimeout").then(() => undefined),
     {
       schedule: (token) =>
-        this.schedule(CLEANUP_AFTER_SECONDS, "onJobCleanup", { token }).then(() => undefined),
+        this.schedule(ANALYSIS_CLEANUP_AFTER_SECONDS, "onJobCleanup", { token }).then(() => undefined),
       wipe: () =>
         this.ctx.storage.deleteAll().then(() => this.ctx.storage.deleteAlarm())
     }

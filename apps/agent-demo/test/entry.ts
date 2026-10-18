@@ -12,6 +12,10 @@ import {
   type AnalysisJob
 } from "../src/quant/analysis.js";
 
+// Records stop()/wipe() ordering for the cleanup test (same isolate as the
+// test module, so it can be asserted directly).
+export const analysisCleanupEvents: string[] = [];
+
 // Test stand-in for the production QuantAnalysisContainer: the container
 // runtime (ctx.container) is unavailable in the local pool, so the ANALYSIS
 // binding maps to a plain Durable Object that runs the same job logic against
@@ -32,7 +36,10 @@ class TestQuantAnalysisContainer extends DurableObject<QuantEnv & AnalysisEnv> {
       // No library schedule() in the local pool: record the armed token and let
       // tests trigger the same runCleanup path via runCleanup().
       schedule: (token) => this.ctx.storage.put("cleanup_scheduled", token),
-      wipe: () => this.ctx.storage.deleteAll().then(() => this.ctx.storage.deleteAlarm())
+      wipe: () => {
+        analysisCleanupEvents.push("wipe");
+        return this.ctx.storage.deleteAll().then(() => this.ctx.storage.deleteAlarm());
+      }
     }
   );
 
