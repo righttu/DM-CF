@@ -1,0 +1,53 @@
+apps/agent-demo/src/agent/index.ts
+  s_02649a17b7b371::t_9d451d06185480 56,61
+apps/agent-demo/src/pipeline/outbound.ts
+  s_02649a17b7b371::t_aaf04855b10ad5 10,200,209
+apps/agent-demo/src/shared/outbound.ts
+  s_02649a17b7b371::t_21466fda1e58f1 115-120,161,180-182,191-198,202-203,205-212,219-237
+apps/agent-demo/test/agent.test.ts
+  s_02649a17b7b371::t_e7a853a4f26527 8,2136-2144
+apps/agent-demo/test/pipeline.test.ts
+  s_02649a17b7b371::t_b024c91486a4fc 613-621,626-631,678-686,705-721,734,741-757,765,767-771,778-841,909-911,922-924
+apps/agent-demo/test/quant-analysis.test.ts
+  s_02649a17b7b371::t_6629f495647555 697-699,711-713
+test_ai_defaults.py
+  s_02649a17b7b371::t_4407d506b0a969 1-141
+.devin/agent-demo/wrangler.agent.jsonc
+  s_afae7094829cef::t_dd23b0ffb47873 35
+AGENTS.md
+  s_afae7094829cef::t_f7be24352894a6 211-218
+ai_analyst_Brain_final.py
+  s_afae7094829cef::t_ce644e8a3d3aac 25-28,31-32,53-58,61
+apps/agent-demo/src/agent/ui.ts
+  s_afae7094829cef::t_68313888ca6f79 1112
+apps/agent-demo/src/quant/analysis.ts
+  s_afae7094829cef::t_22125532da62bf 13,447,454
+apps/agent-demo/test/dlp.test.ts
+  s_afae7094829cef::t_06278c505a38a6 2,148-162
+hotspot_registry_Auditor_final.py
+  s_afae7094829cef::t_84df7d1ab38ebc 9-12,15-16,50-54,56,121-122
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "15592b15820c53fd51c77965bc5e845bb41b8a1b",
+  "prompts": {},
+  "sessions": {
+    "s_02649a17b7b371": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "calm-noun",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    },
+    "s_afae7094829cef": {
+      "agent_id": {
+        "tool": "devin",
+        "id": "s_afae7094829cef",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
