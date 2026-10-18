@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { captureDlpOutcome, type DlpOutcome } from "../src/agent/dlp.js";
+import { captureDlpFromError, captureDlpOutcome, type DlpOutcome } from "../src/agent/dlp.js";
 import { setModelFake as __setModelFetchForTests } from "./model-fake.js";
 import { sha256Hex } from "../src/shared/access.js";
 import { ANALYST_EMAIL, authedFetch, connectAgentMcp, signJwt } from "./helpers.js";
@@ -143,6 +143,21 @@ describe("DLP outcome classification", () => {
       headers: { "content-type": "application/json" }
     });
     expect(await collect(resp)).toHaveLength(0);
+  });
+
+  it("classifies the thrown AI_APICallError DLP shape observed via dynamic route", () => {
+    // Live probe (aig-route-probe, dynamic/abc-agent): binding run through the
+    // provider throws an APICallError whose message carries the gateway code.
+    const sink: DlpOutcome[] = [];
+    const err = Object.assign(new Error("2030: Content moderation error"), {
+      name: "AI_APICallError",
+      statusCode: undefined,
+      cause: "AiGatewayError: 2030: Content moderation error"
+    });
+    captureDlpFromError(err, sink, "01a14dc7-4d38-770e-b032-3d4c62f115bf");
+    expect(sink[0]?.action).toBe("BLOCK");
+    expect(sink[0]?.detail).toBe("error_2030_gateway");
+    expect(sink[0]?.logId).toBe("01a14dc7-4d38-770e-b032-3d4c62f115bf");
   });
 
   it("does not label generic 400/404 as DLP", async () => {

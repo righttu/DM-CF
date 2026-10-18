@@ -7,7 +7,7 @@ import {
   aiChatOutboundHandler,
   bjCompactDate,
   checkReadOnlyOutbound,
-  type AiRunLike,
+  type AiGatewayEnv,
   normalizeSql,
   outboundAllow,
   outboundDeny,
@@ -197,7 +197,7 @@ const AI_SCRIPTS = new Set(["ai_brain", "registry_auditor"]);
 // ai.internal handler: only the Brain and Auditor jobs may call Workers AI.
 export async function aiOutboundHandler(
   request: Request,
-  env: BatchOutboundEnv & { AI?: AiRunLike },
+  env: BatchOutboundEnv & AiGatewayEnv,
   ctx: { containerId: string }
 ): Promise<Response> {
   const job = await resolveJob(env, ctx.containerId);
@@ -206,7 +206,7 @@ export async function aiOutboundHandler(
   if (!AI_SCRIPTS.has(job.script)) return deny("ai_script", hash);
   return aiChatOutboundHandler(
     request,
-    env.AI,
+    env,
     { source: "batch", script: job.script, run_date: job.run_date },
     EVENT
   );

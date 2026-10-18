@@ -112,12 +112,12 @@ const AI_FORWARD_FIELDS = [
   "chat_template_kwargs"
 ] as const;
 
-export type AiRunLike = {
-  run(
-    model: string,
-    input: Record<string, unknown>,
-    options?: { gateway?: { id?: string; metadata?: Record<string, string> } }
-  ): Promise<unknown>;
+// ai.internal calls reach the gateway over HTTPS (the binding path cannot use
+// provider routes with dynamic fallback). Credentials stay on the Worker env.
+export type AiGatewayEnv = {
+  CF_ACCOUNT_ID?: string;
+  CF_AIG_TOKEN?: string;
+  fetch?: typeof fetch;
 };
 
 export interface AiJobMeta {
@@ -158,7 +158,7 @@ function normalizeAiResult(result: unknown, model: string): Record<string, unkno
 // AI Gateway metadata carries only job identifiers -- never message content.
 export async function aiChatOutboundHandler(
   request: Request,
-  ai: AiRunLike | undefined,
+  env: AiGatewayEnv,
   meta: AiJobMeta,
   event: string
 ): Promise<Response> {
@@ -177,7 +177,9 @@ export async function aiChatOutboundHandler(
   if (!Array.isArray(body.messages) || body.messages.length === 0) {
     return outboundDeny(event, "ai_messages", hash);
   }
-  if (!ai?.run) return outboundDeny(event, "ai_unavailable", hash);
+  if (!env.CF_ACCOUNT_ID || !env.CF_AIG_TOKEN) {
+    return outboundDeny(event, "ai_unconfigured", hash);
+  }
   const input: Record<string, unknown> = { stream: false };
   for (const key of AI_FORWARD_FIELDS) {
     if (body[key] !== undefined) input[key] = body[key];
@@ -186,18 +188,51 @@ export async function aiChatOutboundHandler(
   if (meta.script) metadata.script = meta.script;
   if (meta.run_date) metadata.run_date = meta.run_date;
   if (meta.ts_code) metadata.ts_code = meta.ts_code;
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    "user-agent": "abc-quant-outbound/1.0",
+    "cf-aig-authorization": `Bearer ${env.CF_AIG_TOKEN}`,
+    "cf-aig-metadata": JSON.stringify(metadata)
+  };
+  const cacheKey = request.headers.get("cf-aig-cache-key");
+  if (cacheKey && cacheKey.length <= 128) headers["cf-aig-cache-key"] = cacheKey;
   console.info(
     JSON.stringify({ event, action: "ai_chat", model, prompt_bytes: length })
   );
+  const fetchImpl = env.fetch ?? fetch;
+  let upstream: Response;
   try {
-    const result = await ai.run(model, input, {
-      gateway: { id: "ai-gateway", metadata }
-    });
-    return Response.json(normalizeAiResult(result, model));
+    upstream = await fetchImpl(
+      `https://gateway.ai.cloudflare.com/v1/${env.CF_ACCOUNT_ID}/ai-gateway/compat/chat/completions`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ model, ...input })
+      }
+    );
   } catch (error) {
     return Response.json(
       { error: { message: `ai_error: ${error instanceof Error ? error.message : String(error)}`.slice(0, 200), type: "server_error" } },
       { status: 502 }
     );
   }
+  const text = await upstream.text();
+  if (upstream.ok) {
+    let parsed: unknown = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = null;
+    }
+    return Response.json(normalizeAiResult(parsed, model));
+  }
+  return Response.json(
+    {
+      error: {
+        message: `ai_gateway_${upstream.status}: ${text.slice(0, 200)}`,
+        type: "server_error"
+      }
+    },
+    { status: upstream.status }
+  );
 }

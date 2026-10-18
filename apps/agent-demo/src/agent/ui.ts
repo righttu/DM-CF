@@ -1109,7 +1109,7 @@ function refreshSession(s) {
   }
   setStatus('mcp-state', mcp.connected ? '已连接' : (mcp.state === 'authenticating' ? '待授权（将跳转至授权页）' : (mcp.state === 'failed' ? '连接失败' : (['connecting', 'discovering'].includes(mcp.state) ? '正在建立连接' : '未连接'))), mcp.connected ? 'ok' : 'pending');
   setStatus('model-state', s.setup.modelConfigured ? '已配置（未经云端确认）' : '未配置', s.setup.modelConfigured ? 'pending' : 'err');
-  $('model-id').textContent = s.modelId || '—';
+  $('model-id').textContent = ({ 'dynamic/abc-agent': 'abc-agent（GLM 5.3 Flash）' })[s.modelId] || s.modelId || '—';
   $('dlp-btn').disabled = !s.setup.modelConfigured || dlpBusy;
   const connectBtn = $('connect-btn');
   connectBtn.disabled = !s.setup.mcpConfigured || mcp.connected || connectBusy;

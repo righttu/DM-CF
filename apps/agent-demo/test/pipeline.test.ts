@@ -610,17 +610,25 @@ describe("batch outbound handler", () => {
 });
 
 describe("ai.internal outbound handler", () => {
-  const fakeAi = {
-    calls: [] as { model: string; input: Record<string, unknown>; options: unknown }[],
-    result: { response: "pong" } as unknown,
-    async run(model: string, input: Record<string, unknown>, options: unknown) {
-      this.calls.push({ model, input, options });
-      return this.result;
+  const fakeGateway = {
+    calls: [] as { url: string; init: RequestInit }[],
+    response: new Response(JSON.stringify({ response: "pong" }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    }) as unknown,
+    async fetch(url: RequestInfo | URL, init?: RequestInit) {
+      this.calls.push({ url: String(url), init: init ?? {} });
+      return (this.response as Response).clone();
     }
   };
 
   function aiEnv() {
-    return { ...outboundEnv(), AI: fakeAi as never };
+    return {
+      ...outboundEnv(),
+      CF_ACCOUNT_ID: "acct-test",
+      CF_AIG_TOKEN: "tok-test",
+      fetch: fakeGateway.fetch.bind(fakeGateway) as typeof fetch
+    };
   }
 
   function chat(body: unknown) {
@@ -667,8 +675,15 @@ describe("ai.internal outbound handler", () => {
     await aiDenied(chat(goodBody), "no:job");
   });
 
-  it("allows brain/auditor, forwards whitelisted fields, shapes both result forms", async () => {
-    fakeAi.calls.length = 0;
+  function sentBody(i = -1) {
+    return JSON.parse(fakeGateway.calls.at(i)!.init.body as string) as Record<string, unknown>;
+  }
+  function sentHeaders(i = -1) {
+    return new Headers(fakeGateway.calls.at(i)!.init.headers);
+  }
+
+  it("allows brain/auditor, posts to gateway compat endpoint with auth+metadata, shapes both result forms", async () => {
+    fakeGateway.calls.length = 0;
     const brain = await seedJob("j-ai-b1", "ai_brain");
     const env2 = aiEnv();
     const r1 = await aiOutboundHandler(
@@ -687,19 +702,23 @@ describe("ai.internal outbound handler", () => {
     expect(r1.status).toBe(200);
     const b1 = (await r1.json()) as { choices: { message: { content: string } }[] };
     expect(b1.choices[0].message.content).toBe("pong");
-    const call = fakeAi.calls[0];
-    expect(call.model).toBe("@cf/moonshotai/kimi-k2.6");
-    expect(call.input.messages).toEqual(goodBody.messages);
-    expect(call.input.chat_template_kwargs).toEqual({ thinking: false });
-    expect(call.input).not.toHaveProperty("evil_field");
-    expect(call.input).not.toHaveProperty("api_key");
-    expect(call.input).not.toHaveProperty("model");
-    const meta = (call.options as { gateway: { id: string; metadata: Record<string, string> } })
-      .gateway.metadata;
-    expect(meta.script).toBe("ai_brain");
-    expect(meta.run_date).toBe(RUN_DATE);
+    const call = fakeGateway.calls[0];
+    expect(call.url).toBe(
+      "https://gateway.ai.cloudflare.com/v1/acct-test/ai-gateway/compat/chat/completions"
+    );
+    const h = sentHeaders(0);
+    expect(h.get("cf-aig-authorization")).toBe("Bearer tok-test");
+    const meta = JSON.parse(h.get("cf-aig-metadata")!) as Record<string, string>;
+    expect(meta).toEqual({ source: "batch", script: "ai_brain", run_date: RUN_DATE });
+    const out = sentBody(0);
+    expect(out.model).toBe("@cf/moonshotai/kimi-k2.6");
+    expect(out.stream).toBe(false);
+    expect(out.messages).toEqual(goodBody.messages);
+    expect(out.chat_template_kwargs).toEqual({ thinking: false });
+    expect(out).not.toHaveProperty("evil_field");
+    expect(out).not.toHaveProperty("api_key");
 
-    // Any non-empty model string passes through: Workers AI, dynamic routes,
+    // Any non-empty model string is passed through: Workers AI, dynamic routes,
     // provider routes, bare names.
     for (const m of [
       "dynamic/abc-brain",
@@ -712,27 +731,30 @@ describe("ai.internal outbound handler", () => {
         brain.ctx
       );
       expect(rAlt.status).toBe(200);
-      expect(fakeAi.calls.at(-1)?.model).toBe(m);
+      expect(sentBody().model).toBe(m);
     }
 
     // Auditor job allowed too.
     const aud = await seedJob("j-ai-a1", "registry_auditor");
     const r2 = await aiOutboundHandler(chat(goodBody), env2, aud.ctx);
     expect(r2.status).toBe(200);
-    expect((fakeAi.calls.at(-1)?.options as never as { gateway: { metadata: { script: string } } })
-      .gateway.metadata.script).toBe("registry_auditor");
+    const meta2 = JSON.parse(sentHeaders().get("cf-aig-metadata")!) as Record<string, string>;
+    expect(meta2.script).toBe("registry_auditor");
 
-    // OpenAI-shaped binding result is passed through (reasoning preserved).
-    fakeAi.result = {
-      choices: [
-        {
-          index: 0,
-          message: { role: "assistant", content: "ok", reasoning_content: "thought" },
-          finish_reason: "stop"
-        }
-      ],
-      usage: { total_tokens: 9 }
-    };
+    // OpenAI-shaped gateway result is passed through (reasoning preserved).
+    fakeGateway.response = new Response(
+      JSON.stringify({
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: "ok", reasoning_content: "thought" },
+            finish_reason: "stop"
+          }
+        ],
+        usage: { total_tokens: 9 }
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
     const r3 = await aiOutboundHandler(chat(goodBody), env2, brain.ctx);
     const b3 = (await r3.json()) as {
       choices: { message: { content: string; reasoning_content?: string } }[];
@@ -740,15 +762,83 @@ describe("ai.internal outbound handler", () => {
     };
     expect(b3.choices[0].message.content).toBe("ok");
     expect(b3.choices[0].message.reasoning_content).toBe("thought");
+    expect(b3.usage.total_tokens).toBe(9);
 
-    // Workers AI text shape {response:{content, reasoning_content}} is wrapped.
-    fakeAi.result = { response: { content: "wrapped", reasoning_content: "r" }, usage: { t: 1 } };
+    // Non-OpenAI shape is defensively normalized.
+    fakeGateway.response = new Response(
+      JSON.stringify({ response: { content: "wrapped", reasoning_content: "r" }, usage: { t: 1 } }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
     const r4 = await aiOutboundHandler(chat(goodBody), env2, brain.ctx);
     const b4 = (await r4.json()) as {
       choices: { message: { content: string; reasoning_content?: string } }[];
     };
     expect(b4.choices[0].message.content).toBe("wrapped");
     expect(b4.choices[0].message.reasoning_content).toBe("r");
+    fakeGateway.response = new Response(JSON.stringify({ response: "pong" }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  });
+
+  it("forwards cf-aig-cache-key as an upstream header (<=128 chars)", async () => {
+    fakeGateway.calls.length = 0;
+    const { ctx } = await seedJob("j-ai-cache", "ai_brain");
+    const env2 = aiEnv();
+    const req = (key: string | null) =>
+      new Request("http://ai.internal/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(key ? { "cf-aig-cache-key": key } : {})
+        },
+        body: JSON.stringify(goodBody)
+      });
+
+    const r1 = await aiOutboundHandler(req("601377.SH_20261018"), env2, ctx);
+    expect(r1.status).toBe(200);
+    expect(sentHeaders().get("cf-aig-cache-key")).toBe("601377.SH_20261018");
+
+    const r2 = await aiOutboundHandler(req(null), env2, ctx);
+    expect(r2.status).toBe(200);
+    expect(sentHeaders().get("cf-aig-cache-key")).toBeNull();
+
+    const r3 = await aiOutboundHandler(req("k".repeat(200)), env2, ctx);
+    expect(r3.status).toBe(200);
+    expect(sentHeaders().get("cf-aig-cache-key")).toBeNull();
+  });
+
+  it("passes upstream status through: 424 body becomes a real error, not model output", async () => {
+    const { ctx } = await seedJob("j-ai-424", "ai_brain");
+    const env2 = aiEnv();
+    fakeGateway.response = new Response(
+      JSON.stringify({ error: [{ code: 2030, message: "blocked" }], name: "AiGatewayError" }),
+      { status: 424, headers: { "content-type": "application/json" } }
+    );
+    const r424 = await aiOutboundHandler(chat(goodBody), env2, ctx);
+    expect(r424.status).toBe(424);
+    const e424 = (await r424.json()) as { error: { message: string; type: string } };
+    expect(e424.error.type).toBe("server_error");
+    expect(e424.error.message).toContain("ai_gateway_424");
+
+    fakeGateway.response = new Response("upstream exploded", { status: 500 });
+    const r500 = await aiOutboundHandler(chat(goodBody), env2, ctx);
+    expect(r500.status).toBe(500);
+    expect(((await r500.json()) as { error: { message: string } }).error.message).toContain(
+      "ai_gateway_500"
+    );
+  });
+
+  it("denies ai_unconfigured when account or token is missing", async () => {
+    const { ctx } = await seedJob("j-ai-noconf", "ai_brain");
+    for (const env3 of [
+      { ...aiEnv(), CF_ACCOUNT_ID: undefined },
+      { ...aiEnv(), CF_AIG_TOKEN: undefined }
+    ]) {
+      const resp = await aiOutboundHandler(chat(goodBody), env3, ctx);
+      expect(resp.status).toBe(403);
+      expect(((await resp.json()) as { error: string }).error).toBe("operation_not_allowed");
+    }
   });
 });
 
@@ -816,7 +906,9 @@ describe("batch container env", () => {
       {
         AI_ENGINE: "WORKERS_AI",
         BRAIN_AI_MODEL: "dynamic/abc-brain",
-        AUDITOR_AI_MODEL: "dynamic/abc-auditor"
+        AUDITOR_AI_MODEL: "dynamic/abc-auditor",
+        DASHSCOPE_API_KEY: "dash-secret",
+        CF_AIG_TOKEN: "aig-secret"
       } as never,
       transport(seen),
       () => "jid",
@@ -827,6 +919,9 @@ describe("batch container env", () => {
     expect(seen[0].BRAIN_AI_MODEL).toBe("dynamic/abc-brain");
     expect(seen[0].AUDITOR_AI_MODEL).toBe("dynamic/abc-auditor");
     expect(seen[0].AI_BASE_URL).toBe("http://ai.internal/v1");
+    // model credentials stay on the Worker; containers don't need them any more
+    expect(seen[0]).not.toHaveProperty("DASHSCOPE_API_KEY");
+    expect(seen[0]).not.toHaveProperty("CF_AIG_TOKEN");
 
     const seen2: Record<string, string>[] = [];
     const runner2 = new BatchJobRunner(

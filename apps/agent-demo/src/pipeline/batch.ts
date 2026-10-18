@@ -101,8 +101,6 @@ export class BatchJobRunner {
       CF_ACCESS_CLIENT_SECRET: "unused"
     };
     if (env.MY_TUSHARE_TOKEN) vars.MY_TUSHARE_TOKEN = env.MY_TUSHARE_TOKEN;
-    if (env.DASHSCOPE_API_KEY) vars.DASHSCOPE_API_KEY = env.DASHSCOPE_API_KEY;
-    if (env.CF_AIG_TOKEN) vars.CF_AIG_TOKEN = env.CF_AIG_TOKEN;
     if (env.CF_ACCOUNT_ID) vars.CF_ACCOUNT_ID = env.CF_ACCOUNT_ID;
     if (env.AI_ENGINE) vars.AI_ENGINE = env.AI_ENGINE;
     if (env.BRAIN_AI_MODEL) vars.BRAIN_AI_MODEL = env.BRAIN_AI_MODEL;

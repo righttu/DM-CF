@@ -694,7 +694,9 @@ describe("analysis tools", () => {
       {
         AI_ENGINE: "WORKERS_AI",
         BRAIN_AI_MODEL: "dynamic/abc-brain",
-        AUDITOR_AI_MODEL: "dynamic/abc-auditor"
+        AUDITOR_AI_MODEL: "dynamic/abc-auditor",
+        DASHSCOPE_API_KEY: "dash-secret",
+        CF_AIG_TOKEN: "aig-secret"
       } as never,
       transport(seen),
       () => "jid",
@@ -706,6 +708,9 @@ describe("analysis tools", () => {
     expect(seen[0].BRAIN_AI_MODEL).toBe("dynamic/abc-brain");
     expect(seen[0].AUDITOR_AI_MODEL).toBe("dynamic/abc-auditor");
     expect(seen[0].AI_BASE_URL).toBe("http://ai.internal/v1");
+    // model credentials stay on the Worker; containers don't need them any more
+    expect(seen[0]).not.toHaveProperty("DASHSCOPE_API_KEY");
+    expect(seen[0]).not.toHaveProperty("CF_AIG_TOKEN");
 
     const seen2: Record<string, string>[] = [];
     const runner2 = new AnalysisJobRunner(

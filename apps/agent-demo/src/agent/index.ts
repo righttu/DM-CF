@@ -53,11 +53,12 @@ export function __setModelBindingForTests(impl: ModelBinding | undefined): void 
 // const DEFAULT_MODEL_ID = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const DEFAULT_MODEL_ID = "@cf/zai-org/glm-5.3-flash";
 
-const MODEL_SETTINGS: Record<
+export const MODEL_SETTINGS: Record<
   string,
   { reasoning_effort?: "low" | "medium" | "high" | null; chat_template_kwargs?: Record<string, unknown> }
 > = {
   "@cf/zai-org/glm-5.3-flash": { reasoning_effort: "low" },
+  "dynamic/abc-agent": { reasoning_effort: "low" },
   "@cf/moonshotai/kimi-k2.6": { chat_template_kwargs: { thinking: false } }
 };
 const OAUTH_STATE_TTL = 1800;

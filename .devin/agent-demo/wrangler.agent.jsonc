@@ -32,7 +32,7 @@
     "MCP_SERVER_URL": "https://portal-demo.righttu.uk/mcp",
     "ACCOUNT_ID": "ebc4f70211dc33165a239c6018da8e2d",
     "GATEWAY_ID": "agent-demo",
-    "MODEL_ID": "@cf/zai-org/glm-5.3-flash",
+    "MODEL_ID": "dynamic/abc-agent",
     "ENVIRONMENT": "production"
   },
   "env": {

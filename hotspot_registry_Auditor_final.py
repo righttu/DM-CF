@@ -6,13 +6,14 @@ from openai import OpenAI
 
 # --- 配置提取 ---
 # 开关: "OLLAMA" / "BAILIAN" / "WORKERS_AI"。环境变量 AI_ENGINE 可覆盖默认值；
-# 设为 WORKERS_AI 并把 AUDITOR_AI_MODEL 设为 dynamic/<路由名> 即走 AI Gateway 动态路由
-AI_ENGINE = os.getenv("AI_ENGINE") or "BAILIAN"
-# AI_ENGINE = "WORKERS_AI"
+# 默认 WORKERS_AI：经 AI Gateway 动态路由（AUDITOR_AI_MODEL 默认 dynamic/abc-auditor）；
+# BAILIAN 仅作备用
+AI_ENGINE = os.getenv("AI_ENGINE") or "WORKERS_AI"
+# AI_ENGINE = "BAILIAN"
 OLLAMA_MODEL = "qwen3:14b"
 BAILIAN_MODEL = "qwen3.5-flash"
-# AUDITOR_AI_MODEL 可覆盖默认模型；填 "dynamic/abc-auditor" 等值则走 AI Gateway 动态路由
-WORKERS_AI_MODEL = os.getenv("AUDITOR_AI_MODEL", "@cf/moonshotai/kimi-k2.6")
+# AUDITOR_AI_MODEL 可覆盖默认模型；dynamic/abc-auditor = AI Gateway 动态路由
+WORKERS_AI_MODEL = os.getenv("AUDITOR_AI_MODEL", "dynamic/abc-auditor")
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
 CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID")
 CF_AIG_TOKEN = os.getenv("CF_AIG_TOKEN")
@@ -46,11 +47,13 @@ class RegistryAuditor:
         
     def _init_ai_client(self):
         if AI_ENGINE == "WORKERS_AI":
-            base_url = AI_BASE_URL or f"https://gateway.ai.cloudflare.com/v1/{CF_ACCOUNT_ID}/ai-gateway/workers-ai/v1"
-            if not AI_BASE_URL and not AI_API_KEY:
-                print("❌ 未设置 AI_API_KEY / CLOUDFLARE_API_TOKEN（直连 AI Gateway 需要）"); exit(1)
+            base_url = AI_BASE_URL or f"https://gateway.ai.cloudflare.com/v1/{CF_ACCOUNT_ID}/ai-gateway/compat"
+            if not AI_BASE_URL and not CF_ACCOUNT_ID:
+                print("❌ 未设置 CF_ACCOUNT_ID（直连 AI Gateway 需要）"); exit(1)
+            if not AI_BASE_URL and not CF_AIG_TOKEN:
+                print("❌ 未设置 CF_AIG_TOKEN（直连 AI Gateway 需要）"); exit(1)
             self.client = OpenAI(
-                api_key=AI_API_KEY or "unused",
+                api_key="unused",
                 base_url=base_url,
                 timeout=1800,
                 max_retries=0,
@@ -115,13 +118,9 @@ class RegistryAuditor:
             response = self.client.chat.completions.create(
                 model=self.active_model,
                 messages=[{"role": "user", "content": prompt}],
-                # Workers AI/Kimi 不支持 response_format，提示词已要求 JSON；
-                # thinking 关闭以保证输出稳定与时延
+                # Workers AI 动态路由不支持 response_format，提示词已要求 JSON；
+                # 模型由路由决定，不再下发 chat_template_kwargs（Qwen 可能拒绝该参数）
                 **({"response_format": {"type": "json_object"}} if AI_ENGINE != "WORKERS_AI" else {}),
-                extra_body=(
-                    {"chat_template_kwargs": {"thinking": False}}
-                    if AI_ENGINE == "WORKERS_AI" else {}
-                )
             )
             res_content = response.choices[0].message.content
             if AI_ENGINE == "WORKERS_AI":

@@ -5,6 +5,7 @@ import { MCPClientManager } from "agents/mcp/client";
 import { setModelFake as __setModelFetchForTests } from "./model-fake.js";
 import { sha256Hex } from "../src/shared/access.js";
 import { SYSTEM_PROMPT } from "../src/research-policy.js";
+import { MODEL_SETTINGS } from "../src/agent/index.js";
 import {
   ANALYST_EMAIL,
   VIEWER_EMAIL,
@@ -2130,5 +2131,14 @@ describe("analysis status endpoint + run_analysis job card", () => {
     expect(persisted).toHaveLength(1);
     expect(persisted[0].job?.job_id).toBe(JOB_ID);
     expect(JSON.stringify(assistant?.steps)).not.toContain("secret");
+  });
+});
+
+describe("dynamic-route model config", () => {
+  it("dynamic/abc-agent carries the same reasoning settings as GLM", () => {
+    expect(MODEL_SETTINGS["dynamic/abc-agent"]).toEqual({ reasoning_effort: "low" });
+    expect(MODEL_SETTINGS["dynamic/abc-agent"]).toEqual(
+      MODEL_SETTINGS["@cf/zai-org/glm-5.3-flash"]
+    );
   });
 });
