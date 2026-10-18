@@ -1,0 +1,47 @@
+apps/agent-demo/src/quant/analysis.ts
+  s_02649a17b7b371::t_464507231b2e9d 68
+apps/agent-demo/test/agent.test.ts
+  s_02649a17b7b371::t_76c660b9f2b8fc 1940-2134
+apps/agent-demo/test/quant-analysis.test.ts
+  s_02649a17b7b371::t_c94e167d8e1b34 764
+ai_analyst_Brain_final.py
+  s_ac1175b6b49498::t_7a79a32c35fc7f 56-57,579
+ai_analyst_infra_final.py
+  s_ac1175b6b49498::t_59d73de6a9fed4 156,158
+apps/agent-demo/src/agent/index.ts
+  s_ac1175b6b49498::t_7e969d1948dff1 73-77,126-220,555,600-601,611-612,1353-1412,1597,1614,1623-1624,1626-1634,1638-1642,1792-1806
+apps/agent-demo/src/agent/ui.ts
+  s_ac1175b6b49498::t_8ce4631d331d54 266-294,771-905,923,1031-1034,1342
+apps/agent-demo/src/pipeline/workflow.ts
+  s_ac1175b6b49498::t_e8ae848cb5bedf 22-26,131,150
+apps/agent-demo/src/quant/catalog.ts
+  s_ac1175b6b49498::t_b0cab3ea3f6b7d 407
+apps/agent-demo/test/pipeline.test.ts
+  s_ac1175b6b49498::t_5b25cdd19d28dc 972-987
+hotspot_registry_Auditor_final.py
+  s_ac1175b6b49498::t_7acd599664a0b2 52-53
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "fdfc0866feff9f450aad28124158709f5e0fd0e2",
+  "prompts": {},
+  "sessions": {
+    "s_02649a17b7b371": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "calm-noun",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    },
+    "s_ac1175b6b49498": {
+      "agent_id": {
+        "tool": "devin",
+        "id": "s_ac1175b6b49498",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
