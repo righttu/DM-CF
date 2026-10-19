@@ -346,6 +346,99 @@ export function groupAuditEvents(events: AuditRowLike[]): GroupedAudit {
   };
 }
 
+export interface TimelineItem {
+  kind: "event" | "model" | "tool" | "mcp" | "access" | "note";
+  row?: AuditRowLike;
+  idx?: number;
+  conn?: string;
+  parallel?: boolean;
+  mcp?: AuditRowLike | null;
+  accesses?: AuditRowLike[];
+  depth?: number;
+  text?: string;
+}
+
+// Flatten a group into strict chronological timeline items: model rounds at
+// depth 0, each agent tool_call under the latest round whose start <= its ts
+// (>=2 calls in one round are marked parallel, joined with ├/└), data_access
+// nested under its call, legacy turns (no model_call rows) hang their calls
+// under the question behind a note. pairMap: agent row id -> paired MCP rows.
+export function auditTimelineItems(
+  rows: AuditRowLike[],
+  pairMap: Map<string, AuditRowLike[]>
+): TimelineItem[] {
+  const sorted = rows.slice().sort((a, b) => a.ts - b.ts);
+  const rounds = sorted.filter((r) => r.event === "model_call");
+  const buckets = new Map<number, AuditRowLike[]>();
+  const legacy: AuditRowLike[] = [];
+  for (const c of sorted) {
+    if (c.event !== "tool_call" || c.source !== "agent" || c._pair) continue;
+    let ri = -1;
+    for (let i = rounds.length - 1; i >= 0; i--) {
+      if (rounds[i].ts <= (c.ts as number)) {
+        ri = i;
+        break;
+      }
+    }
+    if (ri >= 0) {
+      if (!buckets.has(ri)) buckets.set(ri, []);
+      buckets.get(ri)!.push(c);
+    } else {
+      legacy.push(c);
+    }
+  }
+  const out: TimelineItem[] = [];
+  let legacyDone = false;
+  const emitTool = (c: AuditRowLike, j: number, n: number) => {
+    const mcpRows = pairMap.get((c.id as string | undefined) ?? "") ?? [];
+    out.push({
+      kind: "tool",
+      row: c,
+      conn: j < n - 1 ? "├" : "└",
+      parallel: n > 1,
+      mcp: mcpRows[0] ?? null,
+      accesses: [
+        ...mcpRows.flatMap((m) => (m._access as AuditRowLike[] | undefined) ?? []),
+        ...((c._access as AuditRowLike[] | undefined) ?? [])
+      ]
+    });
+  };
+  const emitLegacy = () => {
+    if (legacyDone || legacy.length === 0) return;
+    legacyDone = true;
+    out.push({ kind: "note", text: "（此记录早于模型轮次审计）" });
+    legacy.forEach((c, j) => emitTool(c, j, legacy.length));
+  };
+  for (const r of sorted) {
+    if (r._pair && r.event === "tool_call") continue;
+    if (r.event === "tool_call" && r.source === "agent") continue;
+    if (r.event === "data_access") {
+      if (r._nested) continue;
+      out.push({ kind: "access", row: r, depth: 1 });
+      continue;
+    }
+    if (r.event === "model_call") {
+      const ri = rounds.indexOf(r);
+      out.push({ kind: "model", row: r, idx: ri });
+      const calls = buckets.get(ri) ?? [];
+      calls.forEach((c, j) => emitTool(c, j, calls.length));
+      continue;
+    }
+    if (r.event === "tool_call") {
+      out.push({
+        kind: "mcp",
+        row: r,
+        accesses: (r._access as AuditRowLike[] | undefined) ?? []
+      });
+      continue;
+    }
+    out.push({ kind: "event", row: r });
+    if (r.event === "question") emitLegacy();
+  }
+  emitLegacy();
+  return out;
+}
+
 // Serialized into the /audit page (functions must stay dependency-free).
 export function auditGroupScriptSource(): string {
   return [
@@ -357,7 +450,8 @@ export function auditGroupScriptSource(): string {
     attachByCallId,
     pollJobId,
     isPollRow,
-    groupAuditEvents
+    groupAuditEvents,
+    auditTimelineItems
   ]
     .map((f) => f.toString())
     .join("\n\n");

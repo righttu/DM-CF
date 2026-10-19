@@ -45,7 +45,7 @@ export async function queryAuditEvents(
   } else {
     const user = params.get("user")?.trim();
     if (user) {
-      conds.push("user_email = ?");
+      conds.push("lower(user_email) = lower(?)");
       binds.push(user);
     }
     const from = params.get("from");
@@ -73,6 +73,11 @@ export async function queryAuditEvents(
     if (req) {
       conds.push("request_id = ?");
       binds.push(req);
+    }
+    // Default load (no filters at all): last 24 h.
+    if (!user && !from && !to && !conv && !req) {
+      conds.push("ts >= ?");
+      binds.push(Date.now() - 24 * 3600 * 1000);
     }
   }
   const limitParam = Number(params.get("limit") ?? "200");

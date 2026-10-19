@@ -1,5 +1,11 @@
 export type AuditSource = "agent" | "mcp-research" | "mcp-quant" | "quant-outbound";
-export type AuditEventKind = "question" | "tool_call" | "data_access" | "reply" | "dlp_block";
+export type AuditEventKind =
+  | "question"
+  | "model_call"
+  | "tool_call"
+  | "data_access"
+  | "reply"
+  | "dlp_block";
 export type AuditStatus = "ok" | "denied" | "error" | "stopped";
 
 export interface AuditEvent {

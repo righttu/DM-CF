@@ -127,6 +127,19 @@ export interface AiJobMeta {
   ts_code?: string;
 }
 
+// Optional audit sink for model_call rows: fired once the request has a
+// validated model and reached the upstream call (never on early denies).
+export type AiCallAudit = {
+  ts: number;
+  duration_ms: number;
+  model: string;
+  served_model: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  status: "ok" | "error";
+  reason: string | null;
+};
+
 function normalizeAiResult(result: unknown, model: string): Record<string, unknown> {
   const r = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
   if (Array.isArray(r.choices)) return r;
@@ -160,7 +173,8 @@ export async function aiChatOutboundHandler(
   request: Request,
   env: AiGatewayEnv,
   meta: AiJobMeta,
-  event: string
+  event: string,
+  audit?: (ev: AiCallAudit) => void
 ): Promise<Response> {
   const url = new URL(request.url);
   const hash = await sha256Short(`ai:${url.pathname}`);
@@ -200,6 +214,14 @@ export async function aiChatOutboundHandler(
     JSON.stringify({ event, action: "ai_chat", model, prompt_bytes: length })
   );
   const fetchImpl = env.fetch ?? fetch;
+  const t0 = Date.now();
+  const report = (ev: Omit<AiCallAudit, "ts" | "duration_ms" | "model">) => {
+    try {
+      audit?.({ ts: t0, duration_ms: Date.now() - t0, model, ...ev });
+    } catch {
+      // audit must never break the request path
+    }
+  };
   let upstream: Response;
   try {
     upstream = await fetchImpl(
@@ -211,6 +233,13 @@ export async function aiChatOutboundHandler(
       }
     );
   } catch (error) {
+    report({
+      served_model: null,
+      input_tokens: null,
+      output_tokens: null,
+      status: "error",
+      reason: "ai_error"
+    });
     return Response.json(
       { error: { message: `ai_error: ${error instanceof Error ? error.message : String(error)}`.slice(0, 200), type: "server_error" } },
       { status: 502 }
@@ -224,8 +253,29 @@ export async function aiChatOutboundHandler(
     } catch {
       parsed = null;
     }
-    return Response.json(normalizeAiResult(parsed, model));
+    const normalized = normalizeAiResult(parsed, model);
+    const usage =
+      normalized.usage && typeof normalized.usage === "object"
+        ? (normalized.usage as Record<string, unknown>)
+        : {};
+    const num = (v: unknown): number | null =>
+      typeof v === "number" && Number.isFinite(v) ? v : null;
+    report({
+      served_model: typeof normalized.model === "string" ? normalized.model : null,
+      input_tokens: num(usage.input_tokens ?? usage.prompt_tokens),
+      output_tokens: num(usage.output_tokens ?? usage.completion_tokens),
+      status: "ok",
+      reason: null
+    });
+    return Response.json(normalized);
   }
+  report({
+    served_model: null,
+    input_tokens: null,
+    output_tokens: null,
+    status: "error",
+    reason: `ai_gateway_${upstream.status}`
+  });
   return Response.json(
     {
       error: {

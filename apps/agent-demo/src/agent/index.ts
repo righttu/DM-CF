@@ -511,7 +511,8 @@ function buildChatModel(
   dlpSink: DlpOutcome[],
   context: AuditContext,
   conversationId: string,
-  action: "chat" | "dlp-test"
+  action: "chat" | "dlp-test",
+  aigLogIds?: string[]
 ) {
   if (!modelConfigured(env)) return null;
   const base = (modelBindingOverride ?? env.AI) as unknown as ModelBinding;
@@ -525,7 +526,10 @@ function buildChatModel(
             delete inputs.tool_choice;
           }
           try {
-            return await target.run(...args);
+            const out = await target.run(...args);
+            const logId = (target as { aiGatewayLogId?: string | null }).aiGatewayLogId;
+            if (aigLogIds && typeof logId === "string" && logId) aigLogIds.push(logId);
+            return out;
           } catch (error) {
             captureDlpFromError(
               error,
@@ -1591,6 +1595,8 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     const dlpSink: DlpOutcome[] = [];
     const conversationId = this.ensureConversationId();
     const toolTrail: AuditEvent[] = [];
+    const modelTrail: AuditEvent[] = [];
+    const aigLogIds: string[] = [];
     const agentRow = (
       event: AuditEvent["event"],
       extra: Partial<AuditEvent>
@@ -1607,7 +1613,14 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     const flushTrail = (rows: AuditEvent[]) =>
       this.ctx.waitUntil(recordAudit(this.env.AUDIT_DB, rows));
     try {
-      const model = buildChatModel(this.env, dlpSink, context, conversationId, "chat");
+      const model = buildChatModel(
+        this.env,
+        dlpSink,
+        context,
+        conversationId,
+        "chat",
+        aigLogIds
+      );
       if (!model) {
         return { reply: "模型网关未配置，演示无法调用模型。", events };
       }
@@ -1626,6 +1639,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
             status: "denied",
             reason: "dlp_blocked"
           }),
+          ...modelTrail,
           ...toolTrail,
           agentRow("dlp_block", {
             ts: Date.now(),
@@ -1672,6 +1686,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
       let text = "";
       let errored = false;
       let stepHasText = false;
+      const stepStarts: number[] = [];
       try {
         for await (const part of result.fullStream as AsyncIterable<{
           type: string;
@@ -1679,6 +1694,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
         }>) {
           if (part.type === "start-step") {
             stepHasText = false;
+            stepStarts.push(Date.now());
           } else if (part.type === "text-delta" && typeof part.text === "string") {
             let delta = part.text;
             if (!stepHasText && text.length > 0) delta = `\n\n${delta}`;
@@ -1691,6 +1707,59 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
         }
       } catch (streamError) {
         if (!signal?.aborted) throw streamError;
+      }
+      // One model_call audit row per model step: ts from the step's start-step
+      // stream part, finish reason/tools/usage from result.steps, aig_log_id
+      // captured per binding run in the Proxy above (in order).
+      const modelEndTs = Date.now();
+      const modelIdUsed = this.env.MODEL_ID || DEFAULT_MODEL_ID;
+      const stripPrefix = (name: string): string => {
+        const found = this.discoveredTools().find((t) => t.name === name);
+        const prefix = found ? `${found.server}_` : "";
+        return prefix && name.startsWith(prefix) ? name.slice(prefix.length) : name;
+      };
+      const steps = await Promise.resolve(
+        (result as { steps?: PromiseLike<unknown[]> }).steps
+      ).catch(() => [] as unknown[]);
+      if (Array.isArray(steps)) {
+        const num = (v: unknown): number | null =>
+          typeof v === "number" && Number.isFinite(v) ? v : null;
+        steps.forEach((raw, i) => {
+          const st = raw as {
+            finishReason?: unknown;
+            usage?: Record<string, unknown>;
+            toolCalls?: { toolName?: unknown }[];
+          };
+          const toolNames = (Array.isArray(st.toolCalls) ? st.toolCalls : [])
+            .map((c) => stripPrefix(String(c.toolName ?? "")))
+            .filter(Boolean);
+          const usage = st.usage ?? {};
+          const last = i === steps.length - 1;
+          const finish =
+            typeof st.finishReason === "string"
+              ? st.finishReason
+              : last && errored
+                ? "error"
+                : "stop";
+          const start = stepStarts[i] ?? turnStartTs;
+          modelTrail.push(
+            agentRow("model_call", {
+              ts: start,
+              duration_ms: Math.max(0, (stepStarts[i + 1] ?? modelEndTs) - start),
+              server: this.env.GATEWAY_ID ?? null,
+              tool: modelIdUsed,
+              status: finish === "error" ? "error" : "ok",
+              reason: lastBlock(dlpSink) && last ? "dlp_blocked" : finish,
+              args_json: JSON.stringify({
+                step: i + 1,
+                tools: toolNames,
+                input_tokens: num(usage.inputTokens),
+                output_tokens: num(usage.outputTokens),
+                ...(aigLogIds[i] ? { aig_log_id: aigLogIds[i] } : {})
+              })
+            })
+          );
+        });
       }
       const questionRow = (blockedQ: boolean): AuditEvent =>
         agentRow("question", {
@@ -1710,6 +1779,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
         if (!partial) {
           flushTrail([
             questionRow(false),
+            ...modelTrail,
             ...toolTrail,
             agentRow("reply", { ts: Date.now(), status: "stopped" })
           ]);
@@ -1718,7 +1788,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
         const reply = `${partial}\n\n（已停止生成）`;
         this.persistTurn(userMessage, reply, events);
         record({ text: "已停止生成", kind: "denied" });
-        flushTrail([questionRow(false), ...toolTrail, replyRow(reply, "stopped")]);
+        flushTrail([questionRow(false), ...modelTrail, ...toolTrail, replyRow(reply, "stopped")]);
         return { reply, events, stopped: true };
       }
       const blocked = blockedOutcome();
@@ -1727,6 +1797,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
         record({ text: "模型调用失败", kind: "denied" });
         flushTrail([
           questionRow(false),
+          ...modelTrail,
           ...toolTrail,
           agentRow("reply", { status: "error", reason: "model_error" })
         ]);
@@ -1737,6 +1808,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
         record({ text: "模型未给出文字回答", kind: "denied" });
         flushTrail([
           questionRow(false),
+          ...modelTrail,
           ...toolTrail,
           agentRow("reply", { status: "error", reason: "empty_reply" })
         ]);
@@ -1745,7 +1817,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
       const flag = [...dlpSink].reverse().find((o) => o.action === "FLAG");
       if (flag) record({ text: "DLP 标记（未拦截，云端确认）", kind: "denied" });
       this.persistTurn(userMessage, reply, events);
-      flushTrail([questionRow(false), ...toolTrail, replyRow(reply, "ok")]);
+      flushTrail([questionRow(false), ...modelTrail, ...toolTrail, replyRow(reply, "ok")]);
       return { reply, events, dlp: flag };
     } finally {
       this.busy = false;

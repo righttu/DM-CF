@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   auditNormTool,
+  auditTimelineItems,
   groupAuditEvents,
   type AuditRowLike
 } from "../src/agent/audit-groups.js";
@@ -440,5 +441,66 @@ describe("groupAuditEvents", () => {
     expect(g.polls[0].job_id).toBe("600000.SH:20261018");
     expect(g.unmatched).toHaveLength(1);
     expect(g.unmatched[0].tool).toBe("list_demo_companies");
+  });
+});
+
+describe("auditTimelineItems", () => {
+  const model = (ts: number, step: number, tools: string[]) =>
+    row({
+      ts,
+      event: "model_call",
+      request_id: "r1",
+      tool: "dynamic/abc-agent",
+      reason: tools.length ? "tool-calls" : "stop",
+      args_json: JSON.stringify({ step, tools, input_tokens: 10, output_tokens: 5 })
+    });
+
+  it("assigns tool calls to the latest earlier round and marks parallel calls", () => {
+    const q = row({ ts: 1000, event: "question", request_id: "r1", text_excerpt: "q" });
+    const m1 = model(1100, 1, ["find_stock"]);
+    const c1 = row({ ts: 1200, request_id: "r1", tool: "abc-quant_find_stock", call_id: "k1" });
+    const m2 = model(2000, 2, ["get_fundamentals", "get_ai_report"]);
+    const c2 = row({ ts: 2100, request_id: "r1", tool: "abc-quant_get_fundamentals", call_id: "k2" });
+    const c3 = row({ ts: 2100, request_id: "r1", tool: "abc-quant_get_ai_report", call_id: "k3" });
+    const m3 = model(3000, 3, []);
+    const reply = row({ ts: 4000, event: "reply", request_id: "r1", text_excerpt: "a" });
+    const rows = [q, m1, c1, m2, c2, c3, m3, reply];
+    const g = groupAuditEvents(rows);
+    const items = auditTimelineItems(g.groups[0].rows, new Map());
+    expect(items.map((i) => i.kind)).toEqual([
+      "event", "model", "tool", "model", "tool", "tool", "model", "event"
+    ]);
+    const t = items.filter((i) => i.kind === "tool");
+    expect(t[0].row).toBe(c1);
+    expect(t[1].row).toBe(c2);
+    expect(t[2].row).toBe(c3);
+    expect(t[0].parallel).toBe(false);
+    expect(t[1].parallel).toBe(true);
+    expect(t[2].parallel).toBe(true);
+    expect(t[1].conn).toBe("├");
+    expect(t[2].conn).toBe("└");
+    expect(items.filter((i) => i.kind === "model").map((i) => i.idx)).toEqual([0, 1, 2]);
+  });
+
+  it("renders legacy turns (no model rows) under the question with a note", () => {
+    const q = row({ ts: 1000, event: "question", request_id: "r1" });
+    const c1 = row({ ts: 1100, request_id: "r1", tool: "abc-quant_find_stock" });
+    const reply = row({ ts: 1200, event: "reply", request_id: "r1" });
+    const g = groupAuditEvents([q, c1, reply]);
+    const items = auditTimelineItems(g.groups[0].rows, new Map());
+    expect(items.map((i) => i.kind)).toEqual(["event", "note", "tool", "event"]);
+    expect(items[1].text).toContain("模型轮次审计");
+    expect(items[2].row).toBe(c1);
+  });
+
+  it("keeps a tool call that precedes every round under the legacy note", () => {
+    const c0 = row({ ts: 500, request_id: "r1", tool: "abc-quant_find_stock" });
+    const q = row({ ts: 1000, event: "question", request_id: "r1" });
+    const m1 = model(1100, 1, ["find_stock"]);
+    const g = groupAuditEvents([c0, q, m1]);
+    const items = auditTimelineItems(g.groups[0].rows, new Map());
+    // c0.ts < first round ts -> legacy bucket (emitted after the question)
+    expect(items.map((i) => i.kind)).toEqual(["event", "note", "tool", "model"]);
+    expect(items[2].row).toBe(c0);
   });
 });

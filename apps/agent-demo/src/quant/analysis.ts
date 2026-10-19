@@ -457,12 +457,39 @@ export async function analysisAiOutboundHandler(
 ): Promise<Response> {
   const job = await resolveJob(env, ctx.containerId);
   if (!job) return deny("no_job");
-  return aiChatOutboundHandler(
+  const modelCalls: AuditEvent[] = [];
+  const resp = await aiChatOutboundHandler(
     request,
     env,
     { source: "analysis", ts_code: job.ts_code },
-    OUTBOUND_EVENT
+    OUTBOUND_EVENT,
+    (ev) =>
+      modelCalls.push({
+        source: "quant-outbound",
+        event: "model_call",
+        ts: ev.ts,
+        duration_ms: ev.duration_ms,
+        actor_id: job.requested_by || null,
+        job_id: `${job.ts_code}:${job.date}`,
+        server: "quant-outbound",
+        tool: ev.model,
+        args_json: JSON.stringify({
+          served_model: ev.served_model,
+          input_tokens: ev.input_tokens,
+          output_tokens: ev.output_tokens
+        }),
+        status: ev.status,
+        reason: ev.reason
+      })
   );
+  if (modelCalls.length > 0) {
+    try {
+      await analysisStub(env, ctx.containerId)?.auditAccess(modelCalls);
+    } catch {
+      // audit must never break the container request path
+    }
+  }
+  return resp;
 }
 
 function summarizeResult(result: unknown): AnalysisResultSummary | null {

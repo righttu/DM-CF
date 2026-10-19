@@ -48,6 +48,17 @@ background:var(--panel-2);color:var(--muted)}
 .st.denied,.st.error{color:var(--deny);border-color:#f0b8b2}
 .sub{margin:2px 0 8px 96px;padding:8px 12px;border-left:3px solid var(--line);
 background:var(--panel-2);border-radius:0 8px 8px 0;font-size:12.5px}
+.tl{display:flex;gap:8px;align-items:baseline;padding:4px 0;flex-wrap:wrap;
+border-bottom:1px dashed var(--line)}
+.tl:last-child{border-bottom:none}
+.tl.d1{padding-left:26px}
+.tl.d2{padding-left:56px}
+.tl .off{color:var(--muted);font-family:ui-monospace,Menlo,monospace;font-size:12px;
+min-width:52px;flex:none}
+.tl .conn{color:var(--muted);min-width:12px;flex:none}
+.muted{color:var(--muted)}
+.sqld.inl{display:inline-block}
+.sqld.inl .sql{display:block;margin:4px 0 4px 60px}
 .sub .sql{font-family:ui-monospace,Menlo,monospace;font-size:12px;white-space:pre-wrap;
 word-break:break-all;display:block;margin:4px 0}
 .sub .deny{color:var(--deny)}
@@ -81,7 +92,7 @@ font-size:12px;padding:0}
 <body>
 <div class="top"><div class="logo">ABC</div><h1>审计视图</h1>
 <a class="back" href="/">← 返回对话</a></div>
-<div class="note legend">一次提问 = 一个请求 ID；每次工具调用 = 一个调用 ID，Agent 与 MCP Server 两侧记录同一个调用 ID。端到端耗时含模型与 Portal 转发，MCP Server 耗时只含工具执行与查库。提问与回答全文见 AI Gateway 日志。</div>
+<div class="note legend">最新的提问在最上；每次提问内部按发生顺序：提问 → 模型决定调用工具 → 工具调用（Agent → MCP Portal → MCP Server）→ 数据访问 → 模型生成回答。一次提问一个请求 ID，每次工具调用一个调用 ID，两侧记录同一个 ID。提问与回答全文见 AI Gateway 日志。</div>
 <div class="filters">
 <label>用户邮箱<input id="f-user" type="text" placeholder="user@example.com"></label>
 <label>开始日期（北京）<input id="f-from" type="date"></label>
@@ -119,147 +130,204 @@ const params = () => {
 
 __GROUP_SRC__
 
-const CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳";
-
-function accTable(accesses) {
-  if (!accesses.length) return '<div class="noacc">无数据访问</div>';
-  let rows = "";
-  for (const a of accesses) {
-    const result =
-      a.status && a.status !== "ok"
-        ? '<span class="deny">' + esc(a.reason ?? a.status) + "</span>"
-        : '<span class="st ok">ok</span>';
-    rows += "<tr><td>" + esc(a.tables ?? "—") + "</td><td>" +
-      (a.row_count != null ? esc(a.row_count) : "—") + "</td><td>" + result + "</td></tr>";
-    if (a.sql_text) {
-      rows += '<tr class="sqltr"><td colspan="3"><details class="sqld"><summary>查看 SQL</summary>' +
-        '<code class="sql">' + esc(a.sql_text) + "</code></details></td></tr>";
-    }
+// Chronological timeline rendering: +X.Xs offsets from the question (absolute
+// Beijing time in the title tooltip), model rounds at depth 0, tool calls
+// nested under the latest round that started before them, data accesses under
+// their tool call (paired by call_id via _pair/_access from groupAuditEvents).
+const off = (ts, base) =>
+  '<span class="off" title="' + esc(bj(ts)) + '">+' +
+  (Math.max(0, ts - base) / 1000).toFixed(1) + "s</span>";
+const stBadge = (e) =>
+  e.status ? '<span class="st ' + esc(e.status) + '">' + esc(e.status) + "</span>" : "";
+const parseArgs = (e) => {
+  try {
+    return JSON.parse(e.args_json ?? "{}") ?? {};
+  } catch {
+    return {};
   }
-  return '<div class="acct">数据访问</div>' +
-    '<table class="acc"><thead><tr><th>表</th><th>行数</th><th>结果</th></tr></thead>' +
-    "<tbody>" + rows + "</tbody></table>";
-}
+};
 
-function accessSub(e) {
-  let h = '<div class="sub">' +
-    '<span class="t">' + esc(bj(e.ts)) + "</span>" +
-    '<span class="srv">' + esc(e.source) + "</span> " +
-    '<b>' + esc(e.tables ?? "") + "</b> " +
-    (e.status ? '<span class="st ' + esc(e.status) + '">' + esc(e.status) + "</span>" : "");
-  if (e.row_count != null) h += '<span class="meta">' + esc(e.row_count) + " 行</span>";
-  if (e.sql_text) h += '<code class="sql">' + esc(e.sql_text) + "</code>";
-  if (e.reason) h += '<div class="deny">拒绝原因：' + esc(e.reason) + "</div>";
-  if (e.job_id) h += '<div class="meta">job: ' + esc(e.job_id) + "</div>";
+function accessLine(a, base, depth) {
+  let h = '<div class="tl d' + depth + '"><span class="conn">└</span>' + off(a.ts, base) +
+    '<span>数据访问</span> <b>' + esc(a.tables ?? "—") + "</b> · " +
+    (a.row_count != null ? esc(a.row_count) : "—") + " 行 · ";
+  h += a.status && a.status !== "ok"
+    ? '<span class="deny">' + esc(a.reason ?? a.status) + "</span>"
+    : '<span class="st ok">ok</span>';
+  if (a.sql_text) {
+    h += ' <details class="sqld inl"><summary>查看 SQL</summary>' +
+      '<code class="sql">' + esc(a.sql_text) + "</code></details>";
+  }
+  if (a.job_id) h += ' <span class="srv">job ' + esc(a.job_id) + "</span>";
   return h + "</div>";
 }
 
-// One card per Agent tool_call: the MCP row with the same call_id supplies
-// the server-side duration and its data_access rows; they never render as
-// top-level lines.
-function agentCard(e, mcpRows, idx) {
-  const tool = auditNormTool(e);
-  const mcp = mcpRows?.[0];
-  const st = e.status ? '<span class="st ' + esc(e.status) + '">' + esc(e.status) + "</span>" : "";
-  let h = '<div class="card"><div class="l1">' +
-    '<span class="step">' + (CIRCLED[idx] ?? String(idx + 1) + ".") + "</span>" +
-    '<span>调用工具</span>' +
-    '<span class="tool">' + esc(tool) + "</span>" +
-    '<span class="srv">' + esc(e.server ?? "") + "</span>" + st;
-  if (e.args_json) h += '<span class="args">' + esc(e.args_json) + "</span>";
-  if (e.reason && e.reason !== "poll") h += '<span class="deny">' + esc(e.reason) + "</span>";
-  h += "</div>";
-  if (mcp) {
-    h += '<div class="l2">Agent 发起 → MCP Portal → MCP Server 执行 ' +
-      esc(mcp.duration_ms ?? "—") + " ms（端到端 " + esc(e.duration_ms ?? "—") + " ms）</div>";
+function modelLine(e, idx, base) {
+  const a = parseArgs(e);
+  const tools = Array.isArray(a.tools) ? a.tools : [];
+  let h = '<div class="tl d0">' + off(e.ts, base) +
+    '<span class="tool">模型</span> <span>第' + esc(idx + 1) + "轮</span> · " +
+    '<span class="srv">' + esc(e.tool ?? "—") + "</span> · " +
+    (e.duration_ms != null ? (e.duration_ms / 1000).toFixed(1) + " s · " : "") +
+    "输入 " + esc(a.input_tokens ?? "—") + " / 输出 " + esc(a.output_tokens ?? "—") + " tokens";
+  if (tools.length) {
+    h += " → 决定" + (tools.length > 1 ? "并行" : "") + "调用 " +
+      '<b>' + esc(tools.join("、")) + "</b>";
   } else {
-    h += '<div class="l2"><span class="warn">MCP Server 未返回审计记录</span>' +
-      (e.duration_ms != null ? "（端到端 " + esc(e.duration_ms) + " ms）" : "") + "</div>";
+    h += " → 生成回答";
   }
-  const accesses = [
-    ...(mcpRows ?? []).flatMap((m) => m._access ?? []),
-    ...(e._access ?? [])
-  ];
-  h += accTable(accesses);
+  if (a.aig_log_id) {
+    h += ' <button class="link" type="button" data-copy="' + esc(a.aig_log_id) +
+      '" title="AI Gateway 日志 ID">复制日志 ID</button>';
+  }
+  if (e.reason === "dlp_blocked") h += ' <span class="dlp">DLP 拦截</span>';
+  else if (e.reason && e.reason !== "stop" && e.reason !== "tool-calls") {
+    h += ' <span class="deny">' + esc(e.reason) + "</span>";
+  }
+  h += stBadge(e);
+  return h + "</div>";
+}
+
+function toolLine(e, mcp, base, conn, parallel) {
+  let h = '<div class="tl d1"><span class="conn">' + conn + "</span>" + off(e.ts, base) +
+    '<span>工具调用</span> <b>' + esc(auditNormTool(e)) + "</b>" +
+    (e.server ? ' <span class="srv">' + esc(e.server) + "</span>" : "") +
+    stBadge(e) +
+    (parallel ? ' <span class="st">并行</span>' : "");
+  if (e.args_json) h += ' <span class="args">' + esc(e.args_json) + "</span>";
+  if (e.reason && e.reason !== "poll") h += ' <span class="deny">' + esc(e.reason) + "</span>";
+  if (e.source === "agent") {
+    if (mcp) {
+      h += ' <span class="muted">· MCP Server 执行 ' + esc(mcp.duration_ms ?? "—") +
+        " ms（端到端 " + esc(e.duration_ms ?? "—") + " ms）</span>";
+    } else {
+      h += ' <span class="warn">MCP Server 未返回审计记录</span>';
+    }
+  } else {
+    h += ' <span class="srv">' + esc(e.source) + "</span>" +
+      ' <span class="muted">· MCP Server 执行 ' + esc(e.duration_ms ?? "—") +
+      " ms（Agent 侧无对应记录）</span>";
+  }
+  return h + "</div>";
+}
+
+// One agent tool_call + its nested data_access rows (and run_analysis job
+// toggle). MCP rows never render at top level when paired.
+function toolBlock(e, mcp, accesses, base, conn, parallel) {
+  let h = toolLine(e, mcp, base, conn, parallel);
+  h += accesses.map((a) => accessLine(a, base, 2)).join("");
   if (e.job_id) {
-    h += '<button class="link" type="button" data-job="' + esc(e.job_id) +
-      '">查看任务数据访问（' + esc(e.job_id) + "）</button>";
+    h += '<div class="tl d2"><span class="conn"></span><span></span>' +
+      '<button class="link" type="button" data-job="' + esc(e.job_id) +
+      '">查看任务数据访问（' + esc(e.job_id) + "）</button></div>";
   }
-  return h + "</div>";
+  return h;
 }
 
-// Unmatched MCP-side rows render in the same card layout, minus the Agent
-// part (no matching Agent call exists for them).
-function mcpCard(e) {
-  const tool = auditNormTool(e);
-  const st = e.status ? '<span class="st ' + esc(e.status) + '">' + esc(e.status) + "</span>" : "";
-  let h = '<div class="card"><div class="l1">' +
-    '<span>调用工具</span>' +
-    '<span class="tool">' + esc(tool) + "</span>" +
-    '<span class="srv">' + esc(e.server ?? "") + "</span>" + st +
-    '<span class="srv">' + esc(e.source) + "</span>";
-  if (e.args_json) h += '<span class="args">' + esc(e.args_json) + "</span>";
-  if (e.reason) h += '<span class="deny">' + esc(e.reason) + "</span>";
-  h += "</div>";
-  h += '<div class="l2">MCP Server 执行 ' + esc(e.duration_ms ?? "—") +
-    " ms（Agent 侧无对应记录）</div>";
-  h += accTable(e._access ?? []);
-  return h + "</div>";
+function mcpBlock(e, accesses, base) {
+  let h = toolLine(e, e, base, "└", false);
+  h += accesses.map((a) => accessLine(a, base, 2)).join("");
+  return h;
 }
 
-function rowHtml(e, pairMap, ctx) {
-  const time = '<span class="t">' + esc(bj(e.ts)) + "</span>";
-  const st = e.status ? '<span class="st ' + esc(e.status) + '">' + esc(e.status) + "</span>" : "";
+function eventLine(e, base) {
+  const st = stBadge(e);
   if (e.event === "question") {
-    return '<div class="row">' + time + '<span class="tool">提问</span>' +
+    return '<div class="tl d0">' + off(e.ts, base) + '<span class="tool">提问</span>' +
       '<span class="q">' + esc(e.text_excerpt ?? "（未保存内容）") + "</span>" + st + "</div>";
   }
   if (e.event === "reply") {
     const text = plain(e.text_excerpt);
     const long = text.length > 120;
-    return '<div class="row">' + time + '<span class="tool">回答</span>' +
+    return '<div class="tl d0">' + off(e.ts, base) + '<span class="tool">回答</span>' +
       '<span class="q reply-text">' + esc(text) + "</span>" + st +
       (long ? '<button class="link" type="button" data-expand>展开</button>' : "") + "</div>";
   }
   if (e.event === "dlp_block") {
-    return '<div class="row">' + time +
+    return '<div class="tl d0">' + off(e.ts, base) +
       '<span class="dlp">DLP 拦截（内容未保存）</span>' + st +
-      (e.reason ? '<span class="meta">' + esc(e.reason) + "</span>" : "") + "</div>";
+      (e.reason ? ' <span class="meta">' + esc(e.reason) + "</span>" : "") + "</div>";
   }
   if (e.event === "poll_group") {
-    return '<div class="row">' + time +
+    return '<div class="tl d0">' + off(e.ts, base) +
       '<span class="tool">进度查询（自动轮询）× ' + esc(e.count) + "</span>" +
-      (e.job_id ? '<span class="srv">job ' + esc(e.job_id) + "</span>" : "") + "</div>";
-  }
-  if (e.event === "tool_call") {
-    if (e.source === "agent") {
-      return agentCard(e, pairMap?.get(e.id), ctx.step++);
-    }
-    // mcp tool_call without a matching agent call (未关联 or foreign rows)
-    return mcpCard(e);
-  }
-  if (e.event === "data_access") {
-    if (e._nested || e._pair) return "";
-    return accessSub(e);
+      (e.job_id ? ' <span class="srv">job ' + esc(e.job_id) + "</span>" : "") + "</div>";
   }
   return "";
+}
+
+// One group body as a strict chronological timeline. Ordering / round
+// assignment / parallel marking come from auditTimelineItems (audit-groups.ts).
+function timelineRows(g, pairMap) {
+  const rows = g.rows.slice().sort((a, b) => a.ts - b.ts);
+  const base = (rows.find((r) => r.event === "question") ?? rows[0])?.ts ?? 0;
+  let out = "";
+  for (const it of auditTimelineItems(rows, pairMap)) {
+    if (it.kind === "note") {
+      out += '<div class="tl d1"><span class="conn">└</span><span></span>' +
+        '<span class="muted">' + esc(it.text ?? "") + "</span></div>";
+    } else if (it.kind === "model") {
+      out += modelLine(it.row, it.idx, base);
+    } else if (it.kind === "tool") {
+      out += toolBlock(it.row, it.mcp, it.accesses ?? [], base, it.conn, it.parallel);
+    } else if (it.kind === "mcp") {
+      out += mcpBlock(it.row, it.accesses ?? [], base);
+    } else if (it.kind === "access") {
+      out += accessLine(it.row, base, it.depth ?? 1);
+    } else {
+      out += eventLine(it.row, base);
+    }
+  }
+  return out;
+}
+
+// run_analysis job events as a mini timeline (model_call + data_access rows).
+function jobMini(evs) {
+  const rows = evs.slice().sort((a, b) => a.ts - b.ts);
+  const base = rows[0]?.ts ?? 0;
+  let out = "";
+  for (const r of rows) {
+    if (r.event === "model_call") {
+      const a = parseArgs(r);
+      out += '<div class="tl d0">' + off(r.ts, base) +
+        '<span class="tool">模型</span> <span class="srv">' + esc(a.served_model ?? r.tool ?? "—") +
+        "</span> · " + (r.duration_ms != null ? (r.duration_ms / 1000).toFixed(1) + " s · " : "") +
+        "输入 " + esc(a.input_tokens ?? "—") + " / 输出 " + esc(a.output_tokens ?? "—") +
+        " tokens" + stBadge(r) +
+        (r.reason ? ' <span class="deny">' + esc(r.reason) + "</span>" : "") + "</div>";
+    } else if (r.event === "data_access") {
+      out += accessLine(r, base, 0);
+    }
+  }
+  return out || '<div class="sub">无任务数据访问记录</div>';
 }
 
 function renderGroup(g, pairMap) {
   const q = g.rows.find((r) => r.event === "question");
   const first = g.rows[0];
-  const title = g.id === "__unmatched__"
-    ? "未关联（缺少请求 ID 的事件）"
-    : esc(first?.user_email ?? "未知用户") +
-      (first?.role ? ' <span class="meta">' + esc(first.role) + "</span>" : "") +
-      ' <span class="meta">' + esc(bj(first?.ts ?? 0)) + "</span>" +
-      ' <span class="meta">req ' + esc(g.id.slice(0, 8)) + "</span>" +
-      (q ? ' <span class="q">' + esc(q.text_excerpt ?? "（未保存内容）") + "</span>" : "");
   const det = document.createElement("details");
   det.className = "group";
-  const ctx = { step: 0 };
+  if (g.id === "__unmatched__") {
+    det.innerHTML = "<summary>未关联（缺少请求 ID 的事件）</summary>" +
+      '<div class="rows">' + timelineRows(g, pairMap) + "</div>";
+    return det;
+  }
+  const tss = g.rows.map((r) => r.ts);
+  const base = (q ?? first)?.ts ?? 0;
+  const total = (Math.max(...tss) - base) / 1000;
+  const models = g.rows.filter((r) => r.event === "model_call").length;
+  const tools = g.rows.filter((r) => r.event === "tool_call" && r.source === "agent").length;
+  const tables = g.rows.filter((r) => r.event === "data_access").length;
+  const title =
+    esc(first?.user_email ?? "未知用户") +
+    (first?.role ? ' <span class="meta">' + esc(first.role) + "</span>" : "") +
+    ' <span class="meta">' + esc(bj(first?.ts ?? 0)) + "</span>" +
+    ' <span class="meta">req ' + esc(g.id.slice(0, 8)) + "</span>" +
+    (q ? ' <span class="q">' + esc(q.text_excerpt ?? "（未保存内容）") + "</span>" : "") +
+    ' <span class="meta">总耗时 ' + total.toFixed(1) + " s · 模型 " + models +
+    " 轮 · 工具 " + tools + " 次 · 访问 " + tables + " 张表</span>";
   det.innerHTML = "<summary>" + title + "</summary>" +
-    '<div class="rows">' + g.rows.map((r) => rowHtml(r, pairMap, ctx)).join("") + "</div>";
+    '<div class="rows">' + timelineRows(g, pairMap) + "</div>";
   return det;
 }
 
@@ -296,7 +364,14 @@ async function load() {
     });
   }
   if (!grouped.groups.length) { $("empty").hidden = false; return; }
-  for (const g of grouped.groups) list.appendChild(renderGroup(g, pairMap));
+  for (const g of grouped.groups) {
+    try {
+      list.appendChild(renderGroup(g, pairMap));
+    } catch (err) {
+      $("err").hidden = false;
+      $("err").textContent = "部分记录渲染失败：" + String(err && err.message ? err.message : err);
+    }
+  }
 }
 
 $("list").addEventListener("click", async (ev) => {
@@ -309,6 +384,16 @@ $("list").addEventListener("click", async (ev) => {
     }
     return;
   }
+  const copy = ev.target.closest("button[data-copy]");
+  if (copy) {
+    try {
+      await navigator.clipboard.writeText(copy.dataset.copy);
+      copy.textContent = "已复制";
+    } catch {
+      copy.textContent = copy.dataset.copy;
+    }
+    return;
+  }
   const btn = ev.target.closest("button[data-job]");
   if (!btn) return;
   btn.disabled = true;
@@ -317,10 +402,7 @@ $("list").addEventListener("click", async (ev) => {
     const resp = await fetch("/api/audit?job=" + encodeURIComponent(btn.dataset.job));
     const data = await resp.json();
     const box = document.createElement("div");
-    const evs = (data.events ?? []).sort((a, b) => a.ts - b.ts);
-    box.innerHTML = evs.length
-      ? accTable(evs)
-      : '<div class="sub">无任务数据访问记录</div>';
+    box.innerHTML = jobMini(data.events ?? []);
     btn.replaceWith(box);
   } catch {
     btn.disabled = false;

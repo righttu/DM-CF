@@ -7,7 +7,10 @@ import {
   recordAudit,
   sanitizeArgs
 } from "../src/shared/audit.js";
-import { quantOutboundHandler } from "../src/quant/analysis.js";
+import {
+  analysisAiOutboundHandler,
+  quantOutboundHandler
+} from "../src/quant/analysis.js";
 import auditMigration from "../migrations/audit/0001_audit.sql?raw";
 import auditMigration2 from "../migrations/audit/0002_call_id.sql?raw";
 import {
@@ -282,6 +285,90 @@ describe("agent chat audit trail", () => {
     expect(q[0].text_excerpt).toBeNull();
     expect(q[0].reason).toBe("dlp_blocked");
     expect(JSON.stringify(rows)).not.toContain("CF_DEMO_SECRET_9274");
+  });
+
+  it("records one model_call row per model step (finish reason, tools, tokens, aig log id)", async () => {
+    const sub = "sub-audit-model";
+    const jwt = await signJwt({ sub, email: ANALYST_EMAIL });
+    await connectAgentMcp({ sub, email: ANALYST_EMAIL });
+    let call = 0;
+    setModelFake(async () => {
+      call += 1;
+      if (call === 1) {
+        const r = toolCallResponse([
+          { id: "c1", name: "list_demo_companies", args: "{}" }
+        ]) as Response & { headers: Headers };
+        const body = (await r.json()) as Record<string, unknown>;
+        body.usage = { prompt_tokens: 123, completion_tokens: 45 };
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            "cf-aig-log-id": "aig-log-step-1"
+          }
+        });
+      }
+      const body = {
+        id: "r2",
+        object: "chat.completion",
+        created: 0,
+        model: "x",
+        choices: [
+          { index: 0, message: { role: "assistant", content: "好的。" }, finish_reason: "stop" }
+        ],
+        usage: { prompt_tokens: 200, completion_tokens: 30 }
+      };
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "content-type": "application/json", "cf-aig-log-id": "aig-log-step-2" }
+      });
+    });
+    const resp = await authedFetch("/api/chat", {
+      jwt,
+      method: "POST",
+      body: { message: "列出公司" }
+    });
+    expect(resp.status).toBe(200);
+    const questions = await waitForRows(
+      "user_email = ? AND event = 'question' AND text_excerpt = ?",
+      [ANALYST_EMAIL, "列出公司"],
+      1
+    );
+    const rid = questions[questions.length - 1].request_id;
+    const rows = await waitForRows(
+      "request_id = ? AND event = 'model_call'",
+      [rid],
+      2
+    );
+    const steps = rows
+      .filter((r) => r.source === "agent")
+      .sort((a, b) => (a.ts as number) - (b.ts as number));
+    expect(steps).toHaveLength(2);
+    const a1 = JSON.parse(steps[0].args_json as string) as Record<string, unknown>;
+    const a2 = JSON.parse(steps[1].args_json as string) as Record<string, unknown>;
+    expect(a1.step).toBe(1);
+    expect(a2.step).toBe(2);
+    // step 1 chose the tool, step 2 produced the reply
+    expect(steps[0].reason).toBe("tool-calls");
+    expect(steps[1].reason).toBe("stop");
+    expect(a1.tools).toEqual(["list_demo_companies"]);
+    expect(a2.tools).toEqual([]);
+    // model + gateway id, tokens, ordered AI Gateway log ids
+    expect(steps[0].tool).toBe("@cf/zai-org/glm-5.3-flash");
+    expect(steps[0].server).toBe("test-gateway");
+    expect(steps[0].status).toBe("ok");
+    expect(typeof steps[0].duration_ms).toBe("number");
+    expect(a1.aig_log_id).toBe("aig-log-step-1");
+    expect(a2.aig_log_id).toBe("aig-log-step-2");
+    // same request/conversation as the rest of the turn
+    const turn = await auditRows(
+      "user_email = ? AND event = 'question' AND request_id = ?",
+      [ANALYST_EMAIL, steps[0].request_id]
+    );
+    expect(turn).toHaveLength(1);
+    // no prompt/response text leaks into model_call rows
+    expect(JSON.stringify(steps)).not.toContain("列出公司");
+    expect(JSON.stringify(steps)).not.toContain("好的");
   });
 });
 
@@ -561,6 +648,82 @@ describe("quant outbound audit", () => {
   });
 });
 
+describe("quant ai.internal model_call audit", () => {
+  const stub = (captured: AuditRow[]) => ({
+    jobContext: async () => ({
+      ts_code: "600519.SH",
+      date: "20261017",
+      requested_by: "reqhash123"
+    }),
+    auditAccess: (events: AuditRow[]) => captured.push(...events)
+  });
+  const aiEnv = (captured: AuditRow[], fetchImpl: typeof fetch) =>
+    ({
+      QUANT_DB: QUANT_DB(),
+      ANALYSIS: {
+        idFromString: () => ({}) as never,
+        get: () => stub(captured) as never
+      },
+      CF_ACCOUNT_ID: "acct-t",
+      CF_AIG_TOKEN: "tok-t",
+      fetch: fetchImpl
+    }) as never;
+  const chatReq = (model: string) =>
+    new Request("http://ai.internal/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }] })
+    });
+
+  it("records a model_call row with served model, tokens and duration", async () => {
+    const captured: AuditRow[] = [];
+    const fetchImpl = (async () =>
+      new Response(
+        JSON.stringify({
+          model: "@cf/served/real-model",
+          choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 321, completion_tokens: 12 }
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )) as typeof fetch;
+    const resp = await analysisAiOutboundHandler(
+      chatReq("dynamic/abc-brain"),
+      aiEnv(captured, fetchImpl),
+      { containerId: "cid-ai" }
+    );
+    expect(resp.status).toBe(200);
+    expect(captured).toHaveLength(1);
+    const ev = captured[0];
+    expect(ev.source).toBe("quant-outbound");
+    expect(ev.event).toBe("model_call");
+    expect(ev.status).toBe("ok");
+    expect(ev.job_id).toBe("600519.SH:20261017");
+    expect(ev.actor_id).toBe("reqhash123");
+    expect(ev.tool).toBe("dynamic/abc-brain");
+    expect(typeof ev.duration_ms).toBe("number");
+    const args = JSON.parse(ev.args_json as string) as Record<string, unknown>;
+    expect(args.served_model).toBe("@cf/served/real-model");
+    expect(args.input_tokens).toBe(321);
+    expect(args.output_tokens).toBe(12);
+    expect(ev.reason).toBeNull();
+  });
+
+  it("records a model_call error row with ai_gateway_<status> reason", async () => {
+    const captured: AuditRow[] = [];
+    const fetchImpl = (async () => new Response("upstream boom", { status: 503 })) as typeof fetch;
+    const resp = await analysisAiOutboundHandler(
+      chatReq("dynamic/abc-brain"),
+      aiEnv(captured, fetchImpl),
+      { containerId: "cid-ai" }
+    );
+    expect(resp.status).toBe(503);
+    expect(captured).toHaveLength(1);
+    expect(captured[0].event).toBe("model_call");
+    expect(captured[0].status).toBe("error");
+    expect(captured[0].reason).toBe("ai_gateway_503");
+  });
+});
+
 // ---------- admin view ----------
 
 describe("admin audit surface", () => {
@@ -624,6 +787,27 @@ describe("admin audit surface", () => {
     expect(jobRows.events.length).toBeGreaterThan(0);
     expect(jobRows.events.every((r) => r.job_id === "600519.SH:20261017")).toBe(true);
     expect(jobRows.events.every((r) => r.source === "quant-outbound")).toBe(true);
+    // user filter is case-insensitive and trimmed
+    const mixed = (await (
+      await q(`user=${encodeURIComponent(" X@T ")}`)
+    ).json()) as { events: AuditRow[] };
+    expect(mixed.events.length).toBeGreaterThan(0);
+    expect(mixed.events.every((r) => String(r.user_email).toLowerCase() === "x@t")).toBe(true);
+    // default load (no filters) is the last 24 h only
+    const fresh = `fresh-${crypto.randomUUID()}`;
+    const stale = `stale-${crypto.randomUUID()}`;
+    await recordAudit(AUDIT_DB(), [
+      { source: "agent", event: "question", request_id: fresh, ts: Date.now() - 1000 },
+      {
+        source: "agent",
+        event: "question",
+        request_id: stale,
+        ts: Date.now() - 48 * 3600 * 1000
+      }
+    ]);
+    const all = (await (await q("")).json()) as { events: AuditRow[] };
+    expect(all.events.some((r) => r.request_id === fresh)).toBe(true);
+    expect(all.events.some((r) => r.request_id === stale)).toBe(false);
   });
 
   it("session payload exposes auditAdmin only for admins", async () => {
