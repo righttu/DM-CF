@@ -1,0 +1,19 @@
+apps/agent-demo/src/agent/audit-page.ts
+  s_8d521c30fca9ae::t_72bc77dfc66feb 131-135,348-355
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3c5a87f0669c85f66d7ae35f7852be7229efff1a",
+  "prompts": {},
+  "sessions": {
+    "s_8d521c30fca9ae": {
+      "agent_id": {
+        "tool": "devin",
+        "id": "s_8d521c30fca9ae",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
