@@ -264,3 +264,7 @@ Agent tracing documents three identity fields: agent name (`functionId`, shared:
   - The page renders one chronological timeline per request: question → model rounds → tool calls (marked 并行 when issued together) → data accesses → reply.
   - The user filter is case-insensitive; the default view is the last 24 h.
   - Render errors now surface as 「部分记录渲染失败」. The earlier blank render could not be reproduced on the 59 real rows (`test/evidence/audit-all-rows.json`).
+- 2026-10-19 blank /audit root cause (fixed in commit `3c5a87f`, Agent `e9edd533`). The page serializes helper functions with `Function.prototype.toString`. Wrangler's esbuild uses `keepNames`, which injects `__name(fn,"name")` into those function bodies. The page had no `__name`, so any non-empty result threw (empty results still showed 「没有匹配」).
+  - The page now defines `const __name = (fn) => fn;`.
+  - browser-verify bundles `audit-page.ts` with `keepNames: true` so it reproduces production. Repro without the shim: 30 FAILs; with the shim: all pass.
+  - Any future serialized code must tolerate bundler helpers.
