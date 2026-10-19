@@ -128,6 +128,11 @@ const params = () => {
   return p;
 };
 
+// The production bundler (wrangler/esbuild keepNames) wraps nested function
+// expressions in __name(fn, "name"); the serialized helpers below carry those
+// calls, so the page must provide the helper or any non-empty result throws.
+const __name = (fn) => fn;
+
 __GROUP_SRC__
 
 // Chronological timeline rendering: +X.Xs offsets from the question (absolute
@@ -340,7 +345,14 @@ async function load() {
     return;
   }
   const data = await resp.json();
-  const grouped = groupAuditEvents(data.events ?? []);
+  let grouped;
+  try {
+    grouped = groupAuditEvents(data.events ?? []);
+  } catch (err) {
+    $("err").hidden = false;
+    $("err").textContent = "记录处理失败：" + String(err && err.message ? err.message : err);
+    return;
+  }
   // MCP tool_calls paired to agent rows render nested under their agent row
   const pairMap = new Map();
   for (const g of grouped.groups) {
