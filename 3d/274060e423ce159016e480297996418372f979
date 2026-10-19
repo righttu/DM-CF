@@ -1,0 +1,27 @@
+apps/agent-demo/src/agent/audit-groups.ts
+  s_ebe08fc646d885::t_02c5bfa1b19748 462-463,624-642
+apps/agent-demo/src/agent/audit-page.ts
+  s_ebe08fc646d885::t_feb5c139fd7a46 162-165,509-510,534,633-637,659-679,696-702,728-729
+apps/agent-demo/src/agent/index.ts
+  s_ebe08fc646d885::t_2b7f51fc8808f4 1724-1727,1736-1737,1786-1788,1790,1794,1804
+apps/agent-demo/test/audit-groups.test.ts
+  s_ebe08fc646d885::t_616117f2e565c8 16,624-659
+apps/agent-demo/test/audit.test.ts
+  s_ebe08fc646d885::t_7b08488f03ff47 369-371,381
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3d274060e423ce159016e480297996418372f979",
+  "prompts": {},
+  "sessions": {
+    "s_ebe08fc646d885": {
+      "agent_id": {
+        "tool": "devin",
+        "id": "s_ebe08fc646d885",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
