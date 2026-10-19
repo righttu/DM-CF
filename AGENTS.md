@@ -274,3 +274,8 @@ Agent tracing documents three identity fields: agent name (`functionId`, shared:
   - The page renders rounds as lines: 发送 / 回复 / 执行 / 查询 / 返回. A literal test forbids environment names in the page source.
   - The swimlane-view redesign was discussed (last lane = 数据源; MCP Portal stays its own lane) but not built.
   - PPT slide 19 shows the audit swimlane with lanes AI Gateway | Agent | MCP Portal | MCP Server | 数据源.
+- 2026-10-19 swimlane view (commit `dc46b5f`, Agent `7a005cf4`).
+  - Each question is one summary row (tables touched, model rounds and tokens, deny/DLP chips, total time).
+  - Expanded, it shows a swimlane whose lanes come from the recorded `actor`/`target`, in fixed category order AI Gateway | Agent | MCP Portal | MCP Server(s) | 数据源 (all stores share one lane).
+  - Arrows: 发送 / 回复 / 执行 / 查询 / 返回. A dedicated right-hand column holds durations. Clicking an arrow opens a drawer with every recorded field (SQL, IDs, tokens).
+  - `#drawer` needs an explicit `[hidden]{display:none}` rule.
