@@ -51,6 +51,22 @@ background:var(--panel-2);border-radius:0 8px 8px 0;font-size:12.5px}
 .sub .sql{font-family:ui-monospace,Menlo,monospace;font-size:12px;white-space:pre-wrap;
 word-break:break-all;display:block;margin:4px 0}
 .sub .deny{color:var(--deny)}
+.card{margin:6px 0;padding:10px 12px;border:1px solid var(--line);border-radius:10px;
+background:var(--panel)}
+.card .l1{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.card .step{color:var(--accent);font-weight:700}
+.card .l2{color:var(--muted);font-size:12px;margin-top:3px}
+.card .warn{color:#9a6a00}
+.acct{font-size:12px;color:var(--muted);margin:8px 0 3px}
+table.acc{border-collapse:collapse;font-size:12px;min-width:55%}
+.acc th{font-weight:600;color:var(--muted);text-align:left;padding:2px 10px 2px 0}
+.acc td{padding:2px 10px 2px 0;border-top:1px dashed var(--line);vertical-align:top}
+.acc tr.sqltr td{border-top:none;padding-top:0}
+.sqld summary{cursor:pointer;color:var(--accent);font-size:12px}
+.sqld .sql{font-family:ui-monospace,Menlo,monospace;font-size:12px;white-space:pre-wrap;
+word-break:break-all;display:block;margin:4px 0}
+.noacc{color:var(--muted);font-size:12px;margin-top:6px}
+.deny{color:var(--deny)}
 .dlp{color:var(--deny);font-weight:600}
 .args{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--muted);
 max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -65,8 +81,7 @@ font-size:12px;padding:0}
 <body>
 <div class="top"><div class="logo">ABC</div><h1>审计视图</h1>
 <a class="back" href="/">← 返回对话</a></div>
-<div class="note">同一请求 ID 串联 Agent 与 AI Gateway；提问与回答全文见 AI Gateway 日志。</div>
-<div class="note legend">Agent 记录提问与工具调用；数据访问（SQL / 表 / 行数）由 MCP Server 记录；两侧按调用 ID / 请求 ID 精确关联，缺少 ID 的历史行按同一用户、同一工具、同一时间段自动关联。</div>
+<div class="note legend">一次提问 = 一个请求 ID；每次工具调用 = 一个调用 ID，Agent 与 MCP Server 两侧记录同一个调用 ID。端到端耗时含模型与 Portal 转发，MCP Server 耗时只含工具执行与查库。提问与回答全文见 AI Gateway 日志。</div>
 <div class="filters">
 <label>用户邮箱<input id="f-user" type="text" placeholder="user@example.com"></label>
 <label>开始日期（北京）<input id="f-from" type="date"></label>
@@ -104,6 +119,28 @@ const params = () => {
 
 __GROUP_SRC__
 
+const CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳";
+
+function accTable(accesses) {
+  if (!accesses.length) return '<div class="noacc">无数据访问</div>';
+  let rows = "";
+  for (const a of accesses) {
+    const result =
+      a.status && a.status !== "ok"
+        ? '<span class="deny">' + esc(a.reason ?? a.status) + "</span>"
+        : '<span class="st ok">ok</span>';
+    rows += "<tr><td>" + esc(a.tables ?? "—") + "</td><td>" +
+      (a.row_count != null ? esc(a.row_count) : "—") + "</td><td>" + result + "</td></tr>";
+    if (a.sql_text) {
+      rows += '<tr class="sqltr"><td colspan="3"><details class="sqld"><summary>查看 SQL</summary>' +
+        '<code class="sql">' + esc(a.sql_text) + "</code></details></td></tr>";
+    }
+  }
+  return '<div class="acct">数据访问</div>' +
+    '<table class="acc"><thead><tr><th>表</th><th>行数</th><th>结果</th></tr></thead>' +
+    "<tbody>" + rows + "</tbody></table>";
+}
+
 function accessSub(e) {
   let h = '<div class="sub">' +
     '<span class="t">' + esc(bj(e.ts)) + "</span>" +
@@ -117,23 +154,62 @@ function accessSub(e) {
   return h + "</div>";
 }
 
-function mcpCallSub(e) {
-  let h = '<div class="sub">' +
-    '<span class="t">' + esc(bj(e.ts)) + "</span>" +
-    '<span class="srv">' + esc(e.source) + "</span> " +
-    '<span class="tool">' + esc(e.server ?? "") + " · " + esc(e.tool ?? "") + "</span> " +
-    (e.status ? '<span class="st ' + esc(e.status) + '">' + esc(e.status) + "</span>" : "") +
-    (e.duration_ms != null ? '<span class="meta">' + esc(e.duration_ms) + "ms</span>" : "") +
-    (e.reason ? '<span class="deny">' + esc(e.reason) + "</span>" : "");
+// One card per Agent tool_call: the MCP row with the same call_id supplies
+// the server-side duration and its data_access rows; they never render as
+// top-level lines.
+function agentCard(e, mcpRows, idx) {
+  const tool = auditNormTool(e);
+  const mcp = mcpRows?.[0];
+  const st = e.status ? '<span class="st ' + esc(e.status) + '">' + esc(e.status) + "</span>" : "";
+  let h = '<div class="card"><div class="l1">' +
+    '<span class="step">' + (CIRCLED[idx] ?? String(idx + 1) + ".") + "</span>" +
+    '<span>调用工具</span>' +
+    '<span class="tool">' + esc(tool) + "</span>" +
+    '<span class="srv">' + esc(e.server ?? "") + "</span>" + st;
+  if (e.args_json) h += '<span class="args">' + esc(e.args_json) + "</span>";
+  if (e.reason && e.reason !== "poll") h += '<span class="deny">' + esc(e.reason) + "</span>";
   h += "</div>";
-  for (const a of e._access ?? []) h += accessSub(a);
-  return h;
+  if (mcp) {
+    h += '<div class="l2">Agent 发起 → MCP Portal → MCP Server 执行 ' +
+      esc(mcp.duration_ms ?? "—") + " ms（端到端 " + esc(e.duration_ms ?? "—") + " ms）</div>";
+  } else {
+    h += '<div class="l2"><span class="warn">MCP Server 未返回审计记录</span>' +
+      (e.duration_ms != null ? "（端到端 " + esc(e.duration_ms) + " ms）" : "") + "</div>";
+  }
+  const accesses = [
+    ...(mcpRows ?? []).flatMap((m) => m._access ?? []),
+    ...(e._access ?? [])
+  ];
+  h += accTable(accesses);
+  if (e.job_id) {
+    h += '<button class="link" type="button" data-job="' + esc(e.job_id) +
+      '">查看任务数据访问（' + esc(e.job_id) + "）</button>";
+  }
+  return h + "</div>";
 }
 
-function rowHtml(e, pairMap) {
+// Unmatched MCP-side rows render in the same card layout, minus the Agent
+// part (no matching Agent call exists for them).
+function mcpCard(e) {
+  const tool = auditNormTool(e);
+  const st = e.status ? '<span class="st ' + esc(e.status) + '">' + esc(e.status) + "</span>" : "";
+  let h = '<div class="card"><div class="l1">' +
+    '<span>调用工具</span>' +
+    '<span class="tool">' + esc(tool) + "</span>" +
+    '<span class="srv">' + esc(e.server ?? "") + "</span>" + st +
+    '<span class="srv">' + esc(e.source) + "</span>";
+  if (e.args_json) h += '<span class="args">' + esc(e.args_json) + "</span>";
+  if (e.reason) h += '<span class="deny">' + esc(e.reason) + "</span>";
+  h += "</div>";
+  h += '<div class="l2">MCP Server 执行 ' + esc(e.duration_ms ?? "—") +
+    " ms（Agent 侧无对应记录）</div>";
+  h += accTable(e._access ?? []);
+  return h + "</div>";
+}
+
+function rowHtml(e, pairMap, ctx) {
   const time = '<span class="t">' + esc(bj(e.ts)) + "</span>";
   const st = e.status ? '<span class="st ' + esc(e.status) + '">' + esc(e.status) + "</span>" : "";
-  const dur = e.duration_ms != null ? '<span class="meta">' + esc(e.duration_ms) + "ms</span>" : "";
   if (e.event === "question") {
     return '<div class="row">' + time + '<span class="tool">提问</span>' +
       '<span class="q">' + esc(e.text_excerpt ?? "（未保存内容）") + "</span>" + st + "</div>";
@@ -156,23 +232,11 @@ function rowHtml(e, pairMap) {
       (e.job_id ? '<span class="srv">job ' + esc(e.job_id) + "</span>" : "") + "</div>";
   }
   if (e.event === "tool_call") {
-    // MCP-side rows paired to an agent tool_call render nested (mcpCallSub);
-    // unpaired ones (e.g. with their own request_id) render as a plain row.
-    let h = '<div class="row">' + time +
-      '<span class="srv">' + esc(e.source) + "</span>" +
-      '<span class="tool">' + esc(e.server ?? "") + " · " + esc(e.tool ?? "") + "</span>" + st + dur;
-    if (e.args_json) h += '<span class="args">' + esc(e.args_json) + "</span>";
-    if (e.reason) h += '<span class="meta" style="color:var(--deny)">' + esc(e.reason) + "</span>";
-    if (e.job_id) {
-      h += '<button class="link" type="button" data-job="' + esc(e.job_id) +
-        '">查看任务数据访问（' + esc(e.job_id) + "）</button>";
+    if (e.source === "agent") {
+      return agentCard(e, pairMap?.get(e.id), ctx.step++);
     }
-    h += "</div>";
-    for (const m of pairMap?.get(e.id) ?? []) h += mcpCallSub(m);
-    // data_access rows nested straight onto the agent call (call_id match
-    // without an MCP tool_call row of its own)
-    for (const a of e._access ?? []) h += accessSub(a);
-    return h;
+    // mcp tool_call without a matching agent call (未关联 or foreign rows)
+    return mcpCard(e);
   }
   if (e.event === "data_access") {
     if (e._nested || e._pair) return "";
@@ -193,8 +257,9 @@ function renderGroup(g, pairMap) {
       (q ? ' <span class="q">' + esc(q.text_excerpt ?? "（未保存内容）") + "</span>" : "");
   const det = document.createElement("details");
   det.className = "group";
+  const ctx = { step: 0 };
   det.innerHTML = "<summary>" + title + "</summary>" +
-    '<div class="rows">' + g.rows.map((r) => rowHtml(r, pairMap)).join("") + "</div>";
+    '<div class="rows">' + g.rows.map((r) => rowHtml(r, pairMap, ctx)).join("") + "</div>";
   return det;
 }
 
@@ -252,10 +317,10 @@ $("list").addEventListener("click", async (ev) => {
     const resp = await fetch("/api/audit?job=" + encodeURIComponent(btn.dataset.job));
     const data = await resp.json();
     const box = document.createElement("div");
-    box.innerHTML = (data.events ?? [])
-      .sort((a, b) => a.ts - b.ts)
-      .map((r) => accessSub(r))
-      .join("") || '<div class="sub">无任务数据访问记录</div>';
+    const evs = (data.events ?? []).sort((a, b) => a.ts - b.ts);
+    box.innerHTML = evs.length
+      ? accTable(evs)
+      : '<div class="sub">无任务数据访问记录</div>';
     btn.replaceWith(box);
   } catch {
     btn.disabled = false;

@@ -4,6 +4,7 @@ import {
   groupAuditEvents,
   type AuditRowLike
 } from "../src/agent/audit-groups.js";
+import realRowsJson from "./evidence/audit-real-rows.json";
 
 const U = "a@example.com";
 let n = 0;
@@ -340,6 +341,51 @@ describe("groupAuditEvents", () => {
     expect(g.unmatched).toHaveLength(0);
     expect(acc._nested).toBe(true);
     expect((agentCall._access as AuditRowLike[])?.[0]).toBe(acc);
+  });
+
+  it("correlates the real production turn (verbatim fixture) by call_id", () => {
+    const rows = structuredClone(realRowsJson) as unknown as AuditRowLike[];
+    const g = groupAuditEvents(rows);
+    expect(g.groups).toHaveLength(1);
+    expect(g.unmatched).toHaveLength(0);
+    expect(g.polls).toHaveLength(0);
+    const group = g.groups[0];
+    const agentCalls = group.rows.filter(
+      (r) => r.source === "agent" && r.event === "tool_call"
+    );
+    // 3 cards in turn order; the two same-ts parallel calls keep input order.
+    expect(agentCalls.map((r) => auditNormTool(r))).toEqual([
+      "find_stock",
+      "get_fundamentals",
+      "get_ai_report"
+    ]);
+    // Every MCP tool_call paired to its agent row by call_id — none left
+    // top-level, including the parallel same-ts pair.
+    const paired = new Map(
+      group.rows
+        .filter((r) => r._pair)
+        .map((r) => [r.call_id, r._pair] as const)
+    );
+    expect(paired.size).toBe(3);
+    for (const a of agentCalls) {
+      expect(paired.get(a.call_id)).toBe(a.id);
+    }
+    const byCall = (cid: string) =>
+      group.rows.find((r) => r.call_id === cid && r.event === "tool_call" && r.source.startsWith("mcp-"))!;
+    // get_ai_report's access is ai_analysis_result 0 rows — not the
+    // get_fundamentals tables (the time-order bug this rework fixes).
+    const aiRep = byCall("1ca5aeaf-fdda-48ee-8815-cf17f71ab674");
+    const fund = byCall("b6acdc92-1c62-443a-81b0-b22cc611837f");
+    const find = byCall("6a590633-5af4-4fb8-bf3b-8f962d451bc1");
+    expect(
+      (aiRep._access as AuditRowLike[]).map((r) => `${r.tables}:${r.row_count}`)
+    ).toEqual(["ai_analysis_result:0"]);
+    expect(
+      (fund._access as AuditRowLike[]).map((r) => `${r.tables}:${r.row_count}`).sort()
+    ).toEqual(["stock_basic:null", "stock_fundamentals:6"]);
+    expect(
+      (find._access as AuditRowLike[]).map((r) => `${r.tables}:${r.row_count}`)
+    ).toEqual(["stock_basic:1"]);
   });
 
   it("collapses agent poll rows and their MCP rows once per call_id", () => {
