@@ -279,3 +279,8 @@ Agent tracing documents three identity fields: agent name (`functionId`, shared:
   - Expanded, it shows a swimlane whose lanes come from the recorded `actor`/`target`, in fixed category order AI Gateway | Agent | MCP Portal | MCP Server(s) | 数据源 (all stores share one lane).
   - Arrows: 发送 / 回复 / 执行 / 查询 / 返回. A dedicated right-hand column holds durations. Clicking an arrow opens a drawer with every recorded field (SQL, IDs, tokens).
   - `#drawer` needs an explicit `[hidden]{display:none}` rule.
+- 2026-10-19 model timing fix 2 (commit `3d27406`, Agent `80b4349a`).
+  - The AI SDK emits `finish-step` after the step's tool calls have executed, so run()→finish-step included tool time.
+  - New `model_call` rows end at the step's last `tool-call` stream part (`finish-step` only for text steps) and carry `"timing":2`.
+  - For older rows, the swimlane estimates the model end as the earliest tool_call of that round and marks it 「按工具开始时间推算」.
+  - The drawer shows 「本箭头」 (direction exactly as drawn) before the raw row, because a 回复/返回 arrow is backed by a row whose actor→target is the request direction.
