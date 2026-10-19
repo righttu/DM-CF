@@ -268,3 +268,9 @@ Agent tracing documents three identity fields: agent name (`functionId`, shared:
   - The page now defines `const __name = (fn) => fn;`.
   - browser-verify bundles `audit-page.ts` with `keepNames: true` so it reproduces production. Repro without the shim: 30 FAILs; with the shim: all pass.
   - Any future serialized code must tolerate bundler helpers.
+- 2026-10-19 v4 deploy (commit `280281d`): Agent `1ab929b8`, Research MCP `38969322`, Quant MCP-S `3c17acc1`. Migration 0003 (`actor`, `target` columns) was applied through the D1 query API.
+  - Rows carry `actor`/`target` as `<kind>:<name>`. Names come from the new per-Worker vars: `AUDIT_SERVICE_NAME`, `AUDIT_D1_NAME`, `AUDIT_VECTORIZE_NAME`, `AUDIT_R2_NAME`, `AI_GATEWAY_ID`, plus the existing `GATEWAY_ID` and `MCP_SERVER_URL` host. A missing var is recorded as null and shown as 名称未记录.
+  - Model rounds are timed from the binding `run()` request start to `finish-step` and record `tools_count`.
+  - The page renders rounds as lines: 发送 / 回复 / 执行 / 查询 / 返回. A literal test forbids environment names in the page source.
+  - The swimlane-view redesign was discussed (last lane = 数据源; MCP Portal stays its own lane) but not built.
+  - PPT slide 19 shows the audit swimlane with lanes AI Gateway | Agent | MCP Portal | MCP Server | 数据源.
