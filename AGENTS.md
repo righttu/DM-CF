@@ -258,3 +258,9 @@ Agent tracing documents three identity fields: agent name (`functionId`, shared:
 - Migration 0002 (`call_id` column + index) was applied through the D1 query API.
 - Network caveat: on the `192.168.64.3` network the VM's HTTPS is intercepted by a corporate Zero Trust CA. Because of that, `wrangler d1 execute --file` fails with "fetch failed" and Docker cannot pull `python:3.12-slim` (x509 unknown authority). Plain `wrangler deploy` of non-container Workers still works there.
 - Deploy container Workers from the hotspot network (`172.20.10.6`). Do not disable TLS verification.
+- 2026-10-19 timeline (commit `0babc85`): deployed Agent `d5a4054a`, Quant MCP-S `a4b46f94`.
+  - Agent writes one `model_call` row per model step (step, unprefixed tools chosen, tokens, `aig_log_id`).
+  - The Quant `ai.internal` handler writes a `model_call` row (`served_model`, tokens) keyed by `job_id`.
+  - The page renders one chronological timeline per request: question → model rounds → tool calls (marked 并行 when issued together) → data accesses → reply.
+  - The user filter is case-insensitive; the default view is the last 24 h.
+  - Render errors now surface as 「部分记录渲染失败」. The earlier blank render could not be reproduced on the 59 real rows (`test/evidence/audit-all-rows.json`).
