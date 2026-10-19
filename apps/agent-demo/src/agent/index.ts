@@ -610,6 +610,7 @@ function buildTools(
         const job =
           result.status === "ok" ? analysisJobRef(tool.name, result.payload) : null;
         trail.push({
+          ts: started,
           source: "agent",
           event: "tool_call",
           user_email: context.userEmail ?? null,
@@ -1540,6 +1541,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
       return { reply: "", events, mcpRequired: true };
     }
     this.busy = true;
+    const turnStartTs = Date.now();
     const dlpSink: DlpOutcome[] = [];
     const conversationId = this.ensureConversationId();
     const toolTrail: AuditEvent[] = [];
@@ -1573,9 +1575,14 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
         record({ text: "DLP 拦截（云端确认）", kind: "denied" });
         flushTrail([
           // never store blocked prompt/reply content
-          agentRow("question", { status: "denied", reason: "dlp_blocked" }),
+          agentRow("question", {
+            ts: turnStartTs,
+            status: "denied",
+            reason: "dlp_blocked"
+          }),
           ...toolTrail,
           agentRow("dlp_block", {
+            ts: Date.now(),
             status: "denied",
             reason: blocked.detail ?? "dlp_blocked",
             duration_ms: null
@@ -1641,16 +1648,25 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
       }
       const questionRow = (blockedQ: boolean): AuditEvent =>
         agentRow("question", {
+          ts: turnStartTs,
           status: "ok",
           reason: blockedQ ? "dlp_blocked" : null,
           text_excerpt: blockedQ ? null : excerpt(message, 300)
         });
       const replyRow = (replyText: string, status: string): AuditEvent =>
-        agentRow("reply", { status, text_excerpt: excerpt(replyText, 300) });
+        agentRow("reply", {
+          ts: Date.now(),
+          status,
+          text_excerpt: excerpt(replyText, 300)
+        });
       if (signal?.aborted) {
         const partial = text.trim();
         if (!partial) {
-          flushTrail([questionRow(false), ...toolTrail, agentRow("reply", { status: "stopped" })]);
+          flushTrail([
+            questionRow(false),
+            ...toolTrail,
+            agentRow("reply", { ts: Date.now(), status: "stopped" })
+          ]);
           return { reply: "", events, stopped: true };
         }
         const reply = `${partial}\n\n（已停止生成）`;
