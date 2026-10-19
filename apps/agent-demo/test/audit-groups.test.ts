@@ -1,4 +1,8 @@
 import { describe, expect, it } from "vitest";
+// @ts-expect-error vite ?raw import has no declared module type here
+import pageSrc from "../src/agent/audit-page.ts?raw";
+// @ts-expect-error vite ?raw import has no declared module type here
+import groupsSrc from "../src/agent/audit-groups.ts?raw";
 import {
   auditNormTool,
   auditTimelineItems,
@@ -468,7 +472,9 @@ describe("auditTimelineItems", () => {
     const g = groupAuditEvents(rows);
     const items = auditTimelineItems(g.groups[0].rows, new Map());
     expect(items.map((i) => i.kind)).toEqual([
-      "event", "model", "tool", "model", "tool", "tool", "model", "event"
+      "event", "round", "send", "recv", "tool",
+      "round", "send", "recv", "tool", "tool",
+      "round", "send", "recv", "event"
     ]);
     const t = items.filter((i) => i.kind === "tool");
     expect(t[0].row).toBe(c1);
@@ -479,7 +485,7 @@ describe("auditTimelineItems", () => {
     expect(t[2].parallel).toBe(true);
     expect(t[1].conn).toBe("├");
     expect(t[2].conn).toBe("└");
-    expect(items.filter((i) => i.kind === "model").map((i) => i.idx)).toEqual([0, 1, 2]);
+    expect(items.filter((i) => i.kind === "round").map((i) => i.idx)).toEqual([0, 1, 2]);
   });
 
   it("renders legacy turns (no model rows) under the question with a note", () => {
@@ -500,7 +506,29 @@ describe("auditTimelineItems", () => {
     const g = groupAuditEvents([c0, q, m1]);
     const items = auditTimelineItems(g.groups[0].rows, new Map());
     // c0.ts < first round ts -> legacy bucket (emitted after the question)
-    expect(items.map((i) => i.kind)).toEqual(["event", "note", "tool", "model"]);
+    expect(items.map((i) => i.kind)).toEqual([
+      "event", "note", "tool", "round", "send", "recv"
+    ]);
     expect(items[2].row).toBe(c0);
+  });
+});
+
+describe("audit page env neutrality", () => {
+  // Every concrete environment name shown in the page must come from recorded
+  // row data (actor/target), never from a literal in page code.
+  it("audit-page.ts and audit-groups.ts contain no environment name literals", () => {
+    const sources = `${pageSrc}\n${groupsSrc}`;
+    for (const literal of [
+      "agent-demo",
+      "portal-demo",
+      "quant-data",
+      "stock-knowledge",
+      "stock-infor",
+      "righttu.uk",
+      "GLM",
+      "glm-"
+    ]) {
+      expect(sources, `literal ${literal} must not appear in page code`).not.toContain(literal);
+    }
   });
 });

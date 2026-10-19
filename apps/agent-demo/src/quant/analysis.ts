@@ -479,7 +479,9 @@ export async function analysisAiOutboundHandler(
           output_tokens: ev.output_tokens
         }),
         status: ev.status,
-        reason: ev.reason
+        reason: ev.reason,
+        actor: outboundActor(env),
+        target: `ai-gateway:${ev.gateway_id}`
       })
   );
   if (modelCalls.length > 0) {
@@ -550,6 +552,10 @@ type OutboundEnv = {
   VECTORIZE?: VectorizeLike;
   R2_STOCK_INFOR?: R2Bucket;
   AUDIT_DB?: D1Database;
+  AUDIT_SERVICE_NAME?: string;
+  AUDIT_D1_NAME?: string;
+  AUDIT_VECTORIZE_NAME?: string;
+  AUDIT_R2_NAME?: string;
 };
 
 type OaPush = (e: {
@@ -558,7 +564,25 @@ type OaPush = (e: {
   rowCount?: number;
   status: "ok" | "denied" | "error";
   reason?: string;
+  store?: "d1" | "vectorize" | "r2";
 }) => void;
+
+function outboundActor(env: OutboundEnv): string | null {
+  return env.AUDIT_SERVICE_NAME
+    ? `mcp-server:${env.AUDIT_SERVICE_NAME}/QuantAnalysisContainer`
+    : null;
+}
+function storeTarget(env: OutboundEnv, store?: "d1" | "vectorize" | "r2"): string | null {
+  const name =
+    store === "d1"
+      ? env.AUDIT_D1_NAME
+      : store === "vectorize"
+        ? env.AUDIT_VECTORIZE_NAME
+        : store === "r2"
+          ? env.AUDIT_R2_NAME
+          : null;
+  return store && name ? `${store}:${name}` : null;
+}
 
 function analysisStub(
   env: OutboundEnv,
@@ -606,7 +630,9 @@ export async function quantOutboundHandler(
       sql_text: e.sql ? truncateSql(e.sql) : null,
       row_count: e.rowCount ?? null,
       status: e.status,
-      reason: e.reason ?? null
+      reason: e.reason ?? null,
+      actor: outboundActor(env),
+      target: storeTarget(env, e.store)
     });
   const flushOa = async () => {
     const stub = analysisStub(env, ctx.containerId);
@@ -658,29 +684,29 @@ async function handleDbQuery(
   const body = await readJsonBody(request);
   const sql = typeof body?.sql === "string" ? normalizeSql(body.sql) : null;
   if (!sql) {
-    oa({ tables: [], status: "denied", reason: "db_query_sql" });
+    oa({ store: "d1", tables: [], status: "denied", reason: "db_query_sql" });
     return deny("db_query_sql");
   }
   const params = Array.isArray(body?.params) ? body.params : [];
   const hash = await sha256Short(sql);
   if (sql === PRAGMA_SYNC_STATUS) {
     const { results } = await env.QUANT_DB.prepare(sql).all();
-    oa({ tables: ["sync_status"], sql, rowCount: results.length, status: "ok" });
+    oa({ store: "d1", tables: ["sync_status"], sql, rowCount: results.length, status: "ok" });
     return allow("db_query_pragma", hash, { success: true, results });
   }
   if (!checkReadOnlyOutbound(sql)) {
-    oa({ tables: extractTables(sql), sql, status: "denied", reason: "db_query_sql" });
+    oa({ store: "d1", tables: extractTables(sql), sql, status: "denied", reason: "db_query_sql" });
     return deny("db_query_sql", hash);
   }
   try {
     const { results } = await env.QUANT_DB.prepare(`SELECT * FROM (${sql})`)
       .bind(...params)
       .all();
-    oa({ tables: extractTables(sql), sql, rowCount: results.length, status: "ok" });
+    oa({ store: "d1", tables: extractTables(sql), sql, rowCount: results.length, status: "ok" });
     return allow("db_query", hash, { success: true, results });
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    oa({ tables: extractTables(sql), sql, status: "error", reason: msg.slice(0, 200) });
+    oa({ store: "d1", tables: extractTables(sql), sql, status: "error", reason: msg.slice(0, 200) });
     return Response.json({
       success: false,
       error: `d1_error: ${msg}`.slice(0, 200)
@@ -697,35 +723,35 @@ async function handleDbExecute(
   const body = await readJsonBody(request);
   const sql = typeof body?.sql === "string" ? normalizeSql(body.sql) : null;
   if (!sql) {
-    oa({ tables: [], status: "denied", reason: "db_execute_sql" });
+    oa({ store: "d1", tables: [], status: "denied", reason: "db_execute_sql" });
     return deny("db_execute_sql");
   }
   const params = Array.isArray(body?.params) ? body.params : [];
   const hash = await sha256Short(sql);
   if (DDL_NOOP.some((re) => re.test(sql))) {
-    oa({ tables: extractTables(sql), sql, status: "ok" });
+    oa({ store: "d1", tables: extractTables(sql), sql, status: "ok" });
     return allow("db_execute_ddl_noop", hash, { success: true });
   }
   const syncMatch = SYNC_UPSERT.exec(sql);
   if (syncMatch) {
     if (params.length !== 2 || params[0] !== job.ts_code) {
-      oa({ tables: ["sync_status"], sql, status: "denied", reason: "db_execute_sync_params" });
+      oa({ store: "d1", tables: ["sync_status"], sql, status: "denied", reason: "db_execute_sync_params" });
       return deny("db_execute_sync_params", hash);
     }
     await env.QUANT_DB.prepare(sql).bind(...params).run();
-    oa({ tables: ["sync_status"], sql, status: "ok" });
+    oa({ store: "d1", tables: ["sync_status"], sql, status: "ok" });
     return allow("db_execute_sync", hash, { success: true });
   }
   if (AI_RESULT_INSERT.test(sql)) {
     if (params.length !== 24 || params[0] !== job.date || params[2] !== job.ts_code) {
-      oa({ tables: ["ai_analysis_result"], sql, status: "denied", reason: "db_execute_ai_params" });
+      oa({ store: "d1", tables: ["ai_analysis_result"], sql, status: "denied", reason: "db_execute_ai_params" });
       return deny("db_execute_ai_params", hash);
     }
     await env.QUANT_DB.prepare(sql).bind(...params).run();
-    oa({ tables: ["ai_analysis_result"], sql, status: "ok" });
+    oa({ store: "d1", tables: ["ai_analysis_result"], sql, status: "ok" });
     return allow("db_execute_ai", hash, { success: true });
   }
-  oa({ tables: extractTables(sql), sql, status: "denied", reason: "db_execute_sql" });
+  oa({ store: "d1", tables: extractTables(sql), sql, status: "denied", reason: "db_execute_sql" });
   return deny("db_execute_sql", hash);
 }
 
@@ -738,12 +764,12 @@ async function handleDbSave(
   const body = await readJsonBody(request);
   const hash = await sha256Short(`save:${String(body?.table)}`);
   if (body?.table !== "institutional_surveys") {
-    oa({ tables: [typeof body?.table === "string" ? body.table : "?"], status: "denied", reason: "db_save_table" });
+    oa({ store: "d1", tables: [typeof body?.table === "string" ? body.table : "?"], status: "denied", reason: "db_save_table" });
     return deny("db_save_table", hash);
   }
   const data = body.data;
   if (!Array.isArray(data) || data.length > 500) {
-    oa({ tables: ["institutional_surveys"], status: "denied", reason: "db_save_rows" });
+    oa({ store: "d1", tables: ["institutional_surveys"], status: "denied", reason: "db_save_rows" });
     return deny("db_save_rows", hash);
   }
   for (const row of data) {
@@ -768,7 +794,7 @@ async function handleDbSave(
     )
   );
   if (statements.length > 0) await env.QUANT_DB.batch(statements);
-  oa({ tables: ["institutional_surveys"], rowCount: data.length, status: "ok" });
+  oa({ store: "d1", tables: ["institutional_surveys"], rowCount: data.length, status: "ok" });
   return allow("db_save", hash, { success: true, count: data.length });
 }
 
@@ -783,16 +809,16 @@ async function handleVectorCheck(
   const id = body?.id;
   const hash = await sha256Short(`vector_check`);
   if (typeof id !== "string" || id.length > 64 || !id.startsWith(`${job.ts_code}_`)) {
-    oa({ tables: ["vectorize:stock-knowledge"], status: "denied", reason: "vector_check_id" });
+    oa({ store: "vectorize", tables: ["vectorize:stock-knowledge"], status: "denied", reason: "vector_check_id" });
     return deny("vector_check_id", hash);
   }
   if (!env.VECTORIZE?.getByIds) {
-    oa({ tables: ["vectorize:stock-knowledge"], status: "denied", reason: "vector_unavailable" });
+    oa({ store: "vectorize", tables: ["vectorize:stock-knowledge"], status: "denied", reason: "vector_unavailable" });
     return deny("vector_unavailable", hash);
   }
   const found = await env.VECTORIZE.getByIds([id]);
   const exists = Array.isArray(found) && found.length > 0;
-  oa({ tables: ["vectorize:stock-knowledge"], rowCount: exists ? 1 : 0, status: "ok" });
+  oa({ store: "vectorize", tables: ["vectorize:stock-knowledge"], rowCount: exists ? 1 : 0, status: "ok" });
   return allow("vector_check", hash, { success: true, exists });
 }
 
@@ -814,7 +840,7 @@ async function handleVectorUpsert(
     ids.length !== embeddings.length ||
     ids.length !== metadatas.length
   ) {
-    oa({ tables: ["vectorize:stock-knowledge"], status: "denied", reason: "vector_upsert_shape" });
+    oa({ store: "vectorize", tables: ["vectorize:stock-knowledge"], status: "denied", reason: "vector_upsert_shape" });
     return deny("vector_upsert_shape", hash);
   }
   for (let i = 0; i < ids.length; i++) {
@@ -829,12 +855,12 @@ async function handleVectorUpsert(
       typeof meta !== "object" ||
       (meta as Record<string, unknown>).ts_code !== job.ts_code
     ) {
-      oa({ tables: ["vectorize:stock-knowledge"], status: "denied", reason: "vector_upsert_item" });
+      oa({ store: "vectorize", tables: ["vectorize:stock-knowledge"], status: "denied", reason: "vector_upsert_item" });
       return deny("vector_upsert_item", hash);
     }
   }
   if (!env.VECTORIZE) {
-    oa({ tables: ["vectorize:stock-knowledge"], status: "denied", reason: "vector_unavailable" });
+    oa({ store: "vectorize", tables: ["vectorize:stock-knowledge"], status: "denied", reason: "vector_unavailable" });
     return deny("vector_unavailable", hash);
   }
   await env.VECTORIZE.upsert(
@@ -845,7 +871,7 @@ async function handleVectorUpsert(
       namespace: job.ts_code
     }))
   );
-  oa({ tables: ["vectorize:stock-knowledge"], rowCount: ids.length, status: "ok" });
+  oa({ store: "vectorize", tables: ["vectorize:stock-knowledge"], rowCount: ids.length, status: "ok" });
   return allow("vector_upsert", hash, { success: true, count: ids.length });
 }
 
@@ -868,11 +894,11 @@ async function handleVectorQuery(
     topK < 1 ||
     topK > 50
   ) {
-    oa({ tables: ["vectorize:stock-knowledge"], status: "denied", reason: "vector_query_params" });
+    oa({ store: "vectorize", tables: ["vectorize:stock-knowledge"], status: "denied", reason: "vector_query_params" });
     return deny("vector_query_params", hash);
   }
   if (!env.VECTORIZE) {
-    oa({ tables: ["vectorize:stock-knowledge"], status: "denied", reason: "vector_unavailable" });
+    oa({ store: "vectorize", tables: ["vectorize:stock-knowledge"], status: "denied", reason: "vector_unavailable" });
     return deny("vector_unavailable", hash);
   }
   const results = await env.VECTORIZE.query(body!.vector as number[], {
@@ -883,7 +909,7 @@ async function handleVectorQuery(
   const matchCount = Array.isArray((results as { matches?: unknown[] })?.matches)
     ? (results as { matches: unknown[] }).matches.length
     : 0;
-  oa({ tables: ["vectorize:stock-knowledge"], rowCount: matchCount, status: "ok" });
+  oa({ store: "vectorize", tables: ["vectorize:stock-knowledge"], rowCount: matchCount, status: "ok" });
   return allow("vector_query", hash, { success: true, results });
 }
 
@@ -900,28 +926,28 @@ async function handleR2Upload(
   try {
     form = await request.formData();
   } catch {
-    oa({ tables: ["r2:prompt_logs"], status: "denied", reason: "r2_form" });
+    oa({ store: "r2", tables: ["r2:prompt_logs"], status: "denied", reason: "r2_form" });
     return deny("r2_form", hash);
   }
   const key = form.get("key");
   const file = form.get("file");
   if (typeof key !== "string" || !keyRe.test(key)) {
-    oa({ tables: ["r2:prompt_logs"], status: "denied", reason: "r2_key" });
+    oa({ store: "r2", tables: ["r2:prompt_logs"], status: "denied", reason: "r2_key" });
     return deny("r2_key", hash);
   }
   if (!(file instanceof File)) {
-    oa({ tables: ["r2:prompt_logs"], status: "denied", reason: "r2_file" });
+    oa({ store: "r2", tables: ["r2:prompt_logs"], status: "denied", reason: "r2_file" });
     return deny("r2_file", hash);
   }
   if (file.size > R2_MAX_BYTES) {
-    oa({ tables: ["r2:prompt_logs"], status: "denied", reason: "r2_size" });
+    oa({ store: "r2", tables: ["r2:prompt_logs"], status: "denied", reason: "r2_size" });
     return deny("r2_size", hash);
   }
   if (!env.R2_STOCK_INFOR) {
-    oa({ tables: ["r2:prompt_logs"], status: "denied", reason: "r2_unavailable" });
+    oa({ store: "r2", tables: ["r2:prompt_logs"], status: "denied", reason: "r2_unavailable" });
     return deny("r2_unavailable", hash);
   }
   await env.R2_STOCK_INFOR.put(key, file.stream());
-  oa({ tables: ["r2:prompt_logs"], status: "ok" });
+  oa({ store: "r2", tables: ["r2:prompt_logs"], status: "ok" });
   return allow("r2_upload", hash, { success: true, key });
 }

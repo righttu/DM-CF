@@ -56,6 +56,12 @@ border-bottom:1px dashed var(--line)}
 .tl .off{color:var(--muted);font-family:ui-monospace,Menlo,monospace;font-size:12px;
 min-width:52px;flex:none}
 .tl .conn{color:var(--muted);min-width:12px;flex:none}
+.who{white-space:nowrap}
+.nm{color:var(--muted);font-size:11.5px;font-weight:400}
+.arr{color:var(--muted)}
+.dur{margin-left:auto;color:var(--muted);font-size:12px;white-space:nowrap}
+.sect{padding:10px 0 2px;color:var(--muted);font-size:12.5px;font-weight:600;
+border-bottom:1px dashed var(--line)}
 .muted{color:var(--muted)}
 .sqld.inl{display:inline-block}
 .sqld.inl .sql{display:block;margin:4px 0 4px 60px}
@@ -92,7 +98,7 @@ font-size:12px;padding:0}
 <body>
 <div class="top"><div class="logo">ABC</div><h1>审计视图</h1>
 <a class="back" href="/">← 返回对话</a></div>
-<div class="note legend">最新的提问在最上；每次提问内部按发生顺序：提问 → 模型决定调用工具 → 工具调用（Agent → MCP Portal → MCP Server）→ 数据访问 → 模型生成回答。一次提问一个请求 ID，每次工具调用一个调用 ID，两侧记录同一个 ID。提问与回答全文见 AI Gateway 日志。</div>
+<div class="note legend">最新的提问在最上；提问内部按轮次展示交互：发送 → 模型回复 → 执行工具 → 数据访问 → 返回。每行 [角色] 后的浅色名称取自该服务写入审计时记录的配置，随环境变化；模型行显示记录的路由 ID，仅当记录时才显示实际模型。提问与回答全文见 AI Gateway 日志。</div>
 <div class="filters">
 <label>用户邮箱<input id="f-user" type="text" placeholder="user@example.com"></label>
 <label>开始日期（北京）<input id="f-from" type="date"></label>
@@ -136,9 +142,8 @@ const __name = (fn) => fn;
 __GROUP_SRC__
 
 // Chronological timeline rendering: +X.Xs offsets from the question (absolute
-// Beijing time in the title tooltip), model rounds at depth 0, tool calls
-// nested under the latest round that started before them, data accesses under
-// their tool call (paired by call_id via _pair/_access from groupAuditEvents).
+// Beijing time in the title tooltip). Every concrete name shown comes from
+// the row's recorded actor/target ("<kind>:<name>") — never from page code.
 const off = (ts, base) =>
   '<span class="off" title="' + esc(bj(ts)) + '">+' +
   (Math.max(0, ts - base) / 1000).toFixed(1) + "s</span>";
@@ -152,9 +157,45 @@ const parseArgs = (e) => {
   }
 };
 
-function accessLine(a, base, depth) {
-  let h = '<div class="tl d' + depth + '"><span class="conn">└</span>' + off(a.ts, base) +
-    '<span>数据访问</span> <b>' + esc(a.tables ?? "—") + "</b> · " +
+const ROLES = {
+  agent: "Agent",
+  "ai-gateway": "AI Gateway",
+  "mcp-portal": "MCP Portal",
+  "mcp-server": "MCP Server",
+  d1: "D1",
+  vectorize: "Vectorize",
+  r2: "R2",
+  user: "用户"
+};
+// who("kind:name", fallbackRole): role label + recorded name, or the faint
+// 名称未记录 marker for rows written before actor/target existed.
+const who = (recorded, fallbackRole) => {
+  if (recorded) {
+    const i = String(recorded).indexOf(":");
+    if (i > 0) {
+      return { role: ROLES[recorded.slice(0, i)] ?? recorded.slice(0, i), name: recorded.slice(i + 1) };
+    }
+    return { role: fallbackRole, name: recorded };
+  }
+  return { role: fallbackRole, name: null };
+};
+const whoHtml = (w) =>
+  '<span class="who">' + esc(w.role) +
+  (w.name ? ' <span class="nm">' + esc(w.name) + "</span>" : ' <span class="nm">名称未记录</span>') +
+  "</span>";
+const arrow = (...whos) => whos.map(whoHtml).join(' <span class="arr">──▶</span> ');
+const dur = (ms) => (ms != null ? (ms / 1000).toFixed(1) + " s" : "—");
+const right = (text) => '<span class="dur">' + text + "</span>";
+
+const agentWho = (row) => who(row?.actor, "Agent");
+const portalWho = (row) => who(row?.target && String(row.target).startsWith("mcp-portal:") ? row.target : null, "MCP Portal");
+const mcpWho = (row) => who(row?.actor, "MCP Server");
+const storeWho = (row) => who(row?.target, "数据库");
+
+function accessLine(a, base, depth, conn) {
+  let h = '<div class="tl d' + depth + '"><span class="conn">' + (conn ?? "└") + "</span>" +
+    off(a.ts, base) + arrow(mcpWho(a), storeWho(a)) +
+    ' <b>' + esc(a.tables ?? "—") + "</b> → " +
     (a.row_count != null ? esc(a.row_count) : "—") + " 行 · ";
   h += a.status && a.status !== "ok"
     ? '<span class="deny">' + esc(a.reason ?? a.status) + "</span>"
@@ -167,60 +208,87 @@ function accessLine(a, base, depth) {
   return h + "</div>";
 }
 
-function modelLine(e, idx, base) {
+// Round section header: 第 N 轮 · 模型决定：调用 tools / 模型生成回答
+function roundLine(e, idx) {
   const a = parseArgs(e);
   const tools = Array.isArray(a.tools) ? a.tools : [];
-  let h = '<div class="tl d0">' + off(e.ts, base) +
-    '<span class="tool">模型</span> <span>第' + esc(idx + 1) + "轮</span> · " +
-    '<span class="srv">' + esc(e.tool ?? "—") + "</span> · " +
-    (e.duration_ms != null ? (e.duration_ms / 1000).toFixed(1) + " s · " : "") +
-    "输入 " + esc(a.input_tokens ?? "—") + " / 输出 " + esc(a.output_tokens ?? "—") + " tokens";
-  if (tools.length) {
-    h += " → 决定" + (tools.length > 1 ? "并行" : "") + "调用 " +
-      '<b>' + esc(tools.join("、")) + "</b>";
+  return '<div class="sect">第 ' + esc(idx + 1) + " 轮 · " +
+    (tools.length ? "模型决定：调用 <b>" + esc(tools.join("、")) + "</b>" : "模型生成回答") +
+    "</div>";
+}
+
+// 发送：Agent -> AI Gateway (round 1 carries the question; later rounds the
+// previous step's results). Route id rendered faint next to the gateway name.
+function sendLine(e, idx, base) {
+  const a = parseArgs(e);
+  const route = e.tool ? ' <span class="nm">' + esc(e.tool) + "</span>" : "";
+  return '<div class="tl d0">' + off(e.ts, base) +
+    arrow(agentWho(e), who(e.target, "AI Gateway")) + route +
+    ' <span>发送：' + (idx === 0 ? "提问 + 工具清单" : "上文 + 上一步结果") + "</span>" +
+    ' <span class="muted">· 输入 ' + esc(a.input_tokens ?? "—") + " tokens" +
+    (a.tools_count != null ? " · 工具 " + esc(a.tools_count) + " 个" : "") + "</span></div>";
+}
+
+// 回复：AI Gateway -> Agent. Duration = model time; rows written before the
+// timing fix carry no tools_count and get the legacy marker.
+function recvLine(e, idx, base, calls) {
+  const a = parseArgs(e);
+  const tools = Array.isArray(a.tools) ? a.tools : [];
+  const endTs = e.ts + (e.duration_ms ?? 0);
+  let desc;
+  if (e.reason === "dlp_blocked") {
+    desc = '<span class="dlp">回复被拦截（DLP，内容未保存）</span>';
+  } else if (tools.length) {
+    const first = calls && calls.length === 1 && calls[0].args_json
+      ? ' <span class="args">' + esc(calls[0].args_json) + "</span>"
+      : "";
+    desc = "回复：" + (tools.length > 1 ? "并行" : "") + "调用 <b>" + esc(tools.join("、")) +
+      "</b>" + first;
   } else {
-    h += " → 生成回答";
+    desc = "回复：最终回答";
+  }
+  let h = '<div class="tl d0">' + off(endTs, base) +
+    arrow(who(e.target, "AI Gateway"), agentWho(e)) + " <span>" + desc +
+    ' <span class="muted">· 输出 ' + esc(a.output_tokens ?? "—") + " tokens</span></span>";
+  if (!("tools_count" in a)) {
+    h += ' <span class="nm">（旧版计时，含工具执行）</span>';
   }
   if (a.aig_log_id) {
     h += ' <button class="link" type="button" data-copy="' + esc(a.aig_log_id) +
       '" title="AI Gateway 日志 ID">复制日志 ID</button>';
   }
-  if (e.reason === "dlp_blocked") h += ' <span class="dlp">DLP 拦截</span>';
-  else if (e.reason && e.reason !== "stop" && e.reason !== "tool-calls") {
+  if (e.reason && e.reason !== "stop" && e.reason !== "tool-calls" && e.reason !== "dlp_blocked") {
     h += ' <span class="deny">' + esc(e.reason) + "</span>";
   }
-  h += stBadge(e);
+  h += right("模型 " + dur(e.duration_ms));
   return h + "</div>";
 }
 
-function toolLine(e, mcp, base, conn, parallel) {
-  let h = '<div class="tl d1"><span class="conn">' + conn + "</span>" + off(e.ts, base) +
-    '<span>工具调用</span> <b>' + esc(auditNormTool(e)) + "</b>" +
-    (e.server ? ' <span class="srv">' + esc(e.server) + "</span>" : "") +
-    stBadge(e) +
-    (parallel ? ' <span class="st">并行</span>' : "");
-  if (e.args_json) h += ' <span class="args">' + esc(e.args_json) + "</span>";
-  if (e.reason && e.reason !== "poll") h += ' <span class="deny">' + esc(e.reason) + "</span>";
-  if (e.source === "agent") {
-    if (mcp) {
-      h += ' <span class="muted">· MCP Server 执行 ' + esc(mcp.duration_ms ?? "—") +
-        " ms（端到端 " + esc(e.duration_ms ?? "—") + " ms）</span>";
-    } else {
-      h += ' <span class="warn">MCP Server 未返回审计记录</span>';
-    }
-  } else {
-    h += ' <span class="srv">' + esc(e.source) + "</span>" +
-      ' <span class="muted">· MCP Server 执行 ' + esc(e.duration_ms ?? "—") +
-      " ms（Agent 侧无对应记录）</span>";
-  }
-  return h + "</div>";
-}
-
-// One agent tool_call + its nested data_access rows (and run_analysis job
-// toggle). MCP rows never render at top level when paired.
+// 执行 / 查询 / 返回 lines for one agent tool_call (+ its paired MCP rows).
 function toolBlock(e, mcp, accesses, base, conn, parallel) {
-  let h = toolLine(e, mcp, base, conn, parallel);
-  h += accesses.map((a) => accessLine(a, base, 2)).join("");
+  const tool = auditNormTool(e);
+  let h = '<div class="tl d1"><span class="conn">' + conn + "</span>" + off(e.ts, base) +
+    arrow(agentWho(e), portalWho(e), mcpWho(mcp)) +
+    ' <span>执行 <b>' + esc(tool) + "</b>（以用户身份）</span>" +
+    (parallel ? ' <span class="st">并行</span>' : "") + stBadge(e);
+  if (e.reason && e.reason !== "poll") h += ' <span class="deny">' + esc(e.reason) + "</span>";
+  h += "</div>";
+  h += accesses.map((a) => accessLine({ ...a, actor: a.actor ?? mcp?.actor }, base, 2)).join("");
+  // 返回 line: row-count sum + split of e2e vs server time.
+  const rowSum = accesses.reduce((n, a) => n + (typeof a.row_count === "number" ? a.row_count : 0), 0);
+  const back = (mcp?.ts ?? e.ts) + (mcp?.duration_ms ?? e.duration_ms ?? 0);
+  h += '<div class="tl d1"><span class="conn">└</span>' + off(back, base) +
+    arrow(mcpWho(mcp), portalWho(e), agentWho(e));
+  if (mcp) {
+    const transit = Math.max(0, (e.duration_ms ?? 0) - (mcp.duration_ms ?? 0));
+    h += ' <span>返回 ' + (accesses.length ? esc(rowSum) + " 行" : "无数据") + "</span>" +
+      right("MCP 执行 " + esc(mcp.duration_ms ?? "—") + " ms · 端到端 " +
+        dur(e.duration_ms) + " · Portal 转发与网络 ≈" + (transit / 1000).toFixed(1) + " s");
+  } else {
+    h += ' <span>返回</span> <span class="warn">MCP Server 未返回审计记录</span>' +
+      right("端到端 " + dur(e.duration_ms));
+  }
+  h += "</div>";
   if (e.job_id) {
     h += '<div class="tl d2"><span class="conn"></span><span></span>' +
       '<button class="link" type="button" data-job="' + esc(e.job_id) +
@@ -229,33 +297,38 @@ function toolBlock(e, mcp, accesses, base, conn, parallel) {
   return h;
 }
 
+// Unmatched MCP-side call: Agent part unknown.
 function mcpBlock(e, accesses, base) {
-  let h = toolLine(e, e, base, "└", false);
-  h += accesses.map((a) => accessLine(a, base, 2)).join("");
+  let h = '<div class="tl d1"><span class="conn">└</span>' + off(e.ts, base) +
+    arrow(who(null, "Agent"), mcpWho(e)) +
+    ' <span>执行 <b>' + esc(auditNormTool(e)) + "</b></span>" + stBadge(e) +
+    ' <span class="srv">' + esc(e.source) + "</span>" +
+    right("MCP 执行 " + esc(e.duration_ms ?? "—") + " ms · Agent 侧无对应记录") + "</div>";
+  h += accesses.map((a) => accessLine({ ...a, actor: a.actor ?? e.actor }, base, 2)).join("");
   return h;
 }
 
 function eventLine(e, base) {
   const st = stBadge(e);
-  if (e.event === "question") {
-    return '<div class="tl d0">' + off(e.ts, base) + '<span class="tool">提问</span>' +
-      '<span class="q">' + esc(e.text_excerpt ?? "（未保存内容）") + "</span>" + st + "</div>";
-  }
+  if (e.event === "question") return ""; // header already shows the question
   if (e.event === "reply") {
     const text = plain(e.text_excerpt);
     const long = text.length > 120;
-    return '<div class="tl d0">' + off(e.ts, base) + '<span class="tool">回答</span>' +
-      '<span class="q reply-text">' + esc(text) + "</span>" + st +
+    return '<div class="tl d0">' + off(e.ts, base) +
+      arrow(agentWho(e), who(e.target, "用户")) +
+      ' <span class="tool">回答</span> <span class="q reply-text">' + esc(text) + "</span>" + st +
       (long ? '<button class="link" type="button" data-expand>展开</button>' : "") + "</div>";
   }
   if (e.event === "dlp_block") {
     return '<div class="tl d0">' + off(e.ts, base) +
-      '<span class="dlp">DLP 拦截（内容未保存）</span>' + st +
+      arrow(who(null, "AI Gateway"), agentWho(e)).replace("──▶", "──✕") +
+      ' <span class="dlp">DLP 拦截（内容未保存）</span>' + st +
       (e.reason ? ' <span class="meta">' + esc(e.reason) + "</span>" : "") + "</div>";
   }
   if (e.event === "poll_group") {
     return '<div class="tl d0">' + off(e.ts, base) +
-      '<span class="tool">进度查询（自动轮询）× ' + esc(e.count) + "</span>" +
+      arrow(who(null, "Agent"), who(null, "MCP Server")) +
+      ' <span class="tool">进度查询（自动轮询）× ' + esc(e.count) + "</span>" +
       (e.job_id ? ' <span class="srv">job ' + esc(e.job_id) + "</span>" : "") + "</div>";
   }
   return "";
@@ -267,14 +340,21 @@ function timelineRows(g, pairMap) {
   const rows = g.rows.slice().sort((a, b) => a.ts - b.ts);
   const base = (rows.find((r) => r.event === "question") ?? rows[0])?.ts ?? 0;
   let out = "";
+  let lastCalls = [];
   for (const it of auditTimelineItems(rows, pairMap)) {
-    if (it.kind === "note") {
+    if (it.kind === "round") {
+      out += roundLine(it.row, it.idx);
+      lastCalls = [];
+    } else if (it.kind === "send") {
+      out += sendLine(it.row, it.idx, base);
+    } else if (it.kind === "recv") {
+      out += recvLine(it.row, it.idx, base, lastCalls);
+    } else if (it.kind === "tool") {
+      lastCalls.push(it.row);
+      out += toolBlock(it.row, it.mcp, it.accesses ?? [], base, it.conn, it.parallel);
+    } else if (it.kind === "note") {
       out += '<div class="tl d1"><span class="conn">└</span><span></span>' +
         '<span class="muted">' + esc(it.text ?? "") + "</span></div>";
-    } else if (it.kind === "model") {
-      out += modelLine(it.row, it.idx, base);
-    } else if (it.kind === "tool") {
-      out += toolBlock(it.row, it.mcp, it.accesses ?? [], base, it.conn, it.parallel);
     } else if (it.kind === "mcp") {
       out += mcpBlock(it.row, it.accesses ?? [], base);
     } else if (it.kind === "access") {
@@ -286,7 +366,8 @@ function timelineRows(g, pairMap) {
   return out;
 }
 
-// run_analysis job events as a mini timeline (model_call + data_access rows).
+// run_analysis job events as a mini timeline: container model_call rows and
+// data accesses, role-labelled the same way.
 function jobMini(evs) {
   const rows = evs.slice().sort((a, b) => a.ts - b.ts);
   const base = rows[0]?.ts ?? 0;
@@ -295,11 +376,13 @@ function jobMini(evs) {
     if (r.event === "model_call") {
       const a = parseArgs(r);
       out += '<div class="tl d0">' + off(r.ts, base) +
-        '<span class="tool">模型</span> <span class="srv">' + esc(a.served_model ?? r.tool ?? "—") +
-        "</span> · " + (r.duration_ms != null ? (r.duration_ms / 1000).toFixed(1) + " s · " : "") +
-        "输入 " + esc(a.input_tokens ?? "—") + " / 输出 " + esc(a.output_tokens ?? "—") +
-        " tokens" + stBadge(r) +
-        (r.reason ? ' <span class="deny">' + esc(r.reason) + "</span>" : "") + "</div>";
+        arrow(mcpWho(r), who(r.target, "AI Gateway")) +
+        (a.served_model ? ' <span class="nm">' + esc(a.served_model) + "</span>" : "") +
+        ' <span>模型调用 ' + esc(r.tool ?? "") + "</span>" +
+        ' <span class="muted">· 输入 ' + esc(a.input_tokens ?? "—") + " / 输出 " +
+        esc(a.output_tokens ?? "—") + " tokens</span>" + stBadge(r) +
+        (r.reason ? ' <span class="deny">' + esc(r.reason) + "</span>" : "") +
+        right(dur(r.duration_ms)) + "</div>";
     } else if (r.event === "data_access") {
       out += accessLine(r, base, 0);
     }

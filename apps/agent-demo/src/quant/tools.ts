@@ -299,6 +299,7 @@ export function registerQuantTools(
         const p = parseArgs("describe_data", args);
         if (!p.ok) return p.result;
         audit.access({
+          store: "d1" as const,
           tables: p.data.table ? [p.data.table] : [...QUANT_TABLES, "research"],
           status: "ok"
         });
@@ -330,6 +331,7 @@ export function registerQuantTools(
           q
         ]);
         audit.access({
+          store: "d1" as const,
           tables: ["stock_basic"],
           sql: QUANT_QUERIES.findStock,
           rowCount: found.length,
@@ -371,6 +373,7 @@ export function registerQuantTools(
           results[name] = group;
           groups.push(group);
           audit.access({
+          store: "d1" as const,
             tables: extractTables(sql),
             sql,
             rowCount: group.rows.length,
@@ -408,8 +411,9 @@ export function registerQuantTools(
           stockName(env, ts_code),
           rows(env, QUANT_QUERIES.fundamentals, [ts_code, periods])
         ]);
-        audit.access({ tables: ["stock_basic"], sql: QUANT_QUERIES.stockName, status: "ok" });
+        audit.access({ store: "d1" as const, tables: ["stock_basic"], sql: QUANT_QUERIES.stockName, status: "ok" });
         audit.access({
+          store: "d1" as const,
           tables: extractTables(QUANT_QUERIES.fundamentals),
           sql: QUANT_QUERIES.fundamentals,
           rowCount: periodRows.length,
@@ -452,6 +456,7 @@ export function registerQuantTools(
             await rows(env, QUANT_QUERIES.aiReportLatest, [ts_code], new Set(["ai_report"]))
           )[0] ?? null;
           audit.access({
+          store: "d1" as const,
             tables: ["ai_analysis_result"],
             sql: QUANT_QUERIES.aiReportLatest,
             rowCount: report ? 1 : 0,
@@ -467,6 +472,7 @@ export function registerQuantTools(
         if (ts_code) {
           const list = await rows(env, QUANT_QUERIES.aiReportHistory, [ts_code, limit]);
           audit.access({
+          store: "d1" as const,
             tables: ["ai_analysis_result"],
             sql: QUANT_QUERIES.aiReportHistory,
             rowCount: list.length,
@@ -479,6 +485,7 @@ export function registerQuantTools(
           limit
         ]);
         audit.access({
+          store: "d1" as const,
           tables: ["ai_analysis_result"],
           sql: QUANT_QUERIES.aiReportList,
           rowCount: list.length,
@@ -527,6 +534,7 @@ export function registerQuantTools(
         });
         const coverage = await firstRow(env, QUANT_QUERIES.researchCoverage, [ts_code]);
         audit.access({
+          store: "d1" as const,
           tables: ["sync_status"],
           sql: QUANT_QUERIES.researchCoverage,
           rowCount: coverage ? 1 : 0,
@@ -590,6 +598,7 @@ export function registerQuantTools(
           }
         }
         audit.access({
+          store: "vectorize" as const,
           tables: ["vectorize:stock-knowledge"],
           rowCount: matches.length,
           status: "ok"
@@ -619,6 +628,7 @@ export function registerQuantTools(
           p.data.limit
         ]);
         audit.access({
+          store: "d1" as const,
           tables: extractTables(QUANT_QUERIES.surveys),
           sql: QUANT_QUERIES.surveys,
           rowCount: surveys.length,
@@ -657,6 +667,7 @@ export function registerQuantTools(
             new Set(["remark", "ts_main_biz"])
           );
           audit.access({
+          store: "d1" as const,
             tables: extractTables(QUANT_QUERIES.chainByStock),
             sql: QUANT_QUERIES.chainByStock,
             rowCount: list.length,
@@ -671,6 +682,7 @@ export function registerQuantTools(
           new Set(["remark"])
         );
         audit.access({
+          store: "d1" as const,
           tables: extractTables(QUANT_QUERIES.chainBySector),
           sql: QUANT_QUERIES.chainBySector,
           rowCount: list.length,
@@ -696,6 +708,7 @@ export function registerQuantTools(
         const guard = checkReadOnlySql(p.data.sql);
         if (!guard.ok) {
           audit.access({
+          store: "d1" as const,
             tables: extractTables(p.data.sql),
             sql: p.data.sql,
             status: "denied",
@@ -710,6 +723,7 @@ export function registerQuantTools(
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           audit.access({
+          store: "d1" as const,
             tables: extractTables(guard.sql),
             sql: guard.sql,
             status: "error",
@@ -721,6 +735,7 @@ export function registerQuantTools(
         const limited = resultRows.slice(0, maxRows);
         const columns = limited.length > 0 ? Object.keys(limited[0]) : [];
         audit.access({
+          store: "d1" as const,
           tables: extractTables(guard.sql),
           sql: guard.sql,
           rowCount: limited.length,
@@ -753,6 +768,7 @@ export function registerQuantTools(
         audit.job(jobId);
         const existing = await firstRow(env, QUANT_QUERIES.aiReportToday, [ts_code, today]);
         audit.access({
+          store: "d1" as const,
           tables: extractTables(QUANT_QUERIES.aiReportToday),
           sql: QUANT_QUERIES.aiReportToday,
           rowCount: existing ? 1 : 0,

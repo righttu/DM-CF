@@ -75,7 +75,12 @@
     "PUBLIC_MCP_ORIGIN": "https://abc-quant-mcp-s.righttu.uk",
     "ALLOWED_ORIGINS": "https://agent-demo.righttu.uk,https://portal-demo.righttu.uk",
     "ENVIRONMENT": "production",
-    "CF_ACCOUNT_ID": "ebc4f70211dc33165a239c6018da8e2d"
+    "CF_ACCOUNT_ID": "ebc4f70211dc33165a239c6018da8e2d",
+    "AI_GATEWAY_ID": "ai-gateway",
+    "AUDIT_SERVICE_NAME": "abc-quant-mcp-s",
+    "AUDIT_D1_NAME": "quant-data",
+    "AUDIT_VECTORIZE_NAME": "stock-knowledge",
+    "AUDIT_R2_NAME": "stock-infor"
   },
   "env": {
     "local": {
@@ -130,7 +135,12 @@
         "LOCAL_DEV_IDENTITY_ENABLED": "true",
         "LOCAL_ANALYST_EMAIL": "analyst@local.test",
         "LOCAL_VIEWER_EMAIL": "viewer@local.test",
-        "CF_ACCOUNT_ID": "local-account"
+        "CF_ACCOUNT_ID": "local-account",
+        "AI_GATEWAY_ID": "ai-gateway",
+        "AUDIT_SERVICE_NAME": "abc-quant-mcp-s-local",
+        "AUDIT_D1_NAME": "quant-data-local",
+        "AUDIT_VECTORIZE_NAME": "stock-knowledge-local",
+        "AUDIT_R2_NAME": "stock-infor-local"
       }
     }
   }

@@ -29,6 +29,9 @@ export interface AuditEvent {
   job_id?: string | null;
   text_excerpt?: string | null;
   call_id?: string | null;
+  // "<kind>:<name>" recorded at write time from env/config (never page-invented)
+  actor?: string | null;
+  target?: string | null;
 }
 
 const COLUMNS = [
@@ -52,7 +55,9 @@ const COLUMNS = [
   "duration_ms",
   "job_id",
   "text_excerpt",
-  "call_id"
+  "call_id",
+  "actor",
+  "target"
 ] as const;
 
 const SECRET_KEY = /token|secret|password|api[_-]?key|authorization/i;
@@ -136,7 +141,9 @@ export async function recordAudit(
         e.duration_ms ?? null,
         e.job_id ?? null,
         e.text_excerpt ?? null,
-        e.call_id ?? null
+        e.call_id ?? null,
+        e.actor ?? null,
+        e.target ?? null
       )
     );
     await db.batch(statements);

@@ -25,6 +25,10 @@ export interface McpKitEnv extends AccessEnv {
   PUBLIC_MCP_ORIGIN?: string;
   ALLOWED_ORIGINS?: string;
   AUDIT_DB?: D1Database;
+  AUDIT_SERVICE_NAME?: string;
+  AUDIT_D1_NAME?: string;
+  AUDIT_VECTORIZE_NAME?: string;
+  AUDIT_R2_NAME?: string;
 }
 
 export interface McpPrincipal {
@@ -44,6 +48,8 @@ export type ToolAccessAudit = {
     rowCount?: number;
     status: string;
     reason?: string;
+    // which store this access touched — decides the audit `target` label
+    store?: "d1" | "vectorize" | "r2";
   }): void;
   job(id: string): void;
 };
@@ -749,6 +755,20 @@ async function handleMcpApi<E extends McpKitEnv>(
     const ids = auditIds(meta, extractAuditArg(details?.args));
     const accesses: AuditEvent[] = [];
     let jobId: string | null = null;
+    const mcpActor = env.AUDIT_SERVICE_NAME
+      ? `mcp-server:${env.AUDIT_SERVICE_NAME}`
+      : null;
+    const storeTarget = (e: { store?: "d1" | "vectorize" | "r2" }): string | null => {
+      const name =
+        e.store === "d1"
+          ? env.AUDIT_D1_NAME
+          : e.store === "vectorize"
+            ? env.AUDIT_VECTORIZE_NAME
+            : e.store === "r2"
+              ? env.AUDIT_R2_NAME
+              : null;
+      return e.store && name ? `${e.store}:${name}` : null;
+    };
     const audit: ToolAccessAudit = {
       access: (e) =>
         accesses.push({
@@ -767,7 +787,9 @@ async function handleMcpApi<E extends McpKitEnv>(
           row_count: e.rowCount ?? null,
           status: e.status,
           reason: e.reason ?? null,
-          call_id: ids.callId
+          call_id: ids.callId,
+          actor: mcpActor,
+          target: storeTarget(e)
         }),
       job: (id) => {
         jobId = id;
@@ -790,7 +812,9 @@ async function handleMcpApi<E extends McpKitEnv>(
       reason: reason ?? null,
       duration_ms: Date.now() - started,
       job_id: jobId,
-      call_id: ids.callId
+      call_id: ids.callId,
+      actor: mcpActor,
+      target: null
     });
     const flush = (rows: AuditEvent[]) => {
       ctx.waitUntil(recordAudit(env.AUDIT_DB, rows));

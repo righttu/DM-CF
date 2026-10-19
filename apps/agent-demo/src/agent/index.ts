@@ -45,6 +45,7 @@ interface AgentDemoEnv extends AccessEnv {
   CF_AIG_TOKEN?: string;
   AUDIT_DB?: D1Database;
   AUDIT_ADMIN_EMAILS?: string;
+  AUDIT_SERVICE_NAME?: string;
 }
 
 type ModelBinding = { run: (...args: unknown[]) => Promise<unknown> };
@@ -459,6 +460,24 @@ const SINGLE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 //   return SINGLE_SEGMENT.test(ACCOUNT_ID) && SINGLE_SEGMENT.test(GATEWAY_ID);
 // }
 
+// "<kind>:<name>" actor/target labels recorded at write time; null when the
+// env var is absent — the audit page shows 名称未记录 rather than a guess.
+function auditActorOf(env: AgentDemoEnv, kind: string, suffix = ""): string | null {
+  return env.AUDIT_SERVICE_NAME ? `${kind}:${env.AUDIT_SERVICE_NAME}${suffix}` : null;
+}
+function auditPortalTarget(env: AgentDemoEnv): string | null {
+  if (!env.MCP_SERVER_URL) return null;
+  try {
+    return `mcp-portal:${new URL(env.MCP_SERVER_URL).host}`;
+  } catch {
+    return null;
+  }
+}
+// DO env is a protected member; buildTools only needs it for audit labels.
+function agentAuditEnv(agent: ResearchAgent): AgentDemoEnv {
+  return (agent as unknown as { env: AgentDemoEnv }).env;
+}
+
 function modelConfigured(env: AgentDemoEnv): boolean {
   const { GATEWAY_ID } = env;
   if (!modelBindingOverride && !env.AI) return false;
@@ -512,7 +531,7 @@ function buildChatModel(
   context: AuditContext,
   conversationId: string,
   action: "chat" | "dlp-test",
-  aigLogIds?: string[]
+  runLog?: { start: number; logId: string | null }[]
 ) {
   if (!modelConfigured(env)) return null;
   const base = (modelBindingOverride ?? env.AI) as unknown as ModelBinding;
@@ -526,9 +545,16 @@ function buildChatModel(
             delete inputs.tool_choice;
           }
           try {
+            // Model timing: the request start is the round's true start —
+            // stream "start-step" parts fire late and would blend tool
+            // execution into the round's duration.
+            const t0 = Date.now();
             const out = await target.run(...args);
             const logId = (target as { aiGatewayLogId?: string | null }).aiGatewayLogId;
-            if (aigLogIds && typeof logId === "string" && logId) aigLogIds.push(logId);
+            runLog?.push({
+              start: t0,
+              logId: typeof logId === "string" && logId ? logId : null
+            });
             return out;
           } catch (error) {
             captureDlpFromError(
@@ -624,6 +650,8 @@ function buildTools(
           request_id: context.requestId,
           server: tool.server,
           tool: tool.name,
+          actor: auditActorOf(agentAuditEnv(agent), "agent", "/ResearchAgent"),
+          target: auditPortalTarget(agentAuditEnv(agent)),
           args_json: sanitizeArgs(args),
           status:
             result.status === "ok" ? "ok" : result.status === "denied" ? "denied" : "error",
@@ -1473,6 +1501,8 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
         request_id: null,
         server,
         tool: toolName,
+        actor: auditActorOf(this.env, "agent", "/ResearchAgent"),
+        target: auditPortalTarget(this.env),
         args_json: sanitizeArgs({ job_id: jobId }),
         status:
           result.status === "ok" ? "ok" : result.status === "denied" ? "denied" : "error",
@@ -1596,7 +1626,9 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
     const conversationId = this.ensureConversationId();
     const toolTrail: AuditEvent[] = [];
     const modelTrail: AuditEvent[] = [];
-    const aigLogIds: string[] = [];
+    const runLog: { start: number; logId: string | null }[] = [];
+    const agentActor = auditActorOf(this.env, "agent", "/ResearchAgent");
+    const portalTarget = auditPortalTarget(this.env);
     const agentRow = (
       event: AuditEvent["event"],
       extra: Partial<AuditEvent>
@@ -1608,6 +1640,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
       role: context.role,
       conversation_id: conversationId,
       request_id: context.requestId,
+      actor: agentActor,
       ...extra
     });
     const flushTrail = (rows: AuditEvent[]) =>
@@ -1619,7 +1652,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
         context,
         conversationId,
         "chat",
-        aigLogIds
+        runLog
       );
       if (!model) {
         return { reply: "模型网关未配置，演示无法调用模型。", events };
@@ -1687,6 +1720,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
       let errored = false;
       let stepHasText = false;
       const stepStarts: number[] = [];
+      const stepEnds: number[] = [];
       try {
         for await (const part of result.fullStream as AsyncIterable<{
           type: string;
@@ -1695,6 +1729,8 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
           if (part.type === "start-step") {
             stepHasText = false;
             stepStarts.push(Date.now());
+          } else if (part.type === "finish-step") {
+            stepEnds.push(Date.now());
           } else if (part.type === "text-delta" && typeof part.text === "string") {
             let delta = part.text;
             if (!stepHasText && text.length > 0) delta = `\n\n${delta}`;
@@ -1741,21 +1777,25 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
               : last && errored
                 ? "error"
                 : "stop";
-          const start = stepStarts[i] ?? turnStartTs;
+          // True round timing: binding run() request start -> finish-step part
+          // time (excludes tool execution, unlike start-step deltas).
+          const start = runLog[i]?.start ?? stepStarts[i] ?? turnStartTs;
           modelTrail.push(
             agentRow("model_call", {
               ts: start,
-              duration_ms: Math.max(0, (stepStarts[i + 1] ?? modelEndTs) - start),
+              duration_ms: Math.max(0, (stepEnds[i] ?? modelEndTs) - start),
               server: this.env.GATEWAY_ID ?? null,
               tool: modelIdUsed,
+              target: this.env.GATEWAY_ID ? `ai-gateway:${this.env.GATEWAY_ID}` : null,
               status: finish === "error" ? "error" : "ok",
               reason: lastBlock(dlpSink) && last ? "dlp_blocked" : finish,
               args_json: JSON.stringify({
                 step: i + 1,
                 tools: toolNames,
+                tools_count: Object.keys(tools).length,
                 input_tokens: num(usage.inputTokens),
                 output_tokens: num(usage.outputTokens),
-                ...(aigLogIds[i] ? { aig_log_id: aigLogIds[i] } : {})
+                ...(runLog[i]?.logId ? { aig_log_id: runLog[i].logId } : {})
               })
             })
           );
@@ -1768,10 +1808,12 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
           reason: blockedQ ? "dlp_blocked" : null,
           text_excerpt: blockedQ ? null : excerpt(message, 300)
         });
+      const replyTarget = context.userEmail ? `user:${context.userEmail}` : null;
       const replyRow = (replyText: string, status: string): AuditEvent =>
         agentRow("reply", {
           ts: Date.now(),
           status,
+          target: replyTarget,
           text_excerpt: excerpt(replyText, 300)
         });
       if (signal?.aborted) {
@@ -1781,7 +1823,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
             questionRow(false),
             ...modelTrail,
             ...toolTrail,
-            agentRow("reply", { ts: Date.now(), status: "stopped" })
+            agentRow("reply", { ts: Date.now(), status: "stopped", target: replyTarget })
           ]);
           return { reply: "", events, stopped: true };
         }
@@ -1799,7 +1841,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
           questionRow(false),
           ...modelTrail,
           ...toolTrail,
-          agentRow("reply", { status: "error", reason: "model_error" })
+          agentRow("reply", { status: "error", reason: "model_error", target: replyTarget })
         ]);
         return { reply: "模型调用失败，请稍后重试。", events };
       }
@@ -1810,7 +1852,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
           questionRow(false),
           ...modelTrail,
           ...toolTrail,
-          agentRow("reply", { status: "error", reason: "empty_reply" })
+          agentRow("reply", { status: "error", reason: "empty_reply", target: replyTarget })
         ]);
         return { reply: "模型没有给出回答，请换一种问法重试。", events };
       }

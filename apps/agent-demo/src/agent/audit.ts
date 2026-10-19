@@ -29,7 +29,7 @@ function bjDayMs(d: string, end: boolean): number | null {
 const AUDIT_COLUMNS =
   "id, ts, source, event, user_email, actor_id, role, conversation_id, " +
   "request_id, server, tool, args_json, sql_text, tables, row_count, status, " +
-  "reason, duration_ms, job_id, text_excerpt, call_id";
+  "reason, duration_ms, job_id, text_excerpt, call_id, actor, target";
 
 export async function queryAuditEvents(
   env: AuditQueryEnv,

@@ -44,6 +44,8 @@
     "MCP_AUTHORIZE_ACCESS_AUD": "552cb8760d3d458fe1bcb705faa276d73630e9f1293e7cac871f1edd77168cf2",
     "PUBLIC_MCP_ORIGIN": "https://mcp-demo.righttu.uk",
     "ALLOWED_ORIGINS": "https://agent-demo.righttu.uk,https://portal-demo.righttu.uk",
+    "AUDIT_SERVICE_NAME": "agent-demo-mcp",
+    "AUDIT_D1_NAME": "demo-agent-db",
     "ENVIRONMENT": "production"
   },
   "env": {
@@ -84,7 +86,9 @@
         "VIEWER_EMAILS": "viewer@local.test",
         "LOCAL_DEV_IDENTITY_ENABLED": "true",
         "LOCAL_ANALYST_EMAIL": "analyst@local.test",
-        "LOCAL_VIEWER_EMAIL": "viewer@local.test"
+        "LOCAL_VIEWER_EMAIL": "viewer@local.test",
+        "AUDIT_SERVICE_NAME": "agent-demo-mcp-local",
+        "AUDIT_D1_NAME": "demo-agent-db-local"
       }
     }
   }

@@ -51,6 +51,7 @@ function registerResearchTools(
         }
         const r = await listDemoCompanies(db);
         audit.access({
+          store: "d1" as const,
           tables: ["demo_reports"],
           rowCount: Array.isArray(r.companies) ? r.companies.length : 0,
           status: "ok"
@@ -72,6 +73,7 @@ function registerResearchTools(
         }
         const r = await getLatestAnalysis(db, args.company_id);
         audit.access({
+          store: "d1" as const,
           tables: ["demo_reports"],
           rowCount: r.report ? 1 : 0,
           status: r.error ? "error" : "ok",
@@ -95,6 +97,7 @@ function registerResearchTools(
           }
           const r = await readResearchDocument(db, args.document_id);
           audit.access({
+          store: "d1" as const,
             tables: ["demo_documents"],
             rowCount: r.document ? 1 : 0,
             status: r.error ? "error" : "ok",

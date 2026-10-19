@@ -41,6 +41,7 @@
     "ACCOUNT_ID": "ebc4f70211dc33165a239c6018da8e2d",
     "GATEWAY_ID": "agent-demo",
     "MODEL_ID": "dynamic/abc-agent",
+    "AUDIT_SERVICE_NAME": "agent-demo-frontend",
     "ENVIRONMENT": "production"
   },
   "env": {
@@ -76,7 +77,8 @@
         "LOCAL_DEV_IDENTITY_ENABLED": "true",
         "AUDIT_ADMIN_EMAILS": "audit-admin@local.test",
         "LOCAL_ANALYST_EMAIL": "analyst@local.test",
-        "LOCAL_VIEWER_EMAIL": "viewer@local.test"
+        "LOCAL_VIEWER_EMAIL": "viewer@local.test",
+        "AUDIT_SERVICE_NAME": "agent-demo-frontend-local"
       }
     }
   }

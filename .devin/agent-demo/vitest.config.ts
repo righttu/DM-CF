@@ -55,6 +55,8 @@ export default defineConfig({
               ALLOWED_ORIGINS: "http://localhost",
               ANALYST_EMAILS: "analyst@example.com",
               VIEWER_EMAILS: "viewer@example.com",
+              AUDIT_SERVICE_NAME: "aux-mcp-test",
+              AUDIT_D1_NAME: "demo-agent-db-test",
               ACCESS_TEST_JWKS_JSON:
                 '{"keys":[{"kty":"RSA","n":"sId9Bo01-FfSxOU4i1oOZr630Qa-7K4yWKkdl5eiEZjWR8aFfb2mGzt5k9Hllw5UUSrkUrq-BN1f08SVLjt-ufFrQ6XK4Asc4IFo58Ed4WteED0ovJ44Rhdjvb_SHkZDUaoeJmhhlQ67ZBWkRlWSA5c2jZpTurcaUc0LLkMsHZZH3LhOaiZ8BIOZZe2u1IBn4IKp3oi-DcEjdnKdPUr8ZQ51bHuDdYI_EWyd595YVFSWk1Os3203-q6_577Uec-suqlw-FoYvDsWUkZnB5pW03zFGe8V25KW8GyUa8rH16tS_bRgxOhwPncD_YKUgXGXQs31ZrL8StvmEBnDKl3n7Q","e":"AQAB","kid":"test-key-1","alg":"RS256","use":"sig"}]}'
             }

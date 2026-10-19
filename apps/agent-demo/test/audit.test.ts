@@ -13,6 +13,7 @@ import {
 } from "../src/quant/analysis.js";
 import auditMigration from "../migrations/audit/0001_audit.sql?raw";
 import auditMigration2 from "../migrations/audit/0002_call_id.sql?raw";
+import auditMigration3 from "../migrations/audit/0003_actor_target.sql?raw";
 import {
   AGENT_AUD,
   ANALYST_EMAIL,
@@ -98,7 +99,7 @@ function textResponse(text: string) {
 }
 
 beforeAll(async () => {
-  for (const mig of [auditMigration, auditMigration2]) {
+  for (const mig of [auditMigration, auditMigration2, auditMigration3]) {
     for (const stmt of mig.split(";")) {
       const sql = stmt.trim();
       if (sql) await AUDIT_DB().prepare(sql).run();
@@ -360,6 +361,23 @@ describe("agent chat audit trail", () => {
     expect(typeof steps[0].duration_ms).toBe("number");
     expect(a1.aig_log_id).toBe("aig-log-step-1");
     expect(a2.aig_log_id).toBe("aig-log-step-2");
+    // v4: actor/target recorded from env vars, tools_count offered to the model
+    expect(steps[0].actor).toBe("agent:test-service/ResearchAgent");
+    expect(steps[0].target).toBe("ai-gateway:test-gateway");
+    expect(typeof a1.tools_count).toBe("number");
+    expect(a1.tools_count).toBeGreaterThanOrEqual(1);
+    // round timing: run() start -> finish-step, i.e. excludes tool execution
+    const calls = await auditRows(
+      "request_id = ? AND event = 'tool_call' AND source = 'agent'",
+      [rid]
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].actor).toBe("agent:test-service/ResearchAgent");
+    expect(String(calls[0].target)).toMatch(/^mcp-portal:/);
+    const step0 = steps[0] as unknown as { ts: number; duration_ms: number };
+    expect(step0.ts + step0.duration_ms).toBeLessThanOrEqual(
+      (calls[0].ts as number) + 1500
+    );
     // same request/conversation as the rest of the turn
     const turn = await auditRows(
       "user_email = ? AND event = 'question' AND request_id = ?",
@@ -487,6 +505,10 @@ describe("mcp quant audit trail", () => {
     expect(access?.tables).toBe("stock_basic");
     expect(access?.row_count).toBe(1);
     expect(access?.status).toBe("ok");
+    // v4: env-derived actor/target labels (test vars: test-service / test-d1)
+    expect(call?.actor).toBe("mcp-server:test-service");
+    expect(access?.actor).toBe("mcp-server:test-service");
+    expect(access?.target).toBe("d1:test-d1");
   });
 
   it("records SQL denials with the rejection reason", async () => {
@@ -666,6 +688,8 @@ describe("quant ai.internal model_call audit", () => {
       },
       CF_ACCOUNT_ID: "acct-t",
       CF_AIG_TOKEN: "tok-t",
+      AUDIT_SERVICE_NAME: "abc-quant-mcp-s",
+      AI_GATEWAY_ID: "ai-gateway-t",
       fetch: fetchImpl
     }) as never;
   const chatReq = (model: string) =>
@@ -700,6 +724,9 @@ describe("quant ai.internal model_call audit", () => {
     expect(ev.job_id).toBe("600519.SH:20261017");
     expect(ev.actor_id).toBe("reqhash123");
     expect(ev.tool).toBe("dynamic/abc-brain");
+    // v4: env-derived actor/target
+    expect(ev.actor).toBe("mcp-server:abc-quant-mcp-s/QuantAnalysisContainer");
+    expect(ev.target).toBe("ai-gateway:ai-gateway-t");
     expect(typeof ev.duration_ms).toBe("number");
     const args = JSON.parse(ev.args_json as string) as Record<string, unknown>;
     expect(args.served_model).toBe("@cf/served/real-model");

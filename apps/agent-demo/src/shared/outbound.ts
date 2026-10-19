@@ -117,6 +117,7 @@ const AI_FORWARD_FIELDS = [
 export type AiGatewayEnv = {
   CF_ACCOUNT_ID?: string;
   CF_AIG_TOKEN?: string;
+  AI_GATEWAY_ID?: string;
   fetch?: typeof fetch;
 };
 
@@ -133,6 +134,7 @@ export type AiCallAudit = {
   ts: number;
   duration_ms: number;
   model: string;
+  gateway_id: string;
   served_model: string | null;
   input_tokens: number | null;
   output_tokens: number | null;
@@ -214,10 +216,11 @@ export async function aiChatOutboundHandler(
     JSON.stringify({ event, action: "ai_chat", model, prompt_bytes: length })
   );
   const fetchImpl = env.fetch ?? fetch;
+  const gatewayId = env.AI_GATEWAY_ID ?? "ai-gateway";
   const t0 = Date.now();
-  const report = (ev: Omit<AiCallAudit, "ts" | "duration_ms" | "model">) => {
+  const report = (ev: Omit<AiCallAudit, "ts" | "duration_ms" | "model" | "gateway_id">) => {
     try {
-      audit?.({ ts: t0, duration_ms: Date.now() - t0, model, ...ev });
+      audit?.({ ts: t0, duration_ms: Date.now() - t0, model, gateway_id: gatewayId, ...ev });
     } catch {
       // audit must never break the request path
     }
@@ -225,7 +228,7 @@ export async function aiChatOutboundHandler(
   let upstream: Response;
   try {
     upstream = await fetchImpl(
-      `https://gateway.ai.cloudflare.com/v1/${env.CF_ACCOUNT_ID}/ai-gateway/compat/chat/completions`,
+      `https://gateway.ai.cloudflare.com/v1/${env.CF_ACCOUNT_ID}/${gatewayId}/compat/chat/completions`,
       {
         method: "POST",
         headers,

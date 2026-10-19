@@ -347,7 +347,7 @@ export function groupAuditEvents(events: AuditRowLike[]): GroupedAudit {
 }
 
 export interface TimelineItem {
-  kind: "event" | "model" | "tool" | "mcp" | "access" | "note";
+  kind: "event" | "round" | "send" | "recv" | "model" | "tool" | "mcp" | "access" | "note";
   row?: AuditRowLike;
   idx?: number;
   conn?: string;
@@ -419,7 +419,10 @@ export function auditTimelineItems(
     }
     if (r.event === "model_call") {
       const ri = rounds.indexOf(r);
-      out.push({ kind: "model", row: r, idx: ri });
+      // Round section + two interaction lines (send / recv) per model step.
+      out.push({ kind: "round", row: r, idx: ri });
+      out.push({ kind: "send", row: r, idx: ri });
+      out.push({ kind: "recv", row: r, idx: ri });
       const calls = buckets.get(ri) ?? [];
       calls.forEach((c, j) => emitTool(c, j, calls.length));
       continue;
