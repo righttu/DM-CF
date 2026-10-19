@@ -4,12 +4,15 @@ import pageSrc from "../src/agent/audit-page.ts?raw";
 // @ts-expect-error vite ?raw import has no declared module type here
 import groupsSrc from "../src/agent/audit-groups.ts?raw";
 import {
+  auditGroupSummary,
   auditNormTool,
+  auditSwimlane,
   auditTimelineItems,
   groupAuditEvents,
   type AuditRowLike
 } from "../src/agent/audit-groups.js";
 import realRowsJson from "./evidence/audit-real-rows.json";
+import previewRowsJson from "./evidence/audit-turn2-preview.json";
 
 const U = "a@example.com";
 let n = 0;
@@ -510,6 +513,141 @@ describe("auditTimelineItems", () => {
       "event", "note", "tool", "round", "send", "recv"
     ]);
     expect(items[2].row).toBe(c0);
+  });
+});
+
+describe("auditSwimlane", () => {
+  // Mirror the page: group rows, build pairMap from _pair marks, drop paired rows.
+  const laneSetup = (rows: AuditRowLike[]) => {
+    const g = groupAuditEvents(rows);
+    const grp = g.groups[0];
+    const pairMap = new Map<string, AuditRowLike[]>();
+    for (const m of grp.rows) {
+      const p = m._pair as string | undefined;
+      if (p) {
+        if (!pairMap.has(p)) pairMap.set(p, []);
+        pairMap.get(p)!.push(m);
+      }
+    }
+    grp.rows = grp.rows.filter((r) => !(r._pair && r.event === "tool_call"));
+    return { grp, pairMap };
+  };
+
+  it("derives lanes from actor/target: distinct names, stores collapse to one 数据源 lane", () => {
+    const q = row({ ts: 1000, event: "question", request_id: "r1", actor: "agent:svc/ResearchAgent" });
+    const m1 = row({
+      ts: 1100, event: "model_call", request_id: "r1", tool: "dynamic/x",
+      actor: "agent:svc/ResearchAgent", target: "ai-gateway:gw1", duration_ms: 500,
+      args_json: JSON.stringify({ step: 1, tools: ["find_stock"], tools_count: 3 })
+    });
+    const c1 = row({
+      ts: 1600, request_id: "r1", tool: "srv_find_stock", call_id: "k1", duration_ms: 200,
+      actor: "agent:svc/ResearchAgent", target: "mcp-portal:p.example"
+    });
+    const mc1 = row({
+      ts: 1650, source: "mcp-x", event: "tool_call", call_id: "k1", tool: "find_stock",
+      actor: "mcp-server:s1", duration_ms: 80
+    });
+    const a1 = row({
+      ts: 1700, source: "mcp-x", event: "data_access", call_id: "k1", tool: "find_stock",
+      actor: "mcp-server:s1", target: "d1:db1", tables: "t1", row_count: 2, status: "ok"
+    });
+    const a2 = row({
+      ts: 1750, source: "mcp-x", event: "data_access", call_id: "k1", tool: "find_stock",
+      actor: "mcp-server:s1", target: "vectorize:v1", tables: "t2", row_count: 1, status: "ok"
+    });
+    const reply = row({ ts: 3000, event: "reply", request_id: "r1", actor: "agent:svc/ResearchAgent", target: "user:u@x" });
+    const { grp, pairMap } = laneSetup([q, m1, c1, mc1, a1, a2, reply]);
+    const sw = auditSwimlane(grp.rows, pairMap);
+    expect(sw.lanes.map((l) => l.role)).toEqual([
+      "AI Gateway", "Agent", "MCP Portal", "MCP Server", "数据源"
+    ]);
+    expect(sw.lanes.map((l) => l.name)).toEqual(["gw1", "svc/ResearchAgent", "p.example", "s1", null]);
+    // kinds in strict order incl. round section and full-width reply row
+    expect(sw.arrows.map((a) => a.kind)).toEqual([
+      "sect", "send", "recv", "exec", "query", "query", "ret", "reply"
+    ]);
+    const exec = sw.arrows.find((a) => a.kind === "exec")!;
+    expect(exec.via).toBe("mcp-portal:p.example");
+    const ret = sw.arrows.find((a) => a.kind === "ret")!;
+    expect(ret.ts).toBe(1750); // max(mcp end, last access ts)
+    // non-decreasing offsets
+    const tss = sw.arrows.map((a) => a.ts);
+    expect([...tss].sort((x, y) => x - y)).toEqual(tss);
+  });
+
+  it("gives two MCP servers two lanes", () => {
+    const q = row({ ts: 1000, event: "question", request_id: "r1", actor: "agent:svc" });
+    const m1 = row({
+      ts: 1100, event: "model_call", request_id: "r1", actor: "agent:svc", target: "ai-gateway:gw",
+      duration_ms: 100, args_json: JSON.stringify({ step: 1, tools: ["t1", "t2"], tools_count: 2 })
+    });
+    const c1 = row({ ts: 1200, request_id: "r1", tool: "s1_t1", call_id: "k1", actor: "agent:svc", target: "mcp-portal:p" });
+    const c2 = row({ ts: 1200, request_id: "r1", tool: "s2_t2", call_id: "k2", actor: "agent:svc", target: "mcp-portal:p" });
+    const mc1 = row({ ts: 1250, source: "mcp-a", event: "tool_call", call_id: "k1", tool: "t1", actor: "mcp-server:srv1" });
+    const mc2 = row({ ts: 1250, source: "mcp-b", event: "tool_call", call_id: "k2", tool: "t2", actor: "mcp-server:srv2" });
+    const { grp, pairMap } = laneSetup([q, m1, c1, c2, mc1, mc2]);
+    const sw = auditSwimlane(grp.rows, pairMap);
+    expect(sw.lanes.filter((l) => l.kind === "mcp-server").map((l) => l.name)).toEqual(["srv1", "srv2"]);
+    const execs = sw.arrows.filter((a) => a.kind === "exec");
+    expect(execs.map((a) => a.to)).toEqual(["mcp-server:srv1", "mcp-server:srv2"]);
+    expect(execs.every((a) => a.parallel)).toBe(true);
+  });
+
+  it("legacy rows yield role-only lanes and always include MCP Portal when calls exist", () => {
+    const q = row({ ts: 1000, event: "question", request_id: "r1" });
+    const c1 = row({ ts: 1100, request_id: "r1", tool: "srv_t1", call_id: "k1" });
+    const mc1 = row({ ts: 1150, source: "mcp-x", event: "tool_call", call_id: "k1", tool: "t1" });
+    const { grp, pairMap } = laneSetup([q, c1, mc1]);
+    const sw = auditSwimlane(grp.rows, pairMap);
+    expect(sw.lanes.map((l) => l.role)).toEqual(["Agent", "MCP Portal", "MCP Server"]);
+    expect(sw.lanes.every((l) => l.name == null)).toBe(true);
+  });
+
+  it("orders arrows on the augmented preview turn (发送→回复→执行→查询→返回 ×3)", () => {
+    const rows = previewRowsJson as AuditRowLike[];
+    const { grp, pairMap } = laneSetup(rows);
+    const sw = auditSwimlane(grp.rows, pairMap);
+    expect(sw.lanes.map((l) => l.role)).toEqual([
+      "AI Gateway", "Agent", "MCP Portal", "MCP Server", "数据源"
+    ]);
+    const kinds = sw.arrows.filter((a) => a.kind !== "sect").map((a) => a.kind);
+    expect(kinds).toEqual([
+      "send", "recv", "exec", "query", "ret",
+      "send", "recv", "exec", "query", "query", "ret",
+      "send", "recv", "reply"
+    ]);
+    const tss = sw.arrows.map((a) => a.ts);
+    expect([...tss].sort((x, y) => x - y)).toEqual(tss);
+  });
+});
+
+describe("auditGroupSummary", () => {
+  it("computes table chips, rounds, tokens, risk flags and total", () => {
+    const q = row({ ts: 1000, event: "question", request_id: "r1" });
+    const m1 = row({ ts: 1100, event: "model_call", request_id: "r1",
+      args_json: JSON.stringify({ input_tokens: 100, output_tokens: 20 }) });
+    const m2 = row({ ts: 2000, event: "model_call", request_id: "r1",
+      args_json: JSON.stringify({ input_tokens: 200, output_tokens: 30 }) });
+    const a1 = row({ ts: 1500, source: "mcp-x", event: "data_access", request_id: "r1",
+      tables: "t1", row_count: 3, status: "ok" });
+    const a2 = row({ ts: 1600, source: "mcp-x", event: "data_access", request_id: "r1",
+      tables: "t1", row_count: null, status: "ok" });
+    const a3 = row({ ts: 1700, source: "mcp-x", event: "data_access", request_id: "r1",
+      tables: "t2", row_count: null, status: "denied" });
+    const d = row({ ts: 1800, event: "dlp_block", request_id: "r1", status: "blocked" });
+    const s = auditGroupSummary([q, m1, a1, a2, a3, d, m2]);
+    expect(s.rounds).toBe(2);
+    expect(s.tokens).toBe(350);
+    expect(s.denied).toBe(1);
+    expect(s.dlp).toBe(true);
+    expect(s.total_ms).toBe(1000);
+    const t1 = s.tables.find((t) => t.table === "t1")!;
+    expect(t1.rows).toBe(3);
+    expect(t1.count).toBe(2);
+    const t2 = s.tables.find((t) => t.table === "t2")!;
+    expect(t2.rows).toBe(0);
+    expect(t2.count).toBe(1);
   });
 });
 

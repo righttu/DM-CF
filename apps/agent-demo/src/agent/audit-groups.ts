@@ -442,6 +442,256 @@ export function auditTimelineItems(
   return out;
 }
 
+
+export interface SwimLane {
+  key: string;
+  kind: string;
+  role: string;
+  name: string | null;
+}
+
+export interface SwimArrow {
+  kind: "sect" | "send" | "recv" | "exec" | "query" | "ret" | "dlp" | "reply" | "note" | "poll";
+  ts: number;
+  from?: string;
+  to?: string;
+  via?: string;
+  rows: AuditRowLike[];
+  idx?: number;
+  calls?: AuditRowLike[];
+  parallel?: boolean;
+  count?: number;
+  job?: string | null;
+  text?: string | null;
+}
+
+export interface Swimlane {
+  lanes: SwimLane[];
+  arrows: SwimArrow[];
+}
+
+// Swimlane view of one request group. Lanes are derived from the rows'
+// recorded actor/target "<kind>:<name>" strings only — the code knows just the
+// lane-category order and role labels, never a concrete name. Categories:
+// ai-gateway | agent | mcp-portal | mcp-server | 数据源 (all data-store kinds
+// — d1/vectorize/r2/… — collapse into ONE 数据源 lane; the concrete store is
+// shown on each arrow). Distinct recorded names within a category get their
+// own lane. Legacy rows without actor/target get a role-only lane
+// (kind: empty name). When the group has tool calls the MCP Portal lane is
+// always present even if its name was never recorded.
+// jobMode: for run_analysis job rows (model_call + data_access only) emit
+// single arrows actor -> ai-gateway / actor -> 数据源.
+export function auditSwimlane(
+  rows: AuditRowLike[],
+  pairMap: Map<string, AuditRowLike[]>,
+  jobMode = false
+): Swimlane {
+  const ROLES: Record<string, string> = {
+    "ai-gateway": "AI Gateway",
+    agent: "Agent",
+    "mcp-portal": "MCP Portal",
+    "mcp-server": "MCP Server",
+    store: "数据源"
+  };
+  const ORDER = ["ai-gateway", "agent", "mcp-portal", "mcp-server", "store"];
+  const STORE = new Set(["d1", "vectorize", "r2", "kv"]);
+  const lanes = new Map<string, SwimLane>();
+  const kname = (v: unknown): [string | null, string | null] => {
+    if (v == null || v === "") return [null, null];
+    const i = String(v).indexOf(":");
+    return i > 0 ? [String(v).slice(0, i), String(v).slice(i + 1)] : [null, String(v)];
+  };
+  const laneOf = (kind: string | null, name: string | null): string => {
+    const k = kind ?? "agent";
+    if (k === "store" || STORE.has(k)) {
+      if (!lanes.has("store")) {
+        lanes.set("store", { key: "store", kind: "store", role: ROLES.store, name: null });
+      }
+      return "store";
+    }
+    const key = `${k}:${name ?? ""}`;
+    if (!lanes.has(key)) {
+      lanes.set(key, { key, kind: k, role: ROLES[k] ?? k, name: name ?? null });
+    }
+    return key;
+  };
+  const actorLane = (r?: AuditRowLike | null): string => {
+    const [k, n] = kname(r?.actor);
+    return laneOf(k, n);
+  };
+  const agentLane = (r?: AuditRowLike | null): string => {
+    const [k, n] = kname(r?.actor);
+    return k === "agent" ? laneOf(k, n) : laneOf("agent", null);
+  };
+  const gwLane = (r?: AuditRowLike | null): string => {
+    const [k, n] = kname(r?.target);
+    return k === "ai-gateway" ? laneOf(k, n) : laneOf("ai-gateway", null);
+  };
+  const portalLane = (r?: AuditRowLike | null): string => {
+    const [k, n] = kname(r?.target);
+    return k === "mcp-portal" ? laneOf(k, n) : laneOf("mcp-portal", null);
+  };
+  const mcpLane = (r?: AuditRowLike | null): string => {
+    const [k, n] = kname(r?.actor);
+    return k === "mcp-server" ? laneOf(k, n) : laneOf("mcp-server", null);
+  };
+  const lastTs = () => (arrows.length ? arrows[arrows.length - 1].ts : 0);
+  const arrows: SwimArrow[] = [];
+
+  if (jobMode) {
+    for (const r of rows.slice().sort((a, b) => a.ts - b.ts)) {
+      if (r.event === "model_call") {
+        arrows.push({ kind: "send", ts: r.ts, from: actorLane(r), to: gwLane(r), rows: [r] });
+      } else if (r.event === "data_access") {
+        arrows.push({ kind: "query", ts: r.ts, from: actorLane(r), to: laneOf("store", null), rows: [r] });
+      } else if (r.event === "tool_call") {
+        const [k, n] = kname(r.target);
+        arrows.push({ kind: "exec", ts: r.ts, from: actorLane(r), to: laneOf(k ?? "mcp-server", n), rows: [r] });
+      }
+    }
+  } else {
+    for (const it of auditTimelineItems(rows, pairMap)) {
+      const r = it.row;
+      if (it.kind === "round" && r) {
+        arrows.push({ kind: "sect", ts: r.ts, idx: it.idx, rows: [r] });
+      } else if (it.kind === "send" && r) {
+        arrows.push({ kind: "send", ts: r.ts, from: agentLane(r), to: gwLane(r), idx: it.idx, rows: [r] });
+      } else if (it.kind === "recv" && r) {
+        arrows.push({
+          kind: "recv",
+          ts: r.ts + (typeof r.duration_ms === "number" ? r.duration_ms : 0),
+          from: gwLane(r),
+          to: agentLane(r),
+          idx: it.idx,
+          rows: [r]
+        });
+      } else if (it.kind === "tool" && r) {
+        const al = agentLane(r);
+        const pl = portalLane(r);
+        const ml = it.mcp ? mcpLane(it.mcp) : laneOf("mcp-server", null);
+        const toolRows = it.mcp ? [r, it.mcp] : [r];
+        arrows.push({ kind: "exec", ts: r.ts, from: al, to: ml, via: pl, rows: toolRows, parallel: it.parallel });
+        for (const a of it.accesses ?? []) {
+          arrows.push({ kind: "query", ts: a.ts, from: mcpLane(a.actor ? a : it.mcp), to: laneOf("store", null), rows: [a] });
+        }
+        // anchor the return at the call's last recorded access (the MCP-side
+        // end can sit a few ms past the next round's send); fall back to the
+        // MCP row end when no access was recorded
+        const back =
+          (it.accesses?.length
+            ? Math.max(...it.accesses.map((a) => a.ts))
+            : ((it.mcp?.ts as number | undefined) ?? r.ts) +
+              ((it.mcp?.duration_ms as number | undefined) ??
+                (r.duration_ms as number | undefined) ??
+                0));
+        arrows.push({ kind: "ret", ts: back, from: ml, to: al, via: pl, rows: toolRows });
+      } else if (it.kind === "mcp" && r) {
+        const ml = mcpLane(r);
+        arrows.push({ kind: "exec", ts: r.ts, from: laneOf("agent", null), to: ml, rows: [r] });
+        for (const a of it.accesses ?? []) {
+          arrows.push({ kind: "query", ts: a.ts, from: mcpLane(a.actor ? a : r), to: laneOf("store", null), rows: [a] });
+        }
+      } else if (it.kind === "access" && r) {
+        arrows.push({ kind: "query", ts: r.ts, from: mcpLane(r), to: laneOf("store", null), rows: [r] });
+      } else if (it.kind === "note") {
+        arrows.push({ kind: "note", ts: lastTs(), text: it.text, rows: [] });
+      } else if (it.kind === "event" && r) {
+        if (r.event === "reply") {
+          arrows.push({ kind: "reply", ts: r.ts, rows: [r] });
+        } else if (r.event === "dlp_block") {
+          arrows.push({ kind: "dlp", ts: r.ts, from: laneOf("ai-gateway", null), to: agentLane(r), rows: [r] });
+        } else if (r.event === "poll_group") {
+          arrows.push({ kind: "poll", ts: r.ts, count: r.count as number | undefined, job: (r.job_id as string | undefined) ?? null, rows: [r] });
+        }
+        // question rows are not arrows — the group header carries the question
+      }
+    }
+    for (let i = 0; i < arrows.length; i++) {
+      if (arrows[i].kind !== "recv") continue;
+      const calls: AuditRowLike[] = [];
+      for (let j = i + 1; j < arrows.length; j++) {
+        const k = arrows[j].kind;
+        if (k === "sect" || k === "send" || k === "recv") break;
+        if (k === "exec") {
+          for (const c of arrows[j].rows) {
+            if (c.event === "tool_call" && c.source === "agent") calls.push(c);
+          }
+        }
+      }
+      arrows[i].calls = calls;
+    }
+    if (
+      rows.some((r) => r.event === "tool_call" && r.source === "agent") &&
+      ![...lanes.values()].some((l) => l.kind === "mcp-portal")
+    ) {
+      laneOf("mcp-portal", null);
+    }
+  }
+  // arrows render strictly top-down by time (stable: emission order breaks ties,
+  // so sect/send/recv and exec/query/ret at equal ts keep their natural order)
+  arrows.sort((a, b) => a.ts - b.ts);
+  const order = (l: SwimLane) => {
+    const i = ORDER.indexOf(l.kind);
+    return i < 0 ? ORDER.length : i;
+  };
+  const laneList = [...lanes.values()].sort(
+    (a, b) => order(a) - order(b) || String(a.name ?? "").localeCompare(String(b.name ?? ""))
+  );
+  return { lanes: laneList, arrows };
+}
+
+export interface GroupSummary {
+  tables: { table: string; rows: number; count: number }[];
+  rounds: number;
+  tokens: number;
+  denied: number;
+  dlp: boolean;
+  total_ms: number;
+}
+
+// Collapsed-group summary chips: per-table access counts, model rounds and
+// summed tokens, risk flags, total duration. Derived only from recorded rows.
+export function auditGroupSummary(rows: AuditRowLike[]): GroupSummary {
+  const sorted = rows.slice().sort((a, b) => a.ts - b.ts);
+  const base = (sorted.find((r) => r.event === "question") ?? sorted[0])?.ts ?? 0;
+  const tables = new Map<string, { table: string; rows: number; count: number }>();
+  let rounds = 0;
+  let tokens = 0;
+  let denied = 0;
+  let dlp = false;
+  let max = base;
+  for (const r of sorted) {
+    if (r.ts > max) max = r.ts;
+    if (r.event === "model_call") {
+      rounds += 1;
+      try {
+        const a = JSON.parse(String(r.args_json ?? "{}")) as Record<string, unknown>;
+        tokens +=
+          (typeof a.input_tokens === "number" ? a.input_tokens : 0) +
+          (typeof a.output_tokens === "number" ? a.output_tokens : 0);
+      } catch {
+        /* unparsed args */
+      }
+    }
+    if (r.event === "data_access" && r.tables) {
+      const t = tables.get(String(r.tables)) ?? { table: String(r.tables), rows: 0, count: 0 };
+      t.count += 1;
+      t.rows += typeof r.row_count === "number" ? r.row_count : 0;
+      tables.set(String(r.tables), t);
+    }
+    if (r.status === "denied") denied += 1;
+    if (r.event === "dlp_block" || r.reason === "dlp_blocked") dlp = true;
+  }
+  return {
+    tables: [...tables.values()],
+    rounds,
+    tokens,
+    denied,
+    dlp,
+    total_ms: Math.max(0, max - base)
+  };
+}
+
 // Serialized into the /audit page (functions must stay dependency-free).
 export function auditGroupScriptSource(): string {
   return [
@@ -454,7 +704,9 @@ export function auditGroupScriptSource(): string {
     pollJobId,
     isPollRow,
     groupAuditEvents,
-    auditTimelineItems
+    auditTimelineItems,
+    auditSwimlane,
+    auditGroupSummary
   ]
     .map((f) => f.toString())
     .join("\n\n");

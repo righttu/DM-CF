@@ -93,12 +93,78 @@ max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 button.link{background:none;border:none;color:var(--accent);cursor:pointer;font:inherit;
 font-size:12px;padding:0}
 #empty,#err{padding:40px;text-align:center;color:var(--muted)}
+
+/* summary chips on collapsed group headers */
+.chip{display:inline-block;margin:0 6px 0 0;padding:1px 8px;border-radius:10px;
+background:var(--ink-soft,#ecebe4);color:var(--muted);font-size:11px;font-weight:400}
+.chip.red{background:#f6dcdc;color:#b91c1c}
+/* swimlane diagram */
+.swim{overflow-x:auto;padding:4px 0}
+.swim-in{position:relative}
+.guides{position:absolute;inset:0;pointer-events:none}
+.guides i{position:absolute;top:38px;bottom:0;border-left:1px dashed var(--line,#e5e1d4)}
+.swrow{display:grid;min-height:34px;align-items:center}
+.swrow .off{color:var(--muted);font-family:ui-monospace,Menlo,monospace;font-size:11px}
+.swrow.lanes{border-bottom:1px solid var(--line,#e5e1d4);min-height:38px}
+.lane{text-align:center;font-size:11px;line-height:1.25}
+.lane .lrole{font-weight:600;color:var(--ink)}
+.lane .lnm{display:block;color:var(--muted);font-size:10px}
+.sa{position:relative;min-height:34px;cursor:pointer}
+.sa:hover .aline{border-top-color:var(--ink)}
+.albl{position:absolute;top:0;font-size:10.5px;color:var(--ink);
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.sa.fwd .albl{left:calc(50%/var(--n))}
+.sa.rev .albl{right:calc(50%/var(--n));text-align:left}
+.aline{position:absolute;top:62%;height:0;border-top:2px solid}
+.sa.fwd .aline{left:calc(50%/var(--n));right:calc(50%/var(--n))}
+.sa.rev .aline{left:calc(50%/var(--n));right:calc(50%/var(--n))}
+.sa.fwd .aline::after,.sa.rev .aline::after{content:"";position:absolute;top:-5px;
+border-top:4px solid transparent;border-bottom:4px solid transparent}
+.sa.fwd .aline::after{right:-2px;border-left:7px solid}
+.sa.rev .aline::after{left:-2px;border-right:7px solid}
+.sa.req .aline{border-top-color:#2563eb}
+.sa.req.fwd .aline::after{border-left-color:#2563eb}
+.sa.req.rev .aline::after{border-right-color:#2563eb}
+.sa.ret .aline{border-top-color:#0f766e}
+.sa.ret.fwd .aline::after{border-left-color:#0f766e}
+.sa.ret.rev .aline::after{border-right-color:#0f766e}
+.sa.dl .aline{border-top-color:#b91c1c}
+.sa.dl .aline::after{content:"✕";border:0;top:-11px;font-size:12px;color:#b91c1c;font-weight:700}
+.adot{position:absolute;top:62%;width:8px;height:8px;margin:-4px 0 0 -4px;
+border-radius:50%;background:var(--gold,#b8892f)}
+.swrow .dur{grid-column:-2 / -1;text-align:right;font-size:10.5px;color:var(--muted);
+white-space:normal;line-height:1.3;padding-left:10px}
+.sa.qout .albl{left:auto;right:calc(50%/var(--n));max-width:none;overflow:visible;
+text-overflow:clip;text-align:left}
+.full{grid-column:2 / -2}
+.full.sectl{border-top:1px dashed var(--line,#e5e1d4);padding:6px 0 2px;
+color:var(--muted);font-size:12px;font-weight:600}
+.full.note{color:var(--muted);font-size:11px;font-style:italic}
+.full.reply{display:flex;align-items:flex-start;gap:6px}
+.full.reply .reply-text{display:-webkit-box;min-width:0}
+/* detail drawer */
+#drawer[hidden]{display:none}
+#drawer{position:fixed;top:0;right:0;bottom:0;width:440px;max-width:92vw;z-index:30;
+background:var(--panel,#fff);border-left:1px solid var(--line,#e5e1d4);
+box-shadow:-8px 0 24px rgba(0,0,0,.12);display:flex;flex-direction:column}
+.dw-h{display:flex;justify-content:space-between;align-items:center;
+padding:10px 14px;border-bottom:1px solid var(--line,#e5e1d4);font-size:14px}
+.dw-h button{border:0;background:none;font-size:16px;cursor:pointer;color:var(--muted)}
+.dw-b{padding:12px 14px;overflow-y:auto;font-size:12px}
+.dw-t{font-weight:600;margin-bottom:6px}
+.dw-kv{display:grid;grid-template-columns:120px 1fr;gap:3px 10px;margin-bottom:8px}
+.dw-kv .k{color:var(--muted)}
+.dw-kv .v{word-break:break-all;font-family:Menlo,monospace;font-size:11px}
+.dw-sql{font-family:Menlo,monospace;font-size:10.5px;white-space:pre-wrap;
+word-break:break-all;background:var(--paper,#f7f6f2);border:1px solid var(--line,#e5e1d4);
+border-radius:6px;padding:8px;margin:6px 0}
+.dw-sep{border:0;border-top:1px dashed var(--line,#e5e1d4);margin:10px 0}
 </style>
 </head>
 <body>
 <div class="top"><div class="logo">ABC</div><h1>审计视图</h1>
 <a class="back" href="/">← 返回对话</a></div>
-<div class="note legend">最新的提问在最上；提问内部按轮次展示交互：发送 → 模型回复 → 执行工具 → 数据访问 → 返回。每行 [角色] 后的浅色名称取自该服务写入审计时记录的配置，随环境变化；模型行显示记录的路由 ID，仅当记录时才显示实际模型。提问与回答全文见 AI Gateway 日志。</div>
+<div class="note legend">每次提问一行摘要；展开为泳道图：列为本次实际出现的参与方（名称取自各服务记录的配置），箭头按时间自上而下；点击箭头查看详情（SQL、ID、耗时）。</div>
 <div class="filters">
 <label>用户邮箱<input id="f-user" type="text" placeholder="user@example.com"></label>
 <label>开始日期（北京）<input id="f-from" type="date"></label>
@@ -109,6 +175,7 @@ font-size:12px;padding:0}
 <div id="list"></div>
 <div id="empty" hidden>没有匹配的审计事件。</div>
 <div id="err" hidden></div>
+<div id="drawer" hidden><div class="dw-h"><b>事件详情</b><button id="dw-x" type="button" aria-label="关闭">✕</button></div><div class="dw-b" id="dw-b"></div></div>
 <script nonce="__CSP_NONCE__">
 const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) =>
@@ -390,6 +457,243 @@ function jobMini(evs) {
   return out || '<div class="sub">无任务数据访问记录</div>';
 }
 
+
+// ---------- Swimlane diagram (per request group) ----------
+// Lanes come from auditSwimlane (recorded actor/target only); every arrow is
+// clickable and opens the detail drawer. Global arrow registry for lookups.
+let AID = 0;
+const ARROWS = new Map();
+
+const storeLabel = (t) => {
+  if (!t) return "数据源";
+  const i = String(t).indexOf(":");
+  if (i > 0) {
+    const role = ROLES[t.slice(0, i)] ?? t.slice(0, i);
+    return role + " " + t.slice(i + 1);
+  }
+  return String(t);
+};
+
+function arrowLabel(a) {
+  const r = a.rows[0] ?? {};
+  if (a.kind === "send") {
+    const p = parseArgs(r);
+    if (r.event === "model_call" && r.source !== "agent") {
+      return "模型调用 " + esc(r.tool ?? "") +
+        (p.served_model ? ' <span class="nm">' + esc(p.served_model) + "</span>" : "");
+    }
+    return "发送：" +
+      ((a.idx ?? 0) === 0 ? "提问 + 工具清单" : "上文 + 上一步结果") +
+      ' <span class="nm">· 输入 ' + esc(p.input_tokens ?? "—") + " tokens" +
+      (p.tools_count != null ? " · 工具 " + esc(p.tools_count) + " 个" : "") + "</span>";
+  }
+  if (a.kind === "recv") {
+    const p = parseArgs(r);
+    const tools = Array.isArray(p.tools) ? p.tools : [];
+    let desc;
+    if (r.reason === "dlp_blocked") {
+      desc = '<span class="deny">回复被拦截（DLP，内容未保存）</span>';
+    } else if (tools.length) {
+      const arg = a.calls && a.calls.length === 1 && a.calls[0].args_json
+        ? " " + esc(a.calls[0].args_json) : "";
+      desc = "回复：" + (tools.length > 1 ? "并行" : "") + "调用 <b>" +
+        esc(tools.join("、")) + "</b>" + arg;
+    } else {
+      desc = "回复：最终回答";
+    }
+    return desc + ' <span class="nm">· 输出 ' + esc(p.output_tokens ?? "—") + " tokens</span>" +
+      (!("tools_count" in p) ? ' <span class="nm">旧版计时</span>' : "");
+  }
+  if (a.kind === "exec") {
+    const agentCall = a.rows.find((x) => x.source === "agent") ?? a.rows[0];
+    return "执行 <b>" + esc(auditNormTool(agentCall)) + "</b>（以用户身份）" +
+      (a.parallel ? ' <span class="st">并行</span>' : "") +
+      (a.rows.every((x) => x.source !== "agent") ? ' <span class="nm">Agent 侧无对应记录</span>' : "");
+  }
+  if (a.kind === "query") {
+    let h = esc(storeLabel(r.target)) + " · <b>" + esc(r.tables ?? "—") + "</b> → " +
+      (r.row_count != null ? esc(r.row_count) : "—") + " 行";
+    if (r.status && r.status !== "ok") h += ' <span class="deny">' + esc(r.reason ?? r.status) + "</span>";
+    return h;
+  }
+  if (a.kind === "ret") {
+    // sum row_count across the call's data_access rows (kept on the exec arrow)
+    return "返回 " + (a.rowSum != null && a.accessN ? esc(a.rowSum) + " 行" : "无数据");
+  }
+  if (a.kind === "dlp") return '<span class="deny">DLP 拦截（内容未保存）</span>';
+  return "";
+}
+
+function arrowDur(a) {
+  const r = a.rows[0] ?? {};
+  if (a.kind === "recv") return "模型 " + dur(r.duration_ms);
+  if (a.kind === "ret") {
+    const mcp = a.rows.find((x) => String(x.source).startsWith("mcp-"));
+    const call = a.rows.find((x) => x.source === "agent");
+    if (mcp && call) {
+      const transit = Math.max(0, (call.duration_ms ?? 0) - (mcp.duration_ms ?? 0));
+      return "MCP " + esc(mcp.duration_ms ?? "—") + " ms · 端到端 " + dur(call.duration_ms) +
+        " · Portal 与网络 ≈" + (transit / 1000).toFixed(1) + " s";
+    }
+    return call ? "端到端 " + dur(call.duration_ms) : "";
+  }
+  if (a.kind === "exec") {
+    const call = a.rows.find((x) => x.source === "agent") ?? a.rows[0];
+    return call?.duration_ms != null ? "端到端 " + dur(call.duration_ms) : "";
+  }
+  if (a.kind === "query") {
+    return r.duration_ms != null ? esc(Math.round(r.duration_ms)) + " ms" : "";
+  }
+  // send arrows carry no duration — the model time belongs to the 回复 arrow
+  return "";
+}
+
+// One row of the diagram. arrow.ts offsets from the group base.
+function swimRow(a, lanesIdx, N, gridCols, base) {
+  const offTxt = '+<span class="offv" title="' + esc(bj(a.ts)) + '">' +
+    (Math.max(0, a.ts - base) / 1000).toFixed(1) + "s</span>";
+  if (a.kind === "sect") {
+    const m = a.rows[0] ?? {};
+    const p = parseArgs(m);
+    const tools = Array.isArray(p.tools) ? p.tools : [];
+    return '<div class="swrow" style="grid-template-columns:' + gridCols + '"><div class="off">' +
+      offTxt + '</div><div class="full sectl">第 ' + esc((a.idx ?? 0) + 1) + " 轮 · " +
+      (tools.length ? "模型决定：调用 <b>" + esc(tools.join("、")) + "</b>" : "模型生成回答") +
+      "</div><div></div></div>";
+  }
+  if (a.kind === "note") {
+    return '<div class="swrow" style="grid-template-columns:' + gridCols + '"><div class="off">' +
+      offTxt + '</div><div class="full note">' + esc(a.text ?? "") + "</div><div></div></div>";
+  }
+  if (a.kind === "poll") {
+    return '<div class="swrow" style="grid-template-columns:' + gridCols + '"><div class="off">' +
+      offTxt + '</div><div class="full note">进度查询（自动轮询）× ' + esc(a.count) +
+      (a.job ? " · job " + esc(a.job) : "") + "</div><div></div></div>";
+  }
+  if (a.kind === "reply") {
+    const r = a.rows[0] ?? {};
+    const text = plain(r.text_excerpt);
+    const long = text.length > 120;
+    return '<div class="swrow" style="grid-template-columns:' + gridCols + '"><div class="off">' +
+      offTxt + '</div><div class="full reply"><span class="tool">回答</span> ' +
+      '<span class="q reply-text">' + esc(text) + "</span>" + stBadge(r) +
+      (long ? '<button class="link" type="button" data-expand>展开</button>' : "") +
+      "</div><div></div></div>";
+  }
+  // arrows between lane centres
+  const fi = lanesIdx.get(a.from);
+  const ti = lanesIdx.get(a.to);
+  if (fi == null || ti == null) return "";
+  const lo = Math.min(fi, ti), hi = Math.max(fi, ti), n = hi - lo + 1;
+  const dir = a.kind === "dlp" ? "dl" : (a.kind === "recv" || a.kind === "ret") ? "ret" : "req";
+  const qout = a.kind === "query" ? " qout" : "";
+  let dot = "";
+  if (a.via != null) {
+    const vi = lanesIdx.get(a.via);
+    if (vi != null && vi > lo && vi < hi) {
+      dot = '<i class="adot" style="left:' + (((vi - lo + 0.5) / n) * 100).toFixed(1) + '%"></i>';
+    }
+  }
+  const id = ++AID;
+  ARROWS.set(id, a);
+  return '<div class="swrow" style="grid-template-columns:' + gridCols + '"><div class="off">' +
+    offTxt + '</div><div class="sa ' + dir + qout + (ti >= fi ? " fwd" : " rev") +
+    '" style="grid-column:' + (lo + 2) + " / " + (hi + 3) + ";--n:" + n + '" data-ai="' + id +
+    '" title="点击查看详情"><div class="albl">' + arrowLabel(a) + '</div>' +
+    '<div class="aline">' + dot + "</div></div>" +
+    '<div class="dur">' + arrowDur(a) + "</div></div>";
+}
+
+function swimDiagram(sw, base) {
+  const N = Math.max(1, sw.lanes.length);
+  const lanesIdx = new Map(sw.lanes.map((l, i) => [l.key, i]));
+  const lastMin = sw.lanes[N - 1]?.kind === "store" ? 220 : 150;
+  const laneCols =
+    (N > 1 ? "repeat(" + (N - 1) + ", minmax(150px, 1fr)) " : "") +
+    "minmax(" + lastMin + "px, 1fr)";
+  const gridCols = "52px " + laneCols + " 210px";
+  let guides = "";
+  for (let i = 0; i < N; i++) {
+    guides += '<i style="left:calc(52px + (100% - 262px) * ' + ((i + 0.5) / N).toFixed(4) + ')"></i>';
+  }
+  let h = '<div class="swim"><div class="swim-in" style="min-width:' + (262 + (N - 1) * 150 + lastMin) +
+    'px"><div class="guides">' + guides + "</div>";
+  h += '<div class="swrow lanes" style="grid-template-columns:' + gridCols + '"><div></div>' +
+    sw.lanes.map((l) =>
+      '<div class="lane"><span class="lrole">' + esc(l.role) + "</span>" +
+      (l.name ? '<span class="lnm">' + esc(l.name) + "</span>"
+              : l.kind !== "store" ? '<span class="lnm">名称未记录</span>' : "") +
+      "</div>").join("") +
+    "<div></div></div>";
+  for (const a of sw.arrows) h += swimRow(a, lanesIdx, N, gridCols, base);
+  return h + "</div></div>";
+}
+
+function swimHtml(g, pairMap) {
+  const rows = g.rows.slice().sort((a, b) => a.ts - b.ts);
+  const base = (rows.find((r) => r.event === "question") ?? rows[0])?.ts ?? 0;
+  const sw = auditSwimlane(rows, pairMap);
+  // row-count sum for each 返回 arrow: data_access rows under the same call
+  for (const a of sw.arrows) {
+    if (a.kind !== "ret") continue;
+    const callIds = new Set(a.rows.map((r) => r.call_id ?? r.id));
+    const acc = rows.filter(
+      (r) => r.event === "data_access" && callIds.has(r.call_id ?? r._access_of ?? "")
+    );
+    a.rowSum = acc.reduce((n, x) => n + (typeof x.row_count === "number" ? x.row_count : 0), 0);
+    a.accessN = acc.length;
+  }
+  return swimDiagram(sw, base);
+}
+
+// ---------- detail drawer ----------
+function detailHtml(rows) {
+  return rows.map((r) => {
+    const p = parseArgs(r);
+    const F = [
+      ["event", r.event], ["source", r.source], ["时间", bj(r.ts)],
+      ["user_email", r.user_email], ["role", r.role],
+      ["actor", r.actor], ["target", r.target],
+      ["tool", r.tool], ["server", r.server],
+      ["request_id", r.request_id], ["conversation_id", r.conversation_id],
+      ["call_id", r.call_id], ["job_id", r.job_id],
+      ["status", r.status], ["reason", r.reason], ["duration_ms", r.duration_ms],
+      ["row_count", r.row_count], ["tables", r.tables],
+      ["step", p.step], ["tools", Array.isArray(p.tools) && p.tools.length ? p.tools.join("、") : null],
+      ["tools_count", p.tools_count],
+      ["input_tokens", p.input_tokens], ["output_tokens", p.output_tokens],
+      ["served_model", p.served_model], ["aig_log_id", p.aig_log_id]
+    ].filter(([, v]) => v != null && v !== "");
+    let h = '<div class="dw-t">' + esc(r.event ?? "event") + " · " + esc(r.source ?? "") + "</div>" +
+      '<div class="dw-kv">' + F.map(([k, v]) =>
+        '<span class="k">' + esc(k) + '</span><span class="v">' + esc(v) + "</span>").join("") +
+      "</div>";
+    if (r.args_json && r.event !== "model_call") {
+      try {
+        h += '<pre class="dw-sql">' + esc(JSON.stringify(JSON.parse(r.args_json), null, 1)) + "</pre>";
+      } catch { /* raw args not JSON */ }
+    }
+    if (r.sql_text) {
+      h += '<pre class="dw-sql">' + esc(r.sql_text) + '</pre>' +
+        '<button class="link" type="button" data-copy="' + esc(r.sql_text) + '">复制 SQL</button>';
+    }
+    if (p.aig_log_id) {
+      h += ' <button class="link" type="button" data-copy="' + esc(p.aig_log_id) +
+        '">复制 AI Gateway 日志 ID</button>';
+    }
+    if (r.job_id && r.event === "tool_call") {
+      h += '<div><button class="link" type="button" data-job="' + esc(r.job_id) +
+        '">查看任务数据访问（' + esc(r.job_id) + "）</button></div>";
+    }
+    return h;
+  }).join('<hr class="dw-sep">');
+}
+
+function openDrawer(a) {
+  $("dw-b").innerHTML = detailHtml(a.rows);
+  $("drawer").hidden = false;
+}
+
 function renderGroup(g, pairMap) {
   const q = g.rows.find((r) => r.event === "question");
   const first = g.rows[0];
@@ -400,22 +704,29 @@ function renderGroup(g, pairMap) {
       '<div class="rows">' + timelineRows(g, pairMap) + "</div>";
     return det;
   }
-  const tss = g.rows.map((r) => r.ts);
-  const base = (q ?? first)?.ts ?? 0;
-  const total = (Math.max(...tss) - base) / 1000;
-  const models = g.rows.filter((r) => r.event === "model_call").length;
-  const tools = g.rows.filter((r) => r.event === "tool_call" && r.source === "agent").length;
-  const tables = g.rows.filter((r) => r.event === "data_access").length;
+  const sum = auditGroupSummary(g.rows);
+  const chip = (t, cls) => '<span class="chip' + (cls ? " " + cls : "") + '">' + t + "</span>";
+  let chips = "";
+  if (sum.tables.length) {
+    chips += chip("访问数据：" + esc(sum.tables.map((t) =>
+      t.rows > 0 ? t.table + " " + t.rows + " 行" : t.table + " ×" + t.count).join("、")));
+  }
+  if (sum.rounds) {
+    chips += chip("模型 " + sum.rounds + " 轮 · " +
+      (sum.tokens >= 10000 ? (sum.tokens / 1000).toFixed(1) + "k" : esc(sum.tokens)) + " tokens");
+  }
+  if (sum.denied) chips += chip("拒绝 " + sum.denied, "red");
+  if (sum.dlp) chips += chip("DLP 拦截", "red");
+  chips += chip((sum.total_ms / 1000).toFixed(1) + " s");
   const title =
     esc(first?.user_email ?? "未知用户") +
     (first?.role ? ' <span class="meta">' + esc(first.role) + "</span>" : "") +
     ' <span class="meta">' + esc(bj(first?.ts ?? 0)) + "</span>" +
     ' <span class="meta">req ' + esc(g.id.slice(0, 8)) + "</span>" +
     (q ? ' <span class="q">' + esc(q.text_excerpt ?? "（未保存内容）") + "</span>" : "") +
-    ' <span class="meta">总耗时 ' + total.toFixed(1) + " s · 模型 " + models +
-    " 轮 · 工具 " + tools + " 次 · 访问 " + tables + " 张表</span>";
+    " " + chips;
   det.innerHTML = "<summary>" + title + "</summary>" +
-    '<div class="rows">' + timelineRows(g, pairMap) + "</div>";
+    '<div class="rows">' + swimHtml(g, pairMap) + "</div>";
   return det;
 }
 
@@ -469,7 +780,17 @@ async function load() {
   }
 }
 
-$("list").addEventListener("click", async (ev) => {
+$("dw-x").addEventListener("click", () => { $("drawer").hidden = true; });
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") $("drawer").hidden = true;
+});
+
+document.addEventListener("click", async (ev) => {
+  const sa = ev.target.closest(".sa[data-ai]");
+  if (sa && ARROWS.has(Number(sa.dataset.ai))) {
+    openDrawer(ARROWS.get(Number(sa.dataset.ai)));
+    return;
+  }
   const exp = ev.target.closest("button[data-expand]");
   if (exp) {
     const t = exp.parentElement.querySelector(".reply-text");
@@ -496,8 +817,12 @@ $("list").addEventListener("click", async (ev) => {
   try {
     const resp = await fetch("/api/audit?job=" + encodeURIComponent(btn.dataset.job));
     const data = await resp.json();
+    const evs = data.events ?? [];
     const box = document.createElement("div");
-    box.innerHTML = jobMini(data.events ?? []);
+    const sw = auditSwimlane(evs, new Map(), true);
+    box.innerHTML = evs.length
+      ? swimDiagram(sw, evs.reduce((m, r) => Math.min(m, r.ts), evs[0].ts))
+      : '<div class="sub">无任务数据访问记录</div>';
     btn.replaceWith(box);
   } catch {
     btn.disabled = false;
