@@ -241,3 +241,6 @@ Agent tracing documents three identity fields: agent name (`functionId`, shared:
 - The ABC Agent Access app (`4ddbea30-…`) got a separate allow policy `audit-admin` for the admin email.
 - Not yet verified live: whether the Portal forwards MCP `_meta` request IDs to MCP-S. The page falls back to matching on user + tool within ±15 s.
 - No retention purge yet. The batch pipeline is not audited (system activity).
+- 2026-10-19 live check: the Portal does **not** forward MCP `_meta` request IDs. MCP-S rows arrive with NULL `request_id`, and their tool names lack the Portal prefix (`find_stock` vs `abc-quant_find_stock`).
+- Agent `e04e8fe4` (commit `6ad887c`) stamps real event times. The page joins MCP rows to the Agent request by matching the same user and the normalized tool name inside the question→reply window; this is unambiguous because each user's DO allows only one in-flight chat.
+- Rows written before `6ad887c` share one flush timestamp and may stay in 未关联.
