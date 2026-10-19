@@ -1,0 +1,19 @@
+AGENTS.md
+  s_02649a17b7b371::t_86bb710b4b054f 261-266
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "8df2ebcff3197b3b2d8bc309ec4b14983e0a0a2c",
+  "prompts": {},
+  "sessions": {
+    "s_02649a17b7b371": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "calm-noun",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
