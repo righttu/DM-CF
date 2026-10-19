@@ -21,6 +21,8 @@ export interface DailyParams {
   date?: string;
   force?: boolean;
   only?: string[];
+  trigger?: string;
+  cron?: string;
 }
 
 export const BATCH_OUTBOUND_HOST = "quant-data.internal";
@@ -236,7 +238,7 @@ export class QuantBatchContainer extends Container<PipelineEnv> {
   // Steps are capped at 4/8/16 h by the workflow; the workflow polls status
   // every 2 min which keeps the container awake for the whole run, and it
   // stops the container explicitly when the job finishes.
-  sleepAfter = "4h";
+  sleepAfter = "30m";
 
   private readonly runner = new BatchJobRunner(
     this.ctx.storage,

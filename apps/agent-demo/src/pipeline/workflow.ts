@@ -23,8 +23,11 @@ const STEP_CAP_HOURS: Record<string, number> = {
   knowledge_miner: 8,
   ai_brain: 16
 };
-const capMsFor = (name: string) => (STEP_CAP_HOURS[name] ?? 4) * 60 * 60 * 1000;
-const POLL_INTERVAL = "2 minutes";
+const DEFAULT_STEP_CAP_HOURS = 4;
+const capMsFor = (name: string) => (STEP_CAP_HOURS[name] ?? DEFAULT_STEP_CAP_HOURS) * 60 * 60 * 1000;
+const POLL_MINUTES = 2;
+const POLL_INTERVAL = `${POLL_MINUTES} minutes`;
+const MAX_ATTEMPTS = 2; // one run + one retry per script
 
 // fundamentals 只在财报季运行：北京时间周五 且 处于以下窗口（月-日，闭区间）。
 // 修改窗口或星期只需改这两个字段；force 或 only 手动触发不受此限制。
@@ -53,6 +56,22 @@ export function fundamentalsWindowOpen(date: string): boolean {
   });
 }
 
+// Chinese descriptions of the pipeline's own constants, surfaced in every
+// DailyResult so the dashboard can show why a step ran or was skipped.
+const WEEKDAYS_ZH = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"] as const;
+const monthRangesZh = () =>
+  FUNDAMENTALS_SCHEDULE.windows
+    .map(([m1, , m2]) => (m1 === m2 ? `${m1}` : `${m1}–${m2}`))
+    .join("、");
+const fundamentalsWindowZh = () =>
+  `仅在 ${monthRangesZh()} 月的${WEEKDAYS_ZH[FUNDAMENTALS_SCHEDULE.weekday]}运行`;
+const stepCapsZh = () => ({
+  ...Object.fromEntries(
+    Object.entries(STEP_CAP_HOURS).map(([k, v]) => [k, `${v} 小时`])
+  ),
+  其他: `${DEFAULT_STEP_CAP_HOURS} 小时`
+});
+
 export interface StepLike {
   do<T>(name: string, fn: () => Promise<T> | T): Promise<T>;
   sleep(name: string, duration: string): Promise<void>;
@@ -64,11 +83,34 @@ export interface StepRecord {
   started_at_bj: string | null;
   duration_s: number;
   error: string | null;
+  reason_zh: string | null;
+}
+
+// Maps a step's machine error to the Chinese explanation shown in the output.
+function reasonZhFor(error: string | null): string | null {
+  if (error === "not_in_report_window") {
+    return `不在财报窗口（${fundamentalsWindowZh()}）`;
+  }
+  if (error === "non_trading_day") return "非交易日（Tushare 交易日历）";
+  if (error?.startsWith("step_timeout_")) return "超过单步时长上限";
+  if (error && /max_instances|maximum number of running container instances/i.test(error)) {
+    return "容器实例已达上限（max_instances）";
+  }
+  return null;
 }
 
 export interface DailyResult {
   date: string;
   trade_day: boolean;
+  trigger: "cron" | "manual";
+  cron?: string;
+  rules: {
+    步骤顺序: string[];
+    基本面窗口: string;
+    单步时长上限: Record<string, string>;
+    进度检查间隔: string;
+    失败重试: string;
+  };
   steps: StepRecord[];
 }
 
@@ -139,8 +181,14 @@ async function runScriptOnce(
       job: await stub.status(),
       now: clock()
     }));
-    if (poll.job.status === "succeeded") return { status: "succeeded", error: null };
+    if (poll.job.status === "succeeded") {
+      // Terminal: release the container now — sleepAfter alone is only a
+      // safety net and leaving instances running exhausts max_instances.
+      await step.do(`stop ${name} #${attempt}`, () => stub.stopJob());
+      return { status: "succeeded", error: null };
+    }
     if (poll.job.status === "failed") {
+      await step.do(`stop ${name} #${attempt}`, () => stub.stopJob());
       return { status: "failed", error: jobError(poll.job.error_tail) };
     }
     if (poll.now - t0 > capMs) {
@@ -179,7 +227,14 @@ export async function runDailyPipeline(
   const names = ["stock_basic", ...BATCH_SCRIPTS].filter(
     (n) => !params.only || params.only.includes(n)
   );
-
+  const trigger = params.trigger === "cron" ? "cron" : "manual";
+  const rules = {
+    步骤顺序: ["stock_basic", ...BATCH_SCRIPTS],
+    基本面窗口: fundamentalsWindowZh(),
+    单步时长上限: stepCapsZh(),
+    进度检查间隔: `${POLL_MINUTES} 分钟`,
+    失败重试: `每个脚本失败后整体重试 ${MAX_ATTEMPTS - 1} 次`
+  };
   // The run date lives inside the step so replays keep the original value even
   // when a hibernated instance resumes on a later day.
   const trade = await step.do("trade_day", async () => {
@@ -190,6 +245,14 @@ export async function runDailyPipeline(
     };
   });
   const date = trade.date;
+  const result = (trade_day: boolean): DailyResult => ({
+    date,
+    trade_day,
+    trigger,
+    ...(params.cron ? { cron: params.cron } : {}),
+    rules,
+    steps: records
+  });
   if (!trade.open && !params.force) {
     for (const name of names) {
       records.push({
@@ -197,10 +260,11 @@ export async function runDailyPipeline(
         status: "skipped",
         started_at_bj: null,
         duration_s: 0,
-        error: null
+        error: "non_trading_day",
+        reason_zh: reasonZhFor("non_trading_day")
       });
     }
-    return { date, trade_day: false, steps: records };
+    return result(false);
   }
 
   for (const name of names) {
@@ -216,7 +280,8 @@ export async function runDailyPipeline(
         status: "skipped",
         started_at_bj: null,
         duration_s: 0,
-        error: "not_in_report_window"
+        error: "not_in_report_window",
+        reason_zh: reasonZhFor("not_in_report_window")
       });
       continue;
     }
@@ -226,7 +291,8 @@ export async function runDailyPipeline(
       status: "failed",
       started_at_bj: begin.bj,
       duration_s: 0,
-      error: null
+      error: null,
+      reason_zh: null
     };
     try {
       if (name === "stock_basic") {
@@ -243,17 +309,22 @@ export async function runDailyPipeline(
     }
     const end = await step.do(`end ${name}`, () => clock());
     rec.duration_s = Math.round((end - begin.ms) / 1000);
+    rec.reason_zh = reasonZhFor(rec.error);
     records.push(rec);
   }
-  return { date, trade_day: true, steps: records };
+  return result(true);
 }
 
 // Cron handler: one workflow instance per Beijing trading-day date; the id is
 // deterministic so a double-fire is a no-op.
-export async function scheduledTick(env: PipelineEnv, now = new Date()): Promise<string> {
+export async function scheduledTick(
+  env: PipelineEnv,
+  now = new Date(),
+  cron?: string
+): Promise<string> {
   const id = `daily-${bjCompactDate(now)}`;
   try {
-    await env.DAILY!.create({ id, params: {} });
+    await env.DAILY!.create({ id, params: { trigger: "cron", ...(cron ? { cron } : {}) } });
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     if (!/already exists|duplicate|exists/i.test(msg)) throw error;

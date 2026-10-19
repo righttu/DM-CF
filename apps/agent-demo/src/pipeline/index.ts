@@ -19,8 +19,8 @@ export class QuantDailyWorkflow extends WorkflowEntrypoint<PipelineEnv, DailyPar
 }
 
 export default {
-  async scheduled(_controller: ScheduledController, env: PipelineEnv): Promise<void> {
-    await scheduledTick(env);
+  async scheduled(controller: ScheduledController, env: PipelineEnv): Promise<void> {
+    await scheduledTick(env, new Date(), controller.cron);
   },
   async fetch(): Promise<Response> {
     return new Response("abc-quant-pipeline", { status: 200 });

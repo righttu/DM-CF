@@ -1073,6 +1073,8 @@ describe("daily workflow", () => {
     );
     expect(res.trade_day).toBe(false);
     expect(res.steps.every((s) => s.status === "skipped")).toBe(true);
+    expect(res.steps.every((s) => s.error === "non_trading_day")).toBe(true);
+    expect(res.steps.every((s) => s.reason_zh === "非交易日（Tushare 交易日历）")).toBe(true);
     expect(res.steps).toHaveLength(9);
     expect(step.calls).toEqual(["do:trade_day"]);
   });
@@ -1369,6 +1371,127 @@ describe("daily workflow", () => {
       }
     };
     await expect(scheduledTick({ DAILY: failing as never, QUANT_DB: tenv.QUANT_DB })).rejects.toThrow("quota exceeded");
+  });
+
+  it("passes the fired cron string into the instance params", async () => {
+    const created: { id: string; params: unknown }[] = [];
+    const daily = {
+      async create(opts: { id: string; params: unknown }) {
+        created.push(opts);
+        return {};
+      }
+    };
+    await scheduledTick(
+      { DAILY: daily as never, QUANT_DB: tenv.QUANT_DB },
+      new Date(),
+      "0 1 * * 1-5"
+    );
+    expect(created).toHaveLength(1);
+    expect(created[0].params).toEqual({ trigger: "cron", cron: "0 1 * * 1-5" });
+  });
+
+  it("DailyResult carries trigger/cron/rules; manual runs report trigger manual", async () => {
+    const env2 = () => ({
+      BATCH: fakeBatch({ fundamentals: { statuses: ["succeeded"] } }) as never,
+      QUANT_DB: tenv.QUANT_DB,
+      MY_TUSHARE_TOKEN: "t"
+    });
+    const cronRes = await runDailyPipeline(
+      env2(), "c1",
+      { date: "20261016", only: ["fundamentals"], trigger: "cron", cron: "0 1 * * 1-5" },
+      fakeStep(), { fetcher: openCal }
+    );
+    expect(cronRes.trigger).toBe("cron");
+    expect(cronRes.cron).toBe("0 1 * * 1-5");
+    const manual = await runDailyPipeline(
+      env2(), "c2",
+      { date: "20261016", only: ["fundamentals"] },
+      fakeStep(), { fetcher: openCal }
+    );
+    expect(manual.trigger).toBe("manual");
+    expect(manual.cron).toBeUndefined();
+    // rules are derived from the pipeline's own constants
+    expect(manual.rules.步骤顺序).toEqual([
+      "stock_basic", "fundamentals", "chip_hunter", "alpha_hunter",
+      "hotspot_registry", "registry_auditor", "hotspot_hunter",
+      "knowledge_miner", "ai_brain"
+    ]);
+    expect(manual.rules.基本面窗口).toBe("仅在 1–4、7–8、10 月的周五运行");
+    expect(manual.rules.单步时长上限).toEqual({
+      knowledge_miner: "8 小时",
+      ai_brain: "16 小时",
+      其他: "4 小时"
+    });
+    expect(manual.rules.进度检查间隔).toBe("2 分钟");
+    expect(manual.rules.失败重试).toBe("每个脚本失败后整体重试 1 次");
+  });
+
+  it("stops the batch container when a script reaches a terminal status", async () => {
+    const step = fakeStep();
+    const batch = fakeBatch({
+      fundamentals: { statuses: ["failed", "succeeded"] },
+      chip_hunter: { statuses: ["succeeded"] }
+    });
+    const res = await runDailyPipeline(
+      { BATCH: batch as never, QUANT_DB: tenv.QUANT_DB, MY_TUSHARE_TOKEN: "t" },
+      "i9",
+      { date: "20261016", only: ["fundamentals", "chip_hunter"] },
+      step,
+      { fetcher: openCal }
+    );
+    expect(res.steps.every((s) => s.status === "succeeded")).toBe(true);
+    // one stop per terminal attempt: fundamentals failed #1 -> stop, succeeded
+    // #2 -> stop, chip_hunter succeeded -> stop
+    expect(batch.stops).toEqual(["fundamentals", "fundamentals", "chip_hunter"]);
+    expect(step.calls).toContain("do:stop fundamentals #1");
+    expect(step.calls).toContain("do:stop fundamentals #2");
+    expect(step.calls).toContain("do:stop chip_hunter #1");
+  });
+
+  it("reason_zh maps skip/failure causes to Chinese explanations", async () => {
+    const env2 = (b: ReturnType<typeof fakeBatch>) => ({
+      BATCH: b as never, QUANT_DB: tenv.QUANT_DB, MY_TUSHARE_TOKEN: "t"
+    });
+    // fundamentals skip on a Thursday inside the window
+    const thu = await runDailyPipeline(
+      env2(fakeBatch({ fundamentals: { statuses: ["succeeded"] } })),
+      "r1", { date: "20261015" }, fakeStep(), { fetcher: openCal }
+    );
+    const fund = thu.steps.find((s) => s.name === "fundamentals")!;
+    expect(fund.error).toBe("not_in_report_window");
+    expect(fund.reason_zh).toBe("不在财报窗口（仅在 1–4、7–8、10 月的周五运行）");
+    // step timeout
+    let now = 1_000_000;
+    const cap = await runDailyPipeline(
+      env2(fakeBatch({ fundamentals: { statuses: ["running"] } })),
+      "r2", { date: "20261016", only: ["fundamentals"] }, fakeStep(),
+      { fetcher: openCal, clock: () => (now += 3 * 60 * 60 * 1000) }
+    );
+    expect(cap.steps[0].reason_zh).toBe("超过单步时长上限");
+    // container instance limit surfaced by startJob
+    const limited = {
+      idFromName: (n: string) => ({ toString: () => n }),
+      get: () => ({
+        async startJob() {
+          throw new Error("Maximum number of running container instances exceeded");
+        },
+        async status() {
+          return { status: "running" };
+        },
+        async stopJob() {}
+      })
+    };
+    const lim = await runDailyPipeline(
+      { BATCH: limited as never, QUANT_DB: tenv.QUANT_DB, MY_TUSHARE_TOKEN: "t" },
+      "r3", { date: "20261016", only: ["fundamentals"] }, fakeStep(), { fetcher: openCal }
+    );
+    expect(lim.steps[0].reason_zh).toBe("容器实例已达上限（max_instances）");
+    // a plain failure keeps reason_zh null
+    const boom = await runDailyPipeline(
+      env2(fakeBatch({ fundamentals: { statuses: ["failed"] } })),
+      "r4", { date: "20261016", only: ["fundamentals"], force: true }, fakeStep(), { fetcher: openCal }
+    );
+    expect(boom.steps[0].reason_zh).toBeNull();
   });
 
   it("pipeline entry exports ContainerProxy for outbound interception", async () => {
