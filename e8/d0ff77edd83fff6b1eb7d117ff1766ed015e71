@@ -1,0 +1,21 @@
+apps/agent-demo/src/agent/audit-page.ts
+  s_8175589d230bf1::t_e7eedcc4632234 54-69,84,122-143,157-170,172-207,210,235-236,238-239,260,262,320-323
+apps/agent-demo/test/audit-groups.test.ts
+  s_8175589d230bf1::t_c2297a6cb5e506 7,346-390
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e8d0ff77edd83fff6b1eb7d117ff1766ed015e71",
+  "prompts": {},
+  "sessions": {
+    "s_8175589d230bf1": {
+      "agent_id": {
+        "tool": "devin",
+        "id": "s_8175589d230bf1",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
