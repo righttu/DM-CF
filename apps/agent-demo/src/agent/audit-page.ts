@@ -54,8 +54,8 @@ word-break:break-all;display:block;margin:4px 0}
 .dlp{color:var(--deny);font-weight:600}
 .args{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--muted);
 max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.reply-text{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
-overflow:hidden;white-space:pre-wrap;flex:1;min-width:200px}
+.reply-text{display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;
+-webkit-box-orient:vertical;overflow:hidden;white-space:normal;flex:1;min-width:200px}
 .reply-text.open{-webkit-line-clamp:unset}
 button.link{background:none;border:none;color:var(--accent);cursor:pointer;font:inherit;
 font-size:12px;padding:0}
@@ -66,7 +66,7 @@ font-size:12px;padding:0}
 <div class="top"><div class="logo">ABC</div><h1>审计视图</h1>
 <a class="back" href="/">← 返回对话</a></div>
 <div class="note">同一请求 ID 串联 Agent 与 AI Gateway；提问与回答全文见 AI Gateway 日志。</div>
-<div class="note legend">Agent 记录提问与工具调用；数据访问（SQL / 表 / 行数）由 MCP Server 记录；Portal 不转发请求 ID，按同一用户、同一工具、同一提问时间段自动关联。</div>
+<div class="note legend">Agent 记录提问与工具调用；数据访问（SQL / 表 / 行数）由 MCP Server 记录；两侧按调用 ID / 请求 ID 精确关联，缺少 ID 的历史行按同一用户、同一工具、同一时间段自动关联。</div>
 <div class="filters">
 <label>用户邮箱<input id="f-user" type="text" placeholder="user@example.com"></label>
 <label>开始日期（北京）<input id="f-from" type="date"></label>
@@ -82,6 +82,17 @@ const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const bj = (ts) => new Date(ts).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
+// Strip markdown noise from stored excerpts before display (content stays
+// untouched in the DB; this only affects rendering).
+const plain = (s) => String(s ?? "")
+  .replace(/\x60\x60\x60[\\s\\S]*?\x60\x60\x60/g, " ")
+  .replace(/^\\s*#{1,6}\\s+/gm, "")
+  .replace(/^\\s*[-:|\\s]{3,}\\s*$/gm, " ")
+  .replace(/\\|/g, " ")
+  .replace(/[*\x60~]{1,3}/g, "")
+  .replace(/\\[([^\\]]*)\\]\\([^)]*\\)/g, "$1")
+  .replace(/\\s+/g, " ")
+  .trim();
 const params = () => {
   const p = new URLSearchParams();
   if ($("f-user").value.trim()) p.set("user", $("f-user").value.trim());
@@ -128,9 +139,10 @@ function rowHtml(e, pairMap) {
       '<span class="q">' + esc(e.text_excerpt ?? "（未保存内容）") + "</span>" + st + "</div>";
   }
   if (e.event === "reply") {
-    const long = (e.text_excerpt ?? "").length > 120;
+    const text = plain(e.text_excerpt);
+    const long = text.length > 120;
     return '<div class="row">' + time + '<span class="tool">回答</span>' +
-      '<span class="q reply-text">' + esc(e.text_excerpt ?? "") + "</span>" + st +
+      '<span class="q reply-text">' + esc(text) + "</span>" + st +
       (long ? '<button class="link" type="button" data-expand>展开</button>' : "") + "</div>";
   }
   if (e.event === "dlp_block") {
@@ -157,10 +169,13 @@ function rowHtml(e, pairMap) {
     }
     h += "</div>";
     for (const m of pairMap?.get(e.id) ?? []) h += mcpCallSub(m);
+    // data_access rows nested straight onto the agent call (call_id match
+    // without an MCP tool_call row of its own)
+    for (const a of e._access ?? []) h += accessSub(a);
     return h;
   }
   if (e.event === "data_access") {
-    if (e._pair) return "";
+    if (e._nested || e._pair) return "";
     return accessSub(e);
   }
   return "";

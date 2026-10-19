@@ -613,15 +613,49 @@ function metaUuid(meta: unknown, key: string): string | null {
   return typeof value === "string" && AUDIT_UUID_PATTERN.test(value) ? value : null;
 }
 
-function auditIds(meta: unknown): {
+// Reserved argument the Agent injects on behalf of a chat/poll tool call.
+// The Portal drops _meta but forwards arguments verbatim, so this is the
+// primary correlation channel; it is stripped here before the tool handler
+// and before args are recorded, and never appears in the published schema
+// (input schemas are loose objects, not an "_audit" property).
+function extractAuditArg(args: unknown): {
+  callId: string | null;
+  requestId: string | null;
+  conversationId: string | null;
+} | null {
+  if (!args || typeof args !== "object") return null;
+  const record = args as Record<string, unknown>;
+  if (!("_audit" in record)) return null;
+  const raw = record._audit;
+  delete record._audit;
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const uuid = (v: unknown): string | null =>
+    typeof v === "string" && AUDIT_UUID_PATTERN.test(v) ? v : null;
+  return {
+    callId: uuid(r.call_id),
+    requestId: uuid(r.request_id),
+    conversationId: uuid(r.conversation_id)
+  };
+}
+
+function auditIds(
+  meta: unknown,
+  argIds?: ReturnType<typeof extractAuditArg>
+): {
   requestId: string;
   conversationId: string | null;
+  callId: string | null;
   correlationSource: "client_meta" | "server_generated";
 } {
-  const requestId = metaUuid(meta, "uk.righttu.demo/request_id");
+  const requestId =
+    argIds?.requestId ?? metaUuid(meta, "uk.righttu.demo/request_id");
   return {
     requestId: requestId ?? crypto.randomUUID(),
-    conversationId: metaUuid(meta, "uk.righttu.demo/conversation_id"),
+    conversationId:
+      argIds?.conversationId ??
+      metaUuid(meta, "uk.righttu.demo/conversation_id"),
+    callId: argIds?.callId ?? null,
     correlationSource: requestId ? "client_meta" : "server_generated"
   };
 }
@@ -711,7 +745,8 @@ async function handleMcpApi<E extends McpKitEnv>(
   }
   const call: ToolCall = async (toolName, callCtx, run, details) => {
     const meta = (callCtx as { mcpReq?: { _meta?: unknown } } | undefined)?.mcpReq?._meta;
-    const ids = auditIds(meta);
+    // Strip _audit first: handlers and args_json must never see it.
+    const ids = auditIds(meta, extractAuditArg(details?.args));
     const accesses: AuditEvent[] = [];
     let jobId: string | null = null;
     const audit: ToolAccessAudit = {
@@ -731,7 +766,8 @@ async function handleMcpApi<E extends McpKitEnv>(
           sql_text: e.sql ? truncateSql(e.sql) : null,
           row_count: e.rowCount ?? null,
           status: e.status,
-          reason: e.reason ?? null
+          reason: e.reason ?? null,
+          call_id: ids.callId
         }),
       job: (id) => {
         jobId = id;
@@ -753,7 +789,8 @@ async function handleMcpApi<E extends McpKitEnv>(
       status,
       reason: reason ?? null,
       duration_ms: Date.now() - started,
-      job_id: jobId
+      job_id: jobId,
+      call_id: ids.callId
     });
     const flush = (rows: AuditEvent[]) => {
       ctx.waitUntil(recordAudit(env.AUDIT_DB, rows));

@@ -292,7 +292,7 @@ export function registerQuantTools(
     "describe_data",
     {
       description: QUANT_TOOL_DESCRIPTIONS.describe_data,
-      inputSchema: z.object({ table: z.enum([...QUANT_TABLES, "research"]).optional().describe(D.table) })
+      inputSchema: z.looseObject({ table: z.enum([...QUANT_TABLES, "research"]).optional().describe(D.table) })
     },
     async (args, callCtx) =>
       call("describe_data", callCtx, async (audit) => {
@@ -316,7 +316,7 @@ export function registerQuantTools(
     "find_stock",
     {
       description: QUANT_TOOL_DESCRIPTIONS.find_stock,
-      inputSchema: z.object({ query: z.string().describe(D.find_query) })
+      inputSchema: z.looseObject({ query: z.string().describe(D.find_query) })
     },
     async (args, callCtx) =>
       call("find_stock", callCtx, async (audit) => {
@@ -343,7 +343,7 @@ export function registerQuantTools(
     "get_signals",
     {
       description: QUANT_TOOL_DESCRIPTIONS.get_signals,
-      inputSchema: z.object({
+      inputSchema: z.looseObject({
         ts_code: z.string().optional().describe(D.ts_code),
         strategy: z.enum([...STRATEGIES, "all"]).default("all").describe(D.strategy),
         scan_date: z.string().optional().describe(D.scan_date),
@@ -394,7 +394,7 @@ export function registerQuantTools(
     "get_fundamentals",
     {
       description: QUANT_TOOL_DESCRIPTIONS.get_fundamentals,
-      inputSchema: z.object({
+      inputSchema: z.looseObject({
         ts_code: z.string().describe(D.ts_code),
         periods: optInt(1, 20, 8, D.periods)
       })
@@ -435,7 +435,7 @@ export function registerQuantTools(
     "get_ai_report",
     {
       description: QUANT_TOOL_DESCRIPTIONS.get_ai_report,
-      inputSchema: z.object({
+      inputSchema: z.looseObject({
         ts_code: z.string().optional().describe(D.ts_code),
         history: z.boolean().default(false).describe(D.history),
         report_date: z.string().optional().describe(D.report_date),
@@ -492,7 +492,7 @@ export function registerQuantTools(
     "search_research",
     {
       description: QUANT_TOOL_DESCRIPTIONS.search_research,
-      inputSchema: z.object({
+      inputSchema: z.looseObject({
         ts_code: z.string().describe(D.ts_code),
         query: z.string().max(200).default("业绩 风险 增长 竞争格局 产能 订单 护城河").describe(D.research_query),
         since: z.string().optional().describe(D.since),
@@ -605,7 +605,7 @@ export function registerQuantTools(
     "get_surveys",
     {
       description: QUANT_TOOL_DESCRIPTIONS.get_surveys,
-      inputSchema: z.object({
+      inputSchema: z.looseObject({
         ts_code: z.string().describe(D.ts_code),
         limit: optInt(1, 50, 20, D.limit)
       })
@@ -632,7 +632,7 @@ export function registerQuantTools(
     "get_industry_chain",
     {
       description: QUANT_TOOL_DESCRIPTIONS.get_industry_chain,
-      inputSchema: z.object({
+      inputSchema: z.looseObject({
         ts_code: z.string().optional().describe(D.ts_code),
         sector: z.string().min(1).max(20).optional().describe(D.sector),
         limit: optInt(1, 50, 30, D.limit)
@@ -684,7 +684,7 @@ export function registerQuantTools(
     "query_data",
     {
       description: QUANT_TOOL_DESCRIPTIONS.query_data,
-      inputSchema: z.object({
+      inputSchema: z.looseObject({
         sql: z.string().describe(D.sql),
         max_rows: optInt(1, 200, 50, D.max_rows)
       })
@@ -739,7 +739,7 @@ export function registerQuantTools(
     "run_analysis",
     {
       description: QUANT_TOOL_DESCRIPTIONS.run_analysis,
-      inputSchema: z.object({
+      inputSchema: z.looseObject({
         ts_code: z.string().describe(D.ts_code)
       })
     },
@@ -803,7 +803,7 @@ export function registerQuantTools(
     "get_analysis_status",
     {
       description: QUANT_TOOL_DESCRIPTIONS.get_analysis_status,
-      inputSchema: z.object({
+      inputSchema: z.looseObject({
         job_id: z.string().optional().describe(D.job_id),
         ts_code: z.string().optional().describe(D.ts_code)
       })

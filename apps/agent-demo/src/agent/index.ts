@@ -624,7 +624,8 @@ function buildTools(
           status:
             result.status === "ok" ? "ok" : result.status === "denied" ? "denied" : "error",
           duration_ms: durationMs,
-          job_id: job?.job_id ?? null
+          job_id: job?.job_id ?? null,
+          call_id: result.callId
         });
         record({
           text:
@@ -1332,13 +1333,19 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
   async callPortalTool(
     name: string,
     args: Record<string, unknown>,
-    context: AuditContext
-  ): Promise<{ status: "ok" | "denied" | "unavailable" | "error"; detail?: string; payload?: unknown }> {
+    context: AuditContext,
+    auditIds?: { requestId: string | null; conversationId: string | null }
+  ): Promise<{ status: "ok" | "denied" | "unavailable" | "error"; detail?: string; payload?: unknown; callId: string }> {
+    // Exact correlation id for this call. The Portal drops _meta but forwards
+    // arguments verbatim, so the ids ride inside a reserved `_audit` argument
+    // that MCP-S strips before the handler runs (never shown to the model).
+    const callId = crypto.randomUUID();
     const current = this.mcpStatus();
     if (!current.connected) {
       return {
         status: "unavailable",
-        detail: `MCP 未连接或连接已过期（状态：${current.state}${current.detail ? "；" + current.detail : ""}）`
+        detail: `MCP 未连接或连接已过期（状态：${current.state}${current.detail ? "；" + current.detail : ""}）`,
+        callId
       };
     }
     if (
@@ -1346,13 +1353,22 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
       name.startsWith("portal_") ||
       !this.discoveredRemoteNames().has(name)
     ) {
-      return { status: "denied", detail: "工具未在已连接服务中公布" };
+      return { status: "denied", detail: "工具未在已连接服务中公布", callId };
     }
     try {
       const result = (await this.mcp.callTool({
         serverId: "research",
         name,
-        arguments: args,
+        arguments: {
+          ...args,
+          _audit: {
+            call_id: callId,
+            request_id: auditIds ? auditIds.requestId : context.requestId,
+            conversation_id: auditIds
+              ? auditIds.conversationId
+              : this.ensureConversationId()
+          }
+        },
         _meta: this.portalMeta(context)
       })) as {
         isError?: boolean;
@@ -1369,11 +1385,11 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
         }
       }
       if (result?.isError) {
-        return { status: "error", detail: "远端工具执行失败", payload };
+        return { status: "error", detail: "远端工具执行失败", payload, callId };
       }
-      return { status: "ok", payload };
+      return { status: "ok", payload, callId };
     } catch (e) {
-      return { status: "error", detail: `工具调用失败：${this.diagnostic(e)}` };
+      return { status: "error", detail: `工具调用失败：${this.diagnostic(e)}`, callId };
     }
   }
 
@@ -1411,6 +1427,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
       this.analysisStatusJob = jobId;
       this.analysisStatusInflight = this.fetchAnalysisStatus(
         tool.name,
+        tool.server,
         jobId,
         context
       ).finally(() => {
@@ -1428,10 +1445,39 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
 
   private async fetchAnalysisStatus(
     toolName: string,
+    server: string,
     jobId: string,
     context: AuditContext
   ): Promise<AnalysisStatusResult> {
-    const result = await this.callPortalTool(toolName, { job_id: jobId }, context);
+    const started = Date.now();
+    // Progress-card polling is user-triggered but outside a chat turn:
+    // request/conversation ids stay null; the call still gets an exact
+    // call_id so its MCP-side rows are attributable.
+    const result = await this.callPortalTool(toolName, { job_id: jobId }, context, {
+      requestId: null,
+      conversationId: null
+    });
+    this.ctx.waitUntil(
+      recordAudit(this.env.AUDIT_DB, {
+        ts: started,
+        source: "agent",
+        event: "tool_call",
+        user_email: context.userEmail ?? null,
+        actor_id: context.actorId,
+        role: context.role,
+        conversation_id: null,
+        request_id: null,
+        server,
+        tool: toolName,
+        args_json: sanitizeArgs({ job_id: jobId }),
+        status:
+          result.status === "ok" ? "ok" : result.status === "denied" ? "denied" : "error",
+        reason: "poll",
+        duration_ms: Date.now() - started,
+        job_id: jobId,
+        call_id: result.callId
+      })
+    );
     if (result.status === "unavailable") return { status: "requires_connect" };
     if (result.status !== "ok") return { status: "error" };
     return { status: "ok", data: sanitizeAnalysisStatus(jobId, result.payload) };

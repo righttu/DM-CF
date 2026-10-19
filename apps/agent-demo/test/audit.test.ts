@@ -9,6 +9,7 @@ import {
 } from "../src/shared/audit.js";
 import { quantOutboundHandler } from "../src/quant/analysis.js";
 import auditMigration from "../migrations/audit/0001_audit.sql?raw";
+import auditMigration2 from "../migrations/audit/0002_call_id.sql?raw";
 import {
   AGENT_AUD,
   ANALYST_EMAIL,
@@ -94,9 +95,11 @@ function textResponse(text: string) {
 }
 
 beforeAll(async () => {
-  for (const stmt of auditMigration.split(";")) {
-    const sql = stmt.trim();
-    if (sql) await AUDIT_DB().prepare(sql).run();
+  for (const mig of [auditMigration, auditMigration2]) {
+    for (const stmt of mig.split(";")) {
+      const sql = stmt.trim();
+      if (sql) await AUDIT_DB().prepare(sql).run();
+    }
   }
   await QUANT_DB()
     .prepare(
@@ -175,6 +178,21 @@ describe("agent chat audit trail", () => {
     const sub = "sub-audit-1";
     const jwt = await signJwt({ sub, email: ANALYST_EMAIL });
     await connectAgentMcp({ sub, email: ANALYST_EMAIL });
+    // Capture the exact arguments the Agent sends to the Portal.
+    const portalArgs: Record<string, unknown>[] = [];
+    const origCall = MCPClientManager.prototype.callTool;
+    const callSpy = vi
+      .spyOn(MCPClientManager.prototype, "callTool")
+      .mockImplementation(function (
+        this: unknown,
+        params: { arguments?: Record<string, unknown> }
+      ) {
+        portalArgs.push(params.arguments ?? {});
+        return (origCall as never as (...a: unknown[]) => Promise<unknown>).call(
+          this,
+          params as never
+        );
+      } as never);
     let call = 0;
     setModelFake(async () => {
       call += 1;
@@ -214,6 +232,22 @@ describe("agent chat audit trail", () => {
     const access = mcpRows.find((r) => r.event === "data_access");
     expect(access?.tables).toBe("demo_reports");
     expect(access?.status).toBe("ok");
+    // _audit argument: injected into the Portal call, stripped before the
+    // handler/args_json, and carries the exact call_id + request ids.
+    callSpy.mockRestore();
+    const sent = portalArgs.find((a) => a._audit) as
+      | { _audit?: { call_id?: string; request_id?: string; conversation_id?: string } }
+      | undefined;
+    expect(sent?._audit?.call_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    );
+    expect(sent?._audit?.request_id).toBe(question?.request_id);
+    expect(toolCall?.call_id).toBe(sent?._audit?.call_id);
+    expect(mcpCall?.call_id).toBe(sent?._audit?.call_id);
+    expect(access?.call_id).toBe(sent?._audit?.call_id);
+    // The model-chosen args recorded on the agent side stay clean.
+    expect(toolCall?.args_json ?? "").not.toContain("_audit");
+    expect(mcpCall?.args_json ?? "").not.toContain("_audit");
   });
 
   it("DLP-blocked turns store no content and a dlp_block row", async () => {
@@ -394,6 +428,75 @@ describe("mcp quant audit trail", () => {
       `%${marker}%`
     ]);
     expect(rows[0].request_id).toBeNull();
+  });
+
+  it("correlates via the _audit argument when _meta is dropped", async () => {
+    const token = await quantToken("sub-audit-q4", ANALYST_EMAIL);
+    const rid = crypto.randomUUID();
+    const cid = crypto.randomUUID();
+    const callId = crypto.randomUUID();
+    await quantTool(token, "find_stock", {
+      query: "茅台",
+      _audit: { call_id: callId, request_id: rid, conversation_id: cid }
+    });
+    const rows = await waitForRows("call_id = ?", [callId], 2);
+    const call = rows.find((r) => r.event === "tool_call");
+    const access = rows.find((r) => r.event === "data_access");
+    expect(call?.request_id).toBe(rid);
+    expect(call?.conversation_id).toBe(cid);
+    expect(access?.call_id).toBe(callId);
+    expect(access?.request_id).toBe(rid);
+    // _audit is stripped before the handler and before args are recorded.
+    expect(call?.args_json ?? "").not.toContain("_audit");
+    expect(call?.args_json ?? "").not.toContain(callId);
+  });
+
+  it("ignores malformed _audit ids", async () => {
+    const token = await quantToken("sub-audit-q5", ANALYST_EMAIL);
+    const marker = crypto.randomUUID();
+    await quantTool(token, "find_stock", {
+      query: marker,
+      _audit: { call_id: "not-a-uuid", request_id: "bogus", conversation_id: null }
+    });
+    const rows = await waitForRows("tool = 'find_stock' AND args_json LIKE ?", [
+      `%${marker}%`
+    ]);
+    const call = rows.find((r) => r.event === "tool_call");
+    expect(call?.request_id).toBeNull();
+    expect(call?.call_id).toBeNull();
+    expect(call?.args_json ?? "").not.toContain("_audit");
+  });
+
+  it("publishes tool input schemas without an _audit property", async () => {
+    const token = await quantToken("sub-audit-q6", ANALYST_EMAIL);
+    const r = await mcpFetch(`${QUANT}/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: ++rpcId,
+        method: "tools/list",
+        params: {}
+      })
+    });
+    const text = await r.text();
+    const dataLine = text
+      .split("\n")
+      .find((l) => l.startsWith("data:"))
+      ?.slice(5)
+      .trim();
+    const body = JSON.parse(dataLine ?? text) as {
+      result?: { tools?: { name: string; inputSchema?: unknown }[] };
+    };
+    const tools = body.result?.tools ?? [];
+    expect(tools.length).toBeGreaterThan(0);
+    for (const t of tools) {
+      expect(JSON.stringify(t.inputSchema ?? {})).not.toContain("_audit");
+    }
   });
 });
 

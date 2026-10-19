@@ -2,11 +2,16 @@
 // functions: they are unit-tested directly in vitest AND serialized into the
 // standalone /audit page via Function.prototype.toString (no imports allowed).
 //
-// Why this matching is safe: the Portal does not forward our MCP _meta
-// request/conversation ids, so MCP-side rows arrive with request_id NULL.
-// The Agent (per-user Durable Object) runs one in-flight chat turn per user
-// at a time (busy lock), so "same user + same tool + inside the turn's time
-// window" is unambiguous.
+// Correlation, strongest first:
+//  1. call_id — the Agent injects a per-call `_audit` argument (call_id,
+//     request_id, conversation_id) that the Portal forwards verbatim; MCP-S
+//     records it on its tool_call and data_access rows. Exact join.
+//  2. request_id — rows carrying the same request id share a group.
+//  3. Legacy fallback for rows written before call_id existed (the Portal
+//     drops _meta, so old MCP rows have request_id NULL): the Agent runs one
+//     in-flight chat turn per user (per-user DO busy lock), so
+//     "same user + same tool + inside the turn's window" is unambiguous.
+// Any MCP row matching nothing lands in 未关联 — never dropped silently.
 
 export interface AuditRowLike {
   ts: number;
@@ -14,10 +19,12 @@ export interface AuditRowLike {
   event: string;
   user_email?: string | null;
   request_id?: string | null;
+  call_id?: string | null;
   server?: string | null;
   tool?: string | null;
   job_id?: string | null;
   args_json?: string | null;
+  reason?: string | null;
   [key: string]: unknown;
 }
 
@@ -64,9 +71,74 @@ export function auditNormTool(e: { server?: string | null; tool?: string | null 
   return name;
 }
 
-// Attach _meta-less MCP rows to the Agent request group they belong to.
-// Mutates group rows: matched MCP tool_calls get _pair = the agent row's
-// index within the group; their data_access rows get nested as _access.
+function isMcp(r: AuditRowLike): boolean {
+  return r.source.startsWith("mcp-");
+}
+
+function hostAccess(host: AuditRowLike, access: AuditRowLike): void {
+  (host._access as AuditRowLike[] | undefined) ?? (host._access = []);
+  (host._access as AuditRowLike[]).push(access);
+  access._nested = true;
+}
+
+// Pair the MCP rows inside a request group with the group's agent tool_calls.
+// Exact call_id join first, then tool-name pairing in time order for rows
+// written before call_id existed. Also nests each data_access under its
+// MCP tool_call (same call_id), or directly under the agent tool_call when
+// the MCP tool_call row itself is missing.
+function pairInGroup(group: AuditGroup): void {
+  const agentCalls = group.rows.filter(
+    (r) => r.source === "agent" && r.event === "tool_call"
+  );
+  if (agentCalls.length === 0) return;
+  const agentByCall = new Map<string, AuditRowLike>();
+  const agentByTool = new Map<string, AuditRowLike[]>();
+  for (const a of agentCalls) {
+    if (a.call_id) agentByCall.set(a.call_id, a);
+    const k = auditNormTool(a);
+    if (!agentByTool.has(k)) agentByTool.set(k, []);
+    agentByTool.get(k)!.push(a);
+  }
+  for (const l of agentByTool.values()) l.sort((x, y) => x.ts - y.ts);
+  const used = new Map<string, number>();
+  const mcpByCall = new Map<string, AuditRowLike>();
+  for (const m of group.rows) {
+    if (!isMcp(m) || m.event !== "tool_call" || m._pair) continue;
+    if (m.call_id) mcpByCall.set(m.call_id, m);
+    let target: AuditRowLike | undefined;
+    if (m.call_id && agentByCall.has(m.call_id)) {
+      target = agentByCall.get(m.call_id);
+    } else {
+      const k = auditNormTool(m);
+      const cands = agentByTool.get(k);
+      if (cands) {
+        const i = used.get(k) ?? 0;
+        if (i < cands.length) {
+          used.set(k, i + 1);
+          target = cands[i];
+        }
+      }
+    }
+    if (target) m._pair = (target.id as string | undefined) ?? "";
+  }
+  const paired = group.rows.filter((r) => r._pair);
+  const user = group.rows.find((r) => r.source === "agent")?.user_email ?? null;
+  for (const o of group.rows) {
+    if (!isMcp(o) || o.event !== "data_access" || o._nested) continue;
+    let host: AuditRowLike | undefined;
+    if (o.call_id) {
+      host = mcpByCall.get(o.call_id) ?? agentByCall.get(o.call_id);
+    } else if ((o.user_email ?? null) === user) {
+      host = paired.find(
+        (mm) => auditNormTool(mm) === auditNormTool(o) && Math.abs(mm.ts - o.ts) <= 1000
+      );
+    }
+    if (host) hostAccess(host, o);
+  }
+}
+
+// Attach request_id-less MCP rows to the Agent request group they belong to.
+// Legacy path (no call_id): same user + same tool + inside the turn window.
 function attachMcpRows(group: AuditGroup, orphans: AuditRowLike[]): AuditRowLike[] {
   const agentRows = group.rows.filter((r) => r.source === "agent");
   if (agentRows.length === 0) return orphans;
@@ -87,9 +159,12 @@ function attachMcpRows(group: AuditGroup, orphans: AuditRowLike[]): AuditRowLike
   const mcpCalls: AuditRowLike[] = [];
   for (const o of orphans) {
     if (
-      o.source.startsWith("mcp-") &&
+      isMcp(o) &&
       o.event === "tool_call" &&
       !o.request_id &&
+      // Rows with a call_id either matched exactly or match nothing —
+      // a fuzzy window attach would risk pairing to the wrong call.
+      !o.call_id &&
       (o.user_email ?? null) === user &&
       o.ts >= start &&
       o.ts <= end &&
@@ -122,9 +197,10 @@ function attachMcpRows(group: AuditGroup, orphans: AuditRowLike[]): AuditRowLike
   const leftover: AuditRowLike[] = [];
   for (const o of rest) {
     if (
-      o.source.startsWith("mcp-") &&
+      isMcp(o) &&
       o.event === "data_access" &&
       !o.request_id &&
+      !o.call_id &&
       (o.user_email ?? null) === user &&
       pairedMcp.some(
         (m) => auditNormTool(m) === auditNormTool(o) && Math.abs(m.ts - o.ts) <= 1000
@@ -133,13 +209,58 @@ function attachMcpRows(group: AuditGroup, orphans: AuditRowLike[]): AuditRowLike
       const m = pairedMcp.find(
         (mm) => auditNormTool(mm) === auditNormTool(o) && Math.abs(mm.ts - o.ts) <= 1000
       )!;
-      (m._access as AuditRowLike[] | undefined) ?? (m._access = []);
-      (m._access as AuditRowLike[]).push(o);
+      hostAccess(m, o);
+      group.rows.push(o);
     } else {
       leftover.push(o);
     }
   }
   return leftover.concat(unpaired);
+}
+
+// Exact call_id attach for request_id-less MCP rows (the Portal drops _meta,
+// so MCP-side rows carry call_id but not request_id): the row joins the agent
+// tool_call that injected it, wherever that row lives.
+function attachByCallId(
+  groups: AuditGroup[],
+  orphans: AuditRowLike[]
+): AuditRowLike[] {
+  const index = new Map<string, { row: AuditRowLike; group: AuditGroup }>();
+  for (const g of groups) {
+    for (const r of g.rows) {
+      if (r.source === "agent" && r.event === "tool_call" && r.call_id) {
+        index.set(r.call_id, { row: r, group: g });
+      }
+    }
+  }
+  if (index.size === 0) return orphans;
+  const rest: AuditRowLike[] = [];
+  // tool_calls before data_access so access rows find their MCP host.
+  const matched = (o: AuditRowLike) =>
+    isMcp(o) && o.call_id && index.has(o.call_id);
+  for (const o of orphans) {
+    if (matched(o) && o.event === "tool_call") {
+      const { row, group } = index.get(o.call_id!)!;
+      o._pair = (row.id as string | undefined) ?? "";
+      group.rows.push(o);
+    }
+  }
+  for (const o of orphans) {
+    if (matched(o) && o.event === "data_access") {
+      const { row, group } = index.get(o.call_id!)!;
+      const mcpCall = group.rows.find(
+        (m) => isMcp(m) && m.event === "tool_call" && m.call_id === o.call_id
+      );
+      hostAccess(mcpCall ?? row, o);
+      group.rows.push(o);
+    }
+  }
+  for (const o of orphans) {
+    if (!(matched(o) && (o.event === "tool_call" || o.event === "data_access"))) {
+      rest.push(o);
+    }
+  }
+  return rest;
 }
 
 function pollJobId(o: AuditRowLike): string | null {
@@ -150,6 +271,16 @@ function pollJobId(o: AuditRowLike): string | null {
   } catch {
     return null;
   }
+}
+
+// Progress-card polling happens outside chat turns on both sides: the Agent
+// writes a request_id-less tool_call with reason "poll" (+call_id), MCP-S
+// writes its own request_id-less get_analysis_status tool_call. Both collapse
+// into one line per user+job; same call_id counts once.
+function isPollRow(o: AuditRowLike): boolean {
+  if (o.event !== "tool_call" || o.request_id) return false;
+  if (o.source === "agent") return o.reason === "poll";
+  return isMcp(o) && auditNormTool(o) === "get_analysis_status";
 }
 
 export function groupAuditEvents(events: AuditRowLike[]): GroupedAudit {
@@ -163,20 +294,24 @@ export function groupAuditEvents(events: AuditRowLike[]): GroupedAudit {
       orphans.push(e);
     }
   }
-  let rest = orphans;
-  for (const rows of byReq.values()) {
-    rest = attachMcpRows({ id: "", rows }, rest);
+  const groups = [...byReq.entries()].map(([id, rows]) => ({
+    id,
+    // ascending inside a group: question -> tool calls -> access -> reply
+    rows: rows.sort((a, b) => a.ts - b.ts)
+  }));
+  // Exact call_id joins first (in-group pairing, then orphan attach), then
+  // the legacy time-window matcher for rows written before call_id existed.
+  for (const g of groups) pairInGroup(g);
+  let rest = attachByCallId(groups, orphans);
+  for (const g of groups) {
+    rest = attachMcpRows(g, rest);
   }
-  // Progress-card polling calls are user-triggered outside chat turns:
-  // collapse them into one line per user+job instead of flooding 未关联.
-  const polls = new Map<string, PollRow & { rows: AuditRowLike[] }>();
+  for (const g of groups) pairInGroup(g);
+  for (const g of groups) g.rows.sort((a, b) => a.ts - b.ts);
+  const polls = new Map<string, PollRow & { keys: Set<string> }>();
   const unmatched: AuditRowLike[] = [];
   for (const o of rest) {
-    if (
-      o.event === "tool_call" &&
-      auditNormTool(o) === "get_analysis_status" &&
-      !o.request_id
-    ) {
+    if (isPollRow(o)) {
       const job = pollJobId(o);
       const key = `${o.user_email ?? ""}|${job ?? ""}`;
       if (!polls.has(key)) {
@@ -186,22 +321,20 @@ export function groupAuditEvents(events: AuditRowLike[]): GroupedAudit {
           user_email: o.user_email ?? null,
           job_id: job,
           count: 0,
-          rows: []
+          keys: new Set()
         });
       }
       const p = polls.get(key)!;
-      p.count += 1;
-      p.ts = Math.max(p.ts, o.ts);
-      p.rows.push(o);
+      const callKey = (o.call_id as string | undefined) ?? (o.id as string | undefined) ?? "";
+      if (!p.keys.has(callKey)) {
+        p.keys.add(callKey);
+        p.count += 1;
+        p.ts = Math.max(p.ts, o.ts);
+      }
     } else {
       unmatched.push(o);
     }
   }
-  const groups = [...byReq.entries()].map(([id, rows]) => ({
-    id,
-    // ascending inside a group: question -> tool calls -> access -> reply
-    rows: rows.sort((a, b) => a.ts - b.ts)
-  }));
   unmatched.sort((a, b) => a.ts - b.ts);
   groups.sort(
     (a, b) => Math.max(...b.rows.map((r) => r.ts)) - Math.max(...a.rows.map((r) => r.ts))
@@ -209,13 +342,23 @@ export function groupAuditEvents(events: AuditRowLike[]): GroupedAudit {
   return {
     groups,
     unmatched,
-    polls: [...polls.values()].map(({ rows: _r, ...p }) => p)
+    polls: [...polls.values()].map(({ keys: _k, ...p }) => p)
   };
 }
 
 // Serialized into the /audit page (functions must stay dependency-free).
 export function auditGroupScriptSource(): string {
-  return [auditNormTool, attachMcpRows, pollJobId, groupAuditEvents]
+  return [
+    auditNormTool,
+    isMcp,
+    hostAccess,
+    pairInGroup,
+    attachMcpRows,
+    attachByCallId,
+    pollJobId,
+    isPollRow,
+    groupAuditEvents
+  ]
     .map((f) => f.toString())
     .join("\n\n");
 }

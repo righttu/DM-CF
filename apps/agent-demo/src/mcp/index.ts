@@ -42,9 +42,9 @@ function registerResearchTools(
     "list_demo_companies",
     {
       description: TOOL_DESCRIPTIONS.list_demo_companies,
-      inputSchema: z.object({})
+      inputSchema: z.looseObject({})
     },
-    async (_args, callCtx) =>
+    async (args, callCtx) =>
       call("list_demo_companies", callCtx, async (audit) => {
         if (!resolveRole(env, email)) {
           return { isError: true, ...text({ error: "permission_denied" }) };
@@ -56,14 +56,14 @@ function registerResearchTools(
           status: "ok"
         });
         return text(r);
-      })
+      }, { args })
   );
 
   server.registerTool(
     "get_latest_analysis",
     {
       description: TOOL_DESCRIPTIONS.get_latest_analysis,
-      inputSchema: z.object({ company_id: z.enum(COMPANY_IDS) })
+      inputSchema: z.looseObject({ company_id: z.enum(COMPANY_IDS) })
     },
     async (args, callCtx) =>
       call("get_latest_analysis", callCtx, async (audit) => {
@@ -86,7 +86,7 @@ function registerResearchTools(
       "read_research_document",
       {
         description: TOOL_DESCRIPTIONS.read_research_document,
-        inputSchema: z.object({ document_id: z.enum(DOCUMENT_IDS) })
+        inputSchema: z.looseObject({ document_id: z.enum(DOCUMENT_IDS) })
       },
       async (args, callCtx) =>
         call("read_research_document", callCtx, async (audit) => {

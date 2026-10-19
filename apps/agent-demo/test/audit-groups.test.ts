@@ -193,6 +193,182 @@ describe("groupAuditEvents", () => {
     expect(group.rows.map((r) => r.ts)).toEqual([...group.rows.map((r) => r.ts)].sort((x, y) => x - y));
   });
 
+  it("joins MCP rows by exact call_id, incl. two calls of the same tool", () => {
+    const a1 = row({
+      id: "A1",
+      ts: 2000,
+      event: "tool_call",
+      user_email: U,
+      request_id: "req-a",
+      server: "abc-quant",
+      tool: "abc-quant_find_stock",
+      call_id: "call-1"
+    });
+    const a2 = row({
+      id: "A2",
+      ts: 6000,
+      event: "tool_call",
+      user_email: U,
+      request_id: "req-a",
+      server: "abc-quant",
+      tool: "abc-quant_find_stock",
+      call_id: "call-2"
+    });
+    // NULL request_id (Portal drops _meta) but exact call_id — and the
+    // second call's ts order is deliberately swapped in the input.
+    const m2 = row({
+      ts: 6100,
+      source: "mcp-quant",
+      event: "tool_call",
+      user_email: U,
+      request_id: null,
+      tool: "find_stock",
+      call_id: "call-2"
+    });
+    const m1 = row({
+      ts: 2100,
+      source: "mcp-quant",
+      event: "tool_call",
+      user_email: U,
+      request_id: null,
+      tool: "find_stock",
+      call_id: "call-1"
+    });
+    const acc = row({
+      ts: 2200,
+      source: "mcp-quant",
+      event: "data_access",
+      user_email: U,
+      request_id: null,
+      tool: "find_stock",
+      call_id: "call-1",
+      tables: "stock_basic"
+    });
+    const g = groupAuditEvents([
+      row({ ts: 1000, event: "question", user_email: U, request_id: "req-a" }),
+      a2,
+      a1,
+      row({ ts: 8000, event: "reply", user_email: U, request_id: "req-a" }),
+      m2,
+      acc,
+      m1
+    ]);
+    expect(g.groups).toHaveLength(1);
+    expect(g.unmatched).toHaveLength(0);
+    // call_id wins over time order: m1->A1, m2->A2 (time order alone would
+    // still hold here, so also check the access is nested under m1)
+    expect(m1._pair).toBe("A1");
+    expect(m2._pair).toBe("A2");
+    expect((m1._access as AuditRowLike[])?.[0]?.tables).toBe("stock_basic");
+    expect(acc._nested).toBe(true);
+    const group = g.groups[0];
+    expect(group.rows).toContain(m1);
+    expect(group.rows).toContain(acc);
+    expect(group.rows.map((r) => r.ts)).toEqual(
+      [...group.rows.map((r) => r.ts)].sort((x, y) => x - y)
+    );
+  });
+
+  it("call_id joins even outside the legacy window; unmatched call_id rows are kept", () => {
+    const agentCall = row({
+      id: "A1",
+      ts: 2000,
+      event: "tool_call",
+      user_email: U,
+      request_id: "req-a",
+      server: "abc-quant",
+      tool: "abc-quant_find_stock",
+      call_id: "call-x"
+    });
+    const farButExact = row({
+      ts: 999000,
+      source: "mcp-quant",
+      event: "tool_call",
+      user_email: "other@example.com", // email mismatch impossible in prod but
+      request_id: null,                 // call_id is the join, not user/window
+      tool: "find_stock",
+      call_id: "call-x"
+    });
+    const unknownCall = row({
+      ts: 2500,
+      source: "mcp-quant",
+      event: "tool_call",
+      user_email: U,
+      request_id: null,
+      tool: "find_stock",
+      call_id: "call-unknown"
+    });
+    const g = groupAuditEvents([
+      row({ ts: 1000, event: "question", user_email: U, request_id: "req-a" }),
+      agentCall,
+      row({ ts: 3000, event: "reply", user_email: U, request_id: "req-a" }),
+      farButExact,
+      unknownCall
+    ]);
+    expect(farButExact._pair).toBe("A1");
+    expect(g.unmatched).toContain(unknownCall);
+    expect(g.groups[0].rows).toContain(farButExact);
+  });
+
+  it("nests a data_access on the agent call when its MCP tool_call row is absent", () => {
+    const agentCall = row({
+      id: "A1",
+      ts: 2000,
+      event: "tool_call",
+      user_email: U,
+      request_id: "req-a",
+      server: "abc-quant",
+      tool: "abc-quant_find_stock",
+      call_id: "call-1"
+    });
+    const acc = row({
+      ts: 2200,
+      source: "mcp-quant",
+      event: "data_access",
+      user_email: U,
+      request_id: null,
+      tool: "find_stock",
+      call_id: "call-1",
+      tables: "stock_basic"
+    });
+    const g = groupAuditEvents([
+      row({ ts: 1000, event: "question", user_email: U, request_id: "req-a" }),
+      agentCall,
+      row({ ts: 3000, event: "reply", user_email: U, request_id: "req-a" }),
+      acc
+    ]);
+    expect(g.unmatched).toHaveLength(0);
+    expect(acc._nested).toBe(true);
+    expect((agentCall._access as AuditRowLike[])?.[0]).toBe(acc);
+  });
+
+  it("collapses agent poll rows and their MCP rows once per call_id", () => {
+    const mk = (ts: number, cid: string, source: string) =>
+      row({
+        ts,
+        source,
+        event: "tool_call",
+        user_email: U,
+        request_id: null,
+        server: "abc-quant",
+        tool: source === "agent" ? "abc-quant_get_analysis_status" : "get_analysis_status",
+        reason: source === "agent" ? "poll" : null,
+        call_id: cid,
+        args_json: '{"job_id":"600000.SH:20261018"}'
+      });
+    const g = groupAuditEvents([
+      mk(100, "pc-1", "agent"),
+      mk(110, "pc-1", "mcp-quant"),
+      mk(200, "pc-2", "agent"),
+      mk(210, "pc-2", "mcp-quant"),
+      mk(300, "pc-3", "mcp-quant")
+    ]);
+    expect(g.polls).toHaveLength(1);
+    expect(g.polls[0].count).toBe(3);
+    expect(g.polls[0].job_id).toBe("600000.SH:20261018");
+    expect(g.unmatched).toHaveLength(0);
+  });
+
   it("collapses polling get_analysis_status orphans per user+job", () => {
     const poll = (ts: number) =>
       row({
