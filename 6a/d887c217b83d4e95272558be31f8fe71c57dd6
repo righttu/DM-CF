@@ -1,0 +1,33 @@
+apps/agent-demo/src/agent/audit-groups.ts
+  s_02649a17b7b371::t_79a24913ace3ff 1-221
+apps/agent-demo/src/agent/audit-page.ts
+  s_02649a17b7b371::t_aa157dae28f679 1-2,22-23,57-59,68-69,94-119,122,131,133-134,141-145,147-148,158-160,163-164,169,182,195-209,212-219,223-231,242,258-260,267-270
+apps/agent-demo/src/agent/index.ts
+  s_9f8bbce8601172::t_42770e5d64204f 613,1544,1578-1582,1585,1651,1657-1661,1665-1669
+apps/agent-demo/test/audit-groups.test.ts
+  s_9f8bbce8601172::t_057fe467b01252 1-222
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6ad887c217b83d4e95272558be31f8fe71c57dd6",
+  "prompts": {},
+  "sessions": {
+    "s_02649a17b7b371": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "calm-noun",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    },
+    "s_9f8bbce8601172": {
+      "agent_id": {
+        "tool": "devin",
+        "id": "s_9f8bbce8601172",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
