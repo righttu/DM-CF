@@ -2,6 +2,10 @@
 
 Isolated synthetic-data demo. Two Workers: `src/agent` (frontend + ResearchAgent Durable Object) and `src/mcp` (stateless MCP + OAuth). App code in `apps/agent-demo`, configs in `.devin/agent-demo`.
 
+## 用户偏好（必须遵守）
+
+- 与用户的所有交流、任务完成后的执行小结，一律使用中文。
+
 ## Verified commands (run from `apps/agent-demo`)
 
 ```sh
