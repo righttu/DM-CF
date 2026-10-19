@@ -1,0 +1,31 @@
+apps/agent-demo/src/agent/audit-page.ts
+  s_02649a17b7b371::t_7b097a26f32b3a 96-161,167,178,460-696,707-720,727,729,783-793,820,822-825
+apps/agent-demo/src/agent/audit-groups.ts
+  s_a4f0a50e9a4b1b::t_50d64496783dd7 445-694,707-709
+apps/agent-demo/test/audit-groups.test.ts
+  s_a4f0a50e9a4b1b::t_f861ebaadd5a42 7,9,15,519-653
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "dc46b5f150ff8caa00280827d6a84362947f59b1",
+  "prompts": {},
+  "sessions": {
+    "s_02649a17b7b371": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "calm-noun",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    },
+    "s_a4f0a50e9a4b1b": {
+      "agent_id": {
+        "tool": "devin",
+        "id": "s_a4f0a50e9a4b1b",
+        "model": "unknown"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}
