@@ -248,3 +248,13 @@ Agent tracing documents three identity fields: agent name (`functionId`, shared:
 - 2026-10-19 live check: the Portal does **not** forward MCP `_meta` request IDs. MCP-S rows arrive with NULL `request_id`, and their tool names lack the Portal prefix (`find_stock` vs `abc-quant_find_stock`).
 - Agent `e04e8fe4` (commit `6ad887c`) stamps real event times. The page joins MCP rows to the Agent request by matching the same user and the normalized tool name inside the question→reply window; this is unambiguous because each user's DO allows only one in-flight chat.
 - Rows written before `6ad887c` share one flush timestamp and may stay in 未关联.
+
+## Exact audit correlation by call ID (2026-10-19, commit `ca8226b`)
+
+- Deployed Agent `10a42c93`, Research MCP `98142875`, Quant MCP-S `de86aff8`.
+- The Agent injects a reserved tool argument `_audit` `{call_id, request_id, conversation_id}`. The Portal forwards arguments verbatim but drops `_meta`.
+- MCP tool input schemas use `z.looseObject`, so `_audit` survives validation. The published schema gains only `additionalProperties: {}` and no `_audit` property. `mcp-kit` strips `_audit` before the handler runs and before args are recorded, and writes `call_id` on tool_call and data_access rows.
+- The page joins rows by `call_id` first. The time-window match is only for legacy rows without `call_id`.
+- Migration 0002 (`call_id` column + index) was applied through the D1 query API.
+- Network caveat: on the `192.168.64.3` network the VM's HTTPS is intercepted by a corporate Zero Trust CA. Because of that, `wrangler d1 execute --file` fails with "fetch failed" and Docker cannot pull `python:3.12-slim` (x509 unknown authority). Plain `wrangler deploy` of non-container Workers still works there.
+- Deploy container Workers from the hotspot network (`172.20.10.6`). Do not disable TLS verification.
