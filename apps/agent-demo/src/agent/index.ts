@@ -1721,6 +1721,10 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
       let stepHasText = false;
       const stepStarts: number[] = [];
       const stepEnds: number[] = [];
+      // finish-step fires after the step's tool calls have executed, so for
+      // steps with tool calls the model's decision actually arrived at the
+      // last tool-call stream part — track that as the step end instead.
+      const stepToolEnds: number[] = [];
       try {
         for await (const part of result.fullStream as AsyncIterable<{
           type: string;
@@ -1729,6 +1733,8 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
           if (part.type === "start-step") {
             stepHasText = false;
             stepStarts.push(Date.now());
+          } else if (part.type === "tool-call") {
+            stepToolEnds[stepStarts.length - 1] = Date.now();
           } else if (part.type === "finish-step") {
             stepEnds.push(Date.now());
           } else if (part.type === "text-delta" && typeof part.text === "string") {
@@ -1777,13 +1783,15 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
               : last && errored
                 ? "error"
                 : "stop";
-          // True round timing: binding run() request start -> finish-step part
-          // time (excludes tool execution, unlike start-step deltas).
+          // True round timing: binding run() request start -> last tool-call
+          // part of the step when it has tool calls (model decision arrived),
+          // otherwise the finish-step part time. timing:2 marks corrected rows.
           const start = runLog[i]?.start ?? stepStarts[i] ?? turnStartTs;
+          const end = stepToolEnds[i] ?? stepEnds[i] ?? modelEndTs;
           modelTrail.push(
             agentRow("model_call", {
               ts: start,
-              duration_ms: Math.max(0, (stepEnds[i] ?? modelEndTs) - start),
+              duration_ms: Math.max(0, end - start),
               server: this.env.GATEWAY_ID ?? null,
               tool: modelIdUsed,
               target: this.env.GATEWAY_ID ? `ai-gateway:${this.env.GATEWAY_ID}` : null,
@@ -1793,6 +1801,7 @@ export class ResearchAgent extends Agent<AgentDemoEnv, AgentStateShape> {
                 step: i + 1,
                 tools: toolNames,
                 tools_count: Object.keys(tools).length,
+                timing: 2,
                 input_tokens: num(usage.inputTokens),
                 output_tokens: num(usage.outputTokens),
                 ...(runLog[i]?.logId ? { aig_log_id: runLog[i].logId } : {})

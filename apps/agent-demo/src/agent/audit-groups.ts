@@ -459,6 +459,8 @@ export interface SwimArrow {
   rows: AuditRowLike[];
   idx?: number;
   calls?: AuditRowLike[];
+  modelMs?: number;
+  est?: boolean;
   parallel?: boolean;
   count?: number;
   job?: string | null;
@@ -619,6 +621,25 @@ export function auditSwimlane(
         }
       }
       arrows[i].calls = calls;
+      // Legacy rows (recorded before timing:2) have finish-step AFTER tool
+      // execution, so ts+duration_ms overshoots: fall back to the first agent
+      // tool_call of the round as the model's decision time.
+      const m = arrows[i].rows[0];
+      let timing2 = false;
+      try {
+        const p = JSON.parse(String(m?.args_json ?? "{}")) as Record<string, unknown>;
+        timing2 = p.timing === 2;
+      } catch {
+        timing2 = false;
+      }
+      if (!timing2 && calls.length) {
+        const firstCall = Math.min(...calls.map((c) => c.ts));
+        if (firstCall < arrows[i].ts) {
+          arrows[i].modelMs = firstCall - (m?.ts ?? firstCall);
+          arrows[i].ts = firstCall;
+          arrows[i].est = true;
+        }
+      }
     }
     if (
       rows.some((r) => r.event === "tool_call" && r.source === "agent") &&

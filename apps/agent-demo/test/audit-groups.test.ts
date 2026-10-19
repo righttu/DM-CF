@@ -13,6 +13,7 @@ import {
 } from "../src/agent/audit-groups.js";
 import realRowsJson from "./evidence/audit-real-rows.json";
 import previewRowsJson from "./evidence/audit-turn2-preview.json";
+import v4RowsJson from "./evidence/audit-v4-turn.json";
 
 const U = "a@example.com";
 let n = 0;
@@ -617,6 +618,42 @@ describe("auditSwimlane", () => {
       "send", "recv", "exec", "query", "query", "ret",
       "send", "recv", "reply"
     ]);
+    const tss = sw.arrows.map((a) => a.ts);
+    expect([...tss].sort((x, y) => x - y)).toEqual(tss);
+  });
+
+  it("corrects legacy (pre-timing:2) model durations via the round's first tool call", () => {
+    const rows = v4RowsJson as AuditRowLike[];
+    const { grp, pairMap } = laneSetup(rows);
+    const sw = auditSwimlane(grp.rows, pairMap);
+    const base = rows[0].ts;
+    const off = (a: { ts: number }) => (a.ts - base) / 1000;
+    const ar = sw.arrows.filter((a) => a.kind !== "sect");
+    expect(ar.map((a) => a.kind)).toEqual([
+      "send", "recv", "exec", "query", "ret",
+      "send", "recv", "exec", "query", "query", "ret",
+      "send", "recv", "reply"
+    ]);
+    // round 1: model decided at the tool-call time (2.9 s), not finish-step
+    const recv1 = ar[1];
+    expect(off(recv1)).toBeCloseTo(2.9, 1);
+    expect(recv1.est).toBe(true);
+    expect(recv1.modelMs).toBeCloseTo(2909, -2);
+    // recv before exec even though their ts tie (479026)
+    expect(ar[2].ts).toBe(recv1.ts);
+    // round 2: corrected to ~3.2 s
+    const recv2 = ar[6];
+    expect(off(recv2)).toBeCloseTo(7.2, 1);
+    expect(recv2.modelMs).toBeCloseTo(3212, -2);
+    expect(off(ar[5])).toBeCloseTo(4.0, 1); // send2
+    expect(off(ar[7])).toBeCloseTo(7.2, 1); // exec2
+    expect(off(ar[8])).toBeCloseTo(7.7, 1); // query
+    expect(off(ar[10])).toBeCloseTo(7.7, 1); // ret
+    // round 3 has no tool calls: keep recorded duration (53.6 s)
+    const recv3 = ar[12];
+    expect(recv3.est).toBeFalsy();
+    expect(recv3.modelMs).toBeUndefined();
+    expect(off(recv3)).toBeCloseTo(61.3, 1);
     const tss = sw.arrows.map((a) => a.ts);
     expect([...tss].sort((x, y) => x - y)).toEqual(tss);
   });

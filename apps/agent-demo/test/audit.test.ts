@@ -366,7 +366,9 @@ describe("agent chat audit trail", () => {
     expect(steps[0].target).toBe("ai-gateway:test-gateway");
     expect(typeof a1.tools_count).toBe("number");
     expect(a1.tools_count).toBeGreaterThanOrEqual(1);
-    // round timing: run() start -> finish-step, i.e. excludes tool execution
+    expect(a1.timing).toBe(2);
+    // round timing: run() start -> last tool-call part of the step, i.e. the
+    // recorded model end excludes the tool's execution time
     const calls = await auditRows(
       "request_id = ? AND event = 'tool_call' AND source = 'agent'",
       [rid]
@@ -376,7 +378,7 @@ describe("agent chat audit trail", () => {
     expect(String(calls[0].target)).toMatch(/^mcp-portal:/);
     const step0 = steps[0] as unknown as { ts: number; duration_ms: number };
     expect(step0.ts + step0.duration_ms).toBeLessThanOrEqual(
-      (calls[0].ts as number) + 1500
+      (calls[0].ts as number) + 200
     );
     // same request/conversation as the rest of the turn
     const turn = await auditRows(

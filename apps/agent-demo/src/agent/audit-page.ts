@@ -159,6 +159,10 @@ padding:10px 14px;border-bottom:1px solid var(--line,#e5e1d4);font-size:14px}
 word-break:break-all;background:var(--paper,#f7f6f2);border:1px solid var(--line,#e5e1d4);
 border-radius:6px;padding:8px;margin:6px 0}
 .dw-sep{border:0;border-top:1px dashed var(--line,#e5e1d4);margin:10px 0}
+.dw-note{color:var(--muted);font-size:11px;font-style:italic;margin:2px 0 8px}
+.dw-sect{color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;
+letter-spacing:.4px;border-top:1px solid var(--line,#e5e1d4);padding-top:10px;margin:10px 0 6px}
+.dw-side{color:var(--ink);font-size:12px;font-weight:600;margin:8px 0 2px}
 </style>
 </head>
 <body>
@@ -502,7 +506,8 @@ function arrowLabel(a) {
       desc = "回复：最终回答";
     }
     return desc + ' <span class="nm">· 输出 ' + esc(p.output_tokens ?? "—") + " tokens</span>" +
-      (!("tools_count" in p) ? ' <span class="nm">旧版计时</span>' : "");
+      (!("tools_count" in p) ? ' <span class="nm">旧版计时</span>' : "") +
+      (a.est ? ' <span class="nm">（按工具开始时间推算）</span>' : "");
   }
   if (a.kind === "exec") {
     const agentCall = a.rows.find((x) => x.source === "agent") ?? a.rows[0];
@@ -526,7 +531,7 @@ function arrowLabel(a) {
 
 function arrowDur(a) {
   const r = a.rows[0] ?? {};
-  if (a.kind === "recv") return "模型 " + dur(r.duration_ms);
+  if (a.kind === "recv") return "模型 " + dur(a.modelMs ?? r.duration_ms);
   if (a.kind === "ret") {
     const mcp = a.rows.find((x) => String(x.source).startsWith("mcp-"));
     const call = a.rows.find((x) => x.source === "agent");
@@ -625,7 +630,11 @@ function swimDiagram(sw, base) {
               : l.kind !== "store" ? '<span class="lnm">名称未记录</span>' : "") +
       "</div>").join("") +
     "<div></div></div>";
-  for (const a of sw.arrows) h += swimRow(a, lanesIdx, N, gridCols, base);
+  for (const a of sw.arrows) {
+    a.fromL = a.from != null ? (sw.lanes[lanesIdx.get(a.from)] ?? null) : null;
+    a.toL = a.to != null ? (sw.lanes[lanesIdx.get(a.to)] ?? null) : null;
+    h += swimRow(a, lanesIdx, N, gridCols, base);
+  }
   return h + "</div></div>";
 }
 
@@ -647,7 +656,27 @@ function swimHtml(g, pairMap) {
 }
 
 // ---------- detail drawer ----------
-function detailHtml(rows) {
+const ACTION_NAMES = { send: "发送", recv: "回复", exec: "执行", query: "查询", ret: "返回", dlp: "DLP 拦截" };
+const laneTxt = (l) =>
+  l ? esc(l.role) + " " + esc(l.name ?? "名称未记录") : "—";
+
+// Top drawer block: what the ARROW means (may differ from the raw row's
+// recorded direction, e.g. a reply arrow drawn gateway->agent whose row was
+// written by the agent with actor agent -> target ai-gateway).
+function arrowHeadHtml(a) {
+  const act = ACTION_NAMES[a.kind];
+  if (!act || !a.fromL || !a.toL) return "";
+  let h = '<div class="dw-t">本箭头</div><div class="dw-kv">' +
+    '<span class="k">方向</span><span class="v">' + laneTxt(a.fromL) + " → " + laneTxt(a.toL) + "</span>" +
+    '<span class="k">动作</span><span class="v">' + esc(act) + "</span>" +
+    '<span class="k">时间</span><span class="v">' + esc(bj(a.ts)) + "</span></div>";
+  if (a.kind === "recv" || a.kind === "ret") {
+    h += '<div class="dw-note">该记录由请求发起方写入（actor → target 为请求方向），本箭头表示它的回复 / 返回。</div>';
+  }
+  return h + '<div class="dw-sect">原始审计记录</div>';
+}
+
+function detailHtml(rows, headed) {
   return rows.map((r) => {
     const p = parseArgs(r);
     const F = [
@@ -664,7 +693,13 @@ function detailHtml(rows) {
       ["input_tokens", p.input_tokens], ["output_tokens", p.output_tokens],
       ["served_model", p.served_model], ["aig_log_id", p.aig_log_id]
     ].filter(([, v]) => v != null && v !== "");
-    let h = '<div class="dw-t">' + esc(r.event ?? "event") + " · " + esc(r.source ?? "") + "</div>" +
+    const side = headed
+      ? r.source === "agent" ? "Agent 侧记录"
+        : String(r.source ?? "").startsWith("mcp") ? "MCP Server 侧记录"
+        : (r.source ?? "") + " 记录"
+      : null;
+    let h = (side ? '<div class="dw-side">' + esc(side) + "</div>" : "") +
+      '<div class="dw-t">' + esc(r.event ?? "event") + " · " + esc(r.source ?? "") + "</div>" +
       '<div class="dw-kv">' + F.map(([k, v]) =>
         '<span class="k">' + esc(k) + '</span><span class="v">' + esc(v) + "</span>").join("") +
       "</div>";
@@ -690,7 +725,8 @@ function detailHtml(rows) {
 }
 
 function openDrawer(a) {
-  $("dw-b").innerHTML = detailHtml(a.rows);
+  $("dw-b").innerHTML = arrowHeadHtml(a) +
+    detailHtml(a.rows, a.kind === "exec" || a.kind === "ret");
   $("drawer").hidden = false;
 }
 
