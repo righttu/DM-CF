@@ -284,3 +284,9 @@ Agent tracing documents three identity fields: agent name (`functionId`, shared:
   - New `model_call` rows end at the step's last `tool-call` stream part (`finish-step` only for text steps) and carry `"timing":2`.
   - For older rows, the swimlane estimates the model end as the earliest tool_call of that round and marks it 「按工具开始时间推算」.
   - The drawer shows 「本箭头」 (direction exactly as drawn) before the raw row, because a 回复/返回 arrow is backed by a row whose actor→target is the request direction.
+- 2026-10-19 pipeline container-release fix (commit `c176957`, pipeline `7f5fab6b-7058-45d3-9e5e-b2b771f7eb47`).
+  - A terminal script attempt now stops its batch container in a memoized Workflow step, before moving to the next script or retry. Idle fallback is 30m instead of 4h; max_instances remains 2.
+  - New Workflow results include trigger, cron, execution rules and Chinese skip/failure reasons. Historical results are unchanged.
+  - Deployed from VM `172.20.10.6` with `--containers-rollout=none`: only Worker/DO/Workflow code changed. Cloud API verification confirms 100% traffic, unchanged deployed Container metadata, and cron `30 10 * * MON-FRI` (Beijing weekdays 18:30).
+  - No production backfill was triggered; terminal container release still needs verification on a real run.
+  - Verification evidence: `apps/agent-demo/test/evidence/pipeline-{tsc,tests,dryrun}.log` and `pipeline-deployed-c176957.log`; pipeline tests 33/33.
