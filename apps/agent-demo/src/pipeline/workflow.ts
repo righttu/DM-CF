@@ -4,7 +4,10 @@
 // testable outside the Workflows runtime.
 import { httpTushare, beijingNow, syncStockBasic, type TushareFetcher } from "./stockBasic.js";
 import { bjCompactDate } from "../shared/outbound.js";
-import { CONTAINER_RELEASE_FAILED } from "../shared/container-lifecycle.js";
+import {
+  CONTAINER_RELEASE_FAILED,
+  type ContainerReleaseConfirmation
+} from "../shared/container-lifecycle.js";
 import type { BatchJob, DailyParams, PipelineEnv } from "./batch.js";
 
 export { bjCompactDate };
@@ -118,7 +121,7 @@ export interface DailyResult {
 type BatchStub = {
   startJob(input: { script: string; run_date: string }): Promise<BatchJob>;
   status(): Promise<BatchJob>;
-  stopJob(): Promise<void>;
+  stopJob(): Promise<ContainerReleaseConfirmation>;
 };
 
 type BatchNamespaceLike = {
@@ -158,19 +161,27 @@ function jobError(tail: string[]): string {
 }
 
 // Release step shared by all terminal branches: the memoized step awaits the
-// DO-side destroy and returns evidence ({container_released:true}) instead of
-// a bare null RPC result. Release failures are wrapped with the stable marker
-// so the workflow treats them as infrastructure failures.
+// DO-side destroy and requires the returned evidence struct
+// ({container_released:true, release_method:"destroy"}) — a bare or missing
+// RPC result can never masquerade as a release. Release failures are wrapped
+// with the stable marker so the workflow treats them as infrastructure
+// failures.
 function releaseStep(
   step: StepLike,
   name: string,
   attempt: number,
   stub: BatchStub
-): Promise<{ container_released: true }> {
+): Promise<ContainerReleaseConfirmation> {
   return step.do(`stop ${name} #${attempt}`, async () => {
     try {
-      await stub.stopJob();
-      return { container_released: true as const };
+      const confirmation = await stub.stopJob();
+      if (
+        confirmation?.container_released !== true ||
+        confirmation?.release_method !== "destroy"
+      ) {
+        throw new Error(`${CONTAINER_RELEASE_FAILED}: missing_release_confirmation`);
+      }
+      return confirmation;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       if (msg.includes(CONTAINER_RELEASE_FAILED)) throw error;

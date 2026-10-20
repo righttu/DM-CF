@@ -16,6 +16,8 @@ import {
 import { fetchStockBasicRows, syncStockBasic } from "../src/pipeline/stockBasic.js";
 import { destroyRunningContainer } from "../src/shared/container-lifecycle.js";
 
+const RELEASED = { container_released: true as const, release_method: "destroy" as const };
+
 type TestEnv = typeof env & {
   QUANT_DB: D1Database;
   BATCH: DurableObjectNamespace<QuantBatchContainer>;
@@ -1053,6 +1055,7 @@ describe("daily workflow", () => {
           },
           async stopJob() {
             stops.push(name);
+            return RELEASED;
           }
         };
       }
@@ -1222,7 +1225,7 @@ describe("daily workflow", () => {
         async status() {
           return { status: "failed", error_tail: ["", "first_boom", "", "last_boom", ""] };
         },
-        async stopJob() {}
+        async stopJob() { return RELEASED; }
       })
     };
     const res = await runDailyPipeline(
@@ -1479,7 +1482,7 @@ describe("daily workflow", () => {
         async status() {
           return { status: "running" };
         },
-        async stopJob() {}
+        async stopJob() { return RELEASED; }
       })
     };
     const lim = await runDailyPipeline(
@@ -1533,11 +1536,13 @@ describe("container release (destroy-based)", () => {
       wipe: async () => { wipe?.order.push("wipe"); }
     });
 
-  it("running=false: destroy not called, resolves", async () => {
+  it("running=false initially: destroy still called once (idempotent release)", async () => {
+    // The local flag alone never skips release — verified live that destroy()
+    // on an already-stopped runtime succeeds and retains job data.
     let destroyed = 0;
     const rt = { running: false, async destroy() { destroyed++; } };
     await destroyRunningContainer(rt);
-    expect(destroyed).toBe(0);
+    expect(destroyed).toBe(1);
   });
 
   it("release calls destroy (never signal); resolves only after destruction", async () => {
@@ -1574,6 +1579,9 @@ describe("container release (destroy-based)", () => {
     await expect(destroyRunningContainer(boom)).rejects.toThrow("destroy_boom");
     const stuck = { running: true, async destroy() { /* stays running */ } };
     await expect(destroyRunningContainer(stuck)).rejects.toThrow("container_still_running_after_destroy");
+    // A false flag does not swallow a rejected destroy either.
+    const falseStuck = { running: false, async destroy() { throw new Error("destroy_boom"); } };
+    await expect(destroyRunningContainer(falseStuck)).rejects.toThrow("destroy_boom");
   });
 
   it("runner.stop surfaces container_release_failed and leaves a completed job untouched", async () => {
@@ -1705,6 +1713,7 @@ describe("workflow release evidence", () => {
               signal() { /* SIGTERM no-op in fake */ }
             };
             await destroyRunningContainer(rt);
+            return RELEASED;
           }
         };
       }
@@ -1749,7 +1758,7 @@ describe("workflow release evidence", () => {
     expect(batch.active.size).toBe(0);
     expect(batch.destroyed).toEqual(["hotspot_registry", "registry_auditor", "hotspot_hunter"]);
     for (const n of ["hotspot_registry", "registry_auditor", "hotspot_hunter"]) {
-      expect(step.results.get(`stop ${n} #1`)).toEqual({ container_released: true });
+      expect(step.results.get(`stop ${n} #1`)).toEqual(RELEASED);
     }
   });
 
@@ -1775,6 +1784,36 @@ describe("workflow release evidence", () => {
       runDailyPipeline(
         { BATCH: ns as never, QUANT_DB: tenv.QUANT_DB, MY_TUSHARE_TOKEN: "t" },
         "i-rel2",
+        { date: "20261017", only: ["hotspot_registry", "registry_auditor"] },
+        step,
+        { fetcher: openCal }
+      )
+    ).rejects.toThrow(/container_release_failed/);
+    expect(batch.starts).toEqual(["hotspot_registry"]);
+  });
+
+  it("stopJob returning undefined (legacy/mock): workflow fails with marker, no next start", async () => {
+    const step = fakeStepR();
+    const batch = runtimeBatch(2);
+    const ns = {
+      idFromName: batch.idFromName,
+      get: (id: { toString(): string }) => {
+        const stub = batch.get(id);
+        const name = id.toString().split(":")[1];
+        return {
+          ...stub,
+          async stopJob() {
+            await stub.stopJob();
+            if (name === "hotspot_registry") return undefined; // legacy void RPC
+            return RELEASED;
+          }
+        };
+      }
+    };
+    await expect(
+      runDailyPipeline(
+        { BATCH: ns as never, QUANT_DB: tenv.QUANT_DB, MY_TUSHARE_TOKEN: "t" },
+        "i-rel3",
         { date: "20261017", only: ["hotspot_registry", "registry_auditor"] },
         step,
         { fetcher: openCal }

@@ -71,6 +71,7 @@ import {
   type BatchJob,
   type PipelineEnv
 } from "../src/pipeline/batch.js";
+import type { ContainerReleaseConfirmation } from "../src/shared/container-lifecycle.js";
 
 // Same pattern as the analysis test DO: no container runtime in the pool, so
 // BATCH maps to a plain Durable Object running the same job logic.
@@ -103,8 +104,9 @@ class TestQuantBatchContainer extends DurableObject<PipelineEnv> {
     return this.runner.status();
   }
 
-  stopJob(): Promise<void> {
-    return this.runner.stop();
+  async stopJob(): Promise<ContainerReleaseConfirmation> {
+    await this.runner.stop();
+    return { container_released: true, release_method: "destroy" };
   }
 
   async runCleanup(): Promise<void> {

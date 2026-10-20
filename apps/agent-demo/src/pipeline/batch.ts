@@ -2,7 +2,8 @@ import { Container } from "@cloudflare/containers";
 import { AI_OUTBOUND_HOST, aiOutboundHandler, batchOutboundHandler } from "./outbound.js";
 import {
   CONTAINER_RELEASE_FAILED,
-  destroyRunningContainer
+  destroyRunningContainer,
+  type ContainerReleaseConfirmation
 } from "../shared/container-lifecycle.js";
 
 export interface PipelineEnv {
@@ -285,8 +286,15 @@ export class QuantBatchContainer extends Container<PipelineEnv> {
       },
       request: (path, init) => this.containerFetch(`${CONTAINER_HOST}${path}`, init),
       // Container.stop() only sends SIGTERM and returns before exit; use the
-      // awaited destroy path so release is confirmed, not just requested.
-      stop: () => destroyRunningContainer(this.ctx.container!)
+      // SDK's own destroy() — the path verified to release runtimes live —
+      // via an adapter so the call is unconditional and the result checked.
+      stop: () => {
+        const runtime = this.ctx.container!;
+        return destroyRunningContainer({
+          get running() { return runtime.running; },
+          destroy: () => this.destroy()
+        });
+      }
     };
   }
 
@@ -308,8 +316,9 @@ export class QuantBatchContainer extends Container<PipelineEnv> {
     return this.runner.status();
   }
 
-  stopJob(): Promise<void> {
-    return this.runner.stop();
+  async stopJob(): Promise<ContainerReleaseConfirmation> {
+    await this.runner.stop();
+    return { container_released: true, release_method: "destroy" };
   }
 
   async onJobCleanup(payload: unknown): Promise<void> {
