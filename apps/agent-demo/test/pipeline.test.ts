@@ -14,6 +14,7 @@ import {
   type StepLike
 } from "../src/pipeline/workflow.js";
 import { fetchStockBasicRows, syncStockBasic } from "../src/pipeline/stockBasic.js";
+import { destroyRunningContainer } from "../src/shared/container-lifecycle.js";
 
 type TestEnv = typeof env & {
   QUANT_DB: D1Database;
@@ -1501,5 +1502,284 @@ describe("daily workflow", () => {
     expect(mod.ContainerProxy).toBe(ContainerProxy);
     expect(typeof mod.QuantDailyWorkflow).toBe("function");
     expect(typeof mod.QuantBatchContainer).toBe("function");
+  });
+});
+
+describe("container release (destroy-based)", () => {
+  // NOTE: test/entry.ts exposes BATCH as a plain DO wrapping BatchJobRunner —
+  // no real Cloudflare runtime exists in the pool. The runtime fake below
+  // exercises the shared destroyRunningContainer contract; it does not prove
+  // production runtime behaviour.
+  const fakeStorage = () => {
+    const m = new Map<string, unknown>();
+    return {
+      get: async (k: string) => m.get(k) ?? null,
+      put: async (k: string, v: unknown) => void m.set(k, v),
+      delete: async (k: string) => (m.delete(k), true),
+      dump: () => m
+    } as unknown as DurableObjectStorage & { dump(): Map<string, unknown> };
+  };
+  const runner = (
+    transport: () => {
+      start(e: Record<string, string>): Promise<void>;
+      request(p: string, i?: RequestInit): Promise<Response>;
+      stop(): Promise<void>;
+    },
+    wipe?: { order: string[] },
+    storage = fakeStorage()
+  ) =>
+    new BatchJobRunner(storage, {} as never, transport, () => "jid", {
+      schedule() {},
+      wipe: async () => { wipe?.order.push("wipe"); }
+    });
+
+  it("running=false: destroy not called, resolves", async () => {
+    let destroyed = 0;
+    const rt = { running: false, async destroy() { destroyed++; } };
+    await destroyRunningContainer(rt);
+    expect(destroyed).toBe(0);
+  });
+
+  it("release calls destroy (never signal); resolves only after destruction", async () => {
+    const calls: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const rt = {
+      running: true,
+      async destroy() {
+        calls.push("destroy");
+        await gate;
+        calls.push("destroyed");
+        this.running = false;
+      },
+      signal() {
+        calls.push("signal");
+        return Promise.resolve();
+      }
+    };
+    let done = false;
+    const p = destroyRunningContainer(rt).then(() => { done = true; });
+    await Promise.resolve();
+    expect(calls).toEqual(["destroy"]);
+    expect(done).toBe(false); // still pending while destroy is in flight
+    release();
+    await p;
+    expect(done).toBe(true);
+    expect(rt.running).toBe(false);
+    expect(calls).not.toContain("signal");
+  });
+
+  it("destroy rejects or leaves running=true: release rejects", async () => {
+    const boom = { running: true, async destroy() { throw new Error("destroy_boom"); } };
+    await expect(destroyRunningContainer(boom)).rejects.toThrow("destroy_boom");
+    const stuck = { running: true, async destroy() { /* stays running */ } };
+    await expect(destroyRunningContainer(stuck)).rejects.toThrow("container_still_running_after_destroy");
+  });
+
+  it("runner.stop surfaces container_release_failed and leaves a completed job untouched", async () => {
+    const storage = fakeStorage();
+    const done = {
+      script: "chip_hunter", run_date: RUN_DATE, status: "succeeded",
+      started_at: "t0", finished_at: "t1", exit_code: 0, error_tail: []
+    };
+    storage.dump().set("job", done);
+    const r = runner(() => ({
+      async start() {},
+      async request() { return Response.json({}); },
+      async stop() { throw new Error("still_running"); }
+    }), undefined, storage);
+    await expect(r.stop()).rejects.toThrow(/container_release_failed/);
+    expect(storage.dump().get("job")).toEqual(done);
+  });
+
+  it("start succeeds but /run fails: partial runtime stopped, job failed, original error; failed cleanup returns release marker", async () => {
+    const stops: string[] = [];
+    const okStorage = fakeStorage();
+    const ok = runner(() => ({
+      async start() {},
+      async request(p) {
+        if (p === "/run") return new Response("x", { status: 500 });
+        return Response.json({});
+      },
+      async stop() { stops.push("stop"); }
+    }), undefined, okStorage);
+    await expect(ok.startJob({ script: "chip_hunter", run_date: RUN_DATE })).rejects.toThrow("run_http_500");
+    expect(stops).toEqual(["stop"]);
+    expect((okStorage.dump().get("job") as { status: string }).status).toBe("failed");
+
+    const bad = runner(() => ({
+      async start() {},
+      async request(p) {
+        if (p === "/run") return new Response("x", { status: 500 });
+        return Response.json({});
+      },
+      async stop() { throw new Error("still_running"); }
+    }));
+    await expect(bad.startJob({ script: "chip_hunter", run_date: RUN_DATE })).rejects.toThrow(/container_release_failed/);
+  });
+
+  it("runCleanup: stop before wipe; stop failure prevents wipe; stale token unchanged", async () => {
+    const order: string[] = [];
+    const storage = fakeStorage();
+    const st = storage.dump();
+    st.set("job", { script: "x", run_date: RUN_DATE, status: "succeeded", started_at: "", finished_at: "", exit_code: 0, error_tail: [] });
+    st.set("cleanup_token", "tok1");
+    const makeRunner = (stopImpl: () => Promise<void>) => new BatchJobRunner(storage, {} as never, () => ({
+      async start() {},
+      async request() { return Response.json({}); },
+      stop: stopImpl
+    }), () => "jid", { schedule() {}, wipe: async () => { order.push("wipe"); } });
+
+    const bad = makeRunner(async () => { order.push("stop"); throw new Error("still_running"); });
+    await expect(bad.runCleanup({ token: "tok1" })).rejects.toThrow(/container_release_failed/);
+    expect(order).toEqual(["stop"]); // no wipe on failed release
+    expect(st.get("job")).toBeTruthy();
+
+    const good = makeRunner(async () => { order.push("stop"); });
+    await good.runCleanup({ token: "tok1" });
+    expect(order.slice(-2)).toEqual(["stop", "wipe"]);
+    await good.runCleanup({ token: "stale" });
+    expect(st.get("cleanup_token")).toBe("tok1");
+  });
+});
+
+describe("workflow release evidence", () => {
+  function fakeStepR() {
+    const calls: string[] = [];
+    const results = new Map<string, unknown>();
+    const step: StepLike & { calls: string[]; results: Map<string, unknown> } = {
+      calls,
+      results,
+      async do(name, fn) {
+        calls.push(`do:${name}`);
+        const v = await fn();
+        results.set(name, v);
+        return v;
+      },
+      async sleep(name) {
+        calls.push(`sleep:${name}`);
+      }
+    };
+    return step;
+  }
+
+  function runtimeBatch(
+    capacity = 2,
+    gates: Record<string, { gate: Promise<void> }> = {}
+  ) {
+    const active = new Set<string>();
+    let peak = 0;
+    const destroyed: string[] = [];
+    const starts: string[] = [];
+    const ns = {
+      starts, destroyed, active,
+      get peak() { return peak; },
+      idFromName: (name: string) => ({ toString: () => name }),
+      get: (id: { toString(): string }) => {
+        const name = id.toString().split(":")[1];
+        return {
+          async startJob() {
+            if (active.size >= capacity) throw new Error("Maximum number of running container instances exceeded");
+            starts.push(name);
+            active.add(name);
+            peak = Math.max(peak, active.size);
+            return { script: name, status: "running" };
+          },
+          async status() {
+            return { status: "succeeded", error_tail: [] };
+          },
+          async stopJob() {
+            // Mirror the production path: DO-side stop delegates to
+            // destroyRunningContainer on the runtime.
+            const rt = {
+              get running() { return active.has(name); },
+              async destroy() {
+                const g = gates[name];
+                if (g) {
+                  enteredResolve();
+                  await g.gate;
+                }
+                active.delete(name);
+                destroyed.push(name);
+              },
+              signal() { /* SIGTERM no-op in fake */ }
+            };
+            await destroyRunningContainer(rt);
+          }
+        };
+      }
+    };
+    let enteredResolve!: () => void;
+    const entered = new Promise<void>((r) => (enteredResolve = r));
+    return Object.assign(ns, { entered });
+  }
+
+  function gateFor() {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    return { gate, release };
+  }
+
+  const openCal = async () => ({ fields: ["cal_date", "is_open"], items: [["20261017", "1"]] });
+
+  it("three serial scripts: release awaits destroy before next start; peak 1, final 0, evidence recorded", async () => {
+    const step = fakeStepR();
+    const first = gateFor();
+    const batch = runtimeBatch(2, { hotspot_registry: { gate: first.gate } });
+    const run = runDailyPipeline(
+      { BATCH: batch as never, QUANT_DB: tenv.QUANT_DB, MY_TUSHARE_TOKEN: "t" },
+      "i-rel",
+      { date: "20261017", only: ["hotspot_registry", "registry_auditor", "hotspot_hunter"] },
+      step,
+      { fetcher: openCal }
+    );
+    // First script's destroy has been entered but is blocked: the pipeline
+    // must be awaiting the release — no second script may start.
+    await batch.entered;
+    expect(batch.destroyed).toEqual([]);
+    expect(batch.starts).toEqual(["hotspot_registry"]);
+    let settled = false;
+    void run.then(() => { settled = true; }, () => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    first.release();
+    const res = await run;
+    expect(res.steps.every((s) => s.status === "succeeded")).toBe(true);
+    expect(batch.peak).toBe(1);
+    expect(batch.active.size).toBe(0);
+    expect(batch.destroyed).toEqual(["hotspot_registry", "registry_auditor", "hotspot_hunter"]);
+    for (const n of ["hotspot_registry", "registry_auditor", "hotspot_hunter"]) {
+      expect(step.results.get(`stop ${n} #1`)).toEqual({ container_released: true });
+    }
+  });
+
+  it("stop failure on first script: pipeline rejects with marker, no second start", async () => {
+    const step = fakeStepR();
+    const batch = runtimeBatch(2);
+    // wrap: make hotspot_registry's stopJob fail with the release marker path
+    const ns = {
+      idFromName: batch.idFromName,
+      get: (id: { toString(): string }) => {
+        const stub = batch.get(id);
+        const name = id.toString().split(":")[1];
+        return {
+          ...stub,
+          async stopJob() {
+            if (name === "hotspot_registry") throw new Error("still_running");
+            return stub.stopJob();
+          }
+        };
+      }
+    };
+    await expect(
+      runDailyPipeline(
+        { BATCH: ns as never, QUANT_DB: tenv.QUANT_DB, MY_TUSHARE_TOKEN: "t" },
+        "i-rel2",
+        { date: "20261017", only: ["hotspot_registry", "registry_auditor"] },
+        step,
+        { fetcher: openCal }
+      )
+    ).rejects.toThrow(/container_release_failed/);
+    expect(batch.starts).toEqual(["hotspot_registry"]);
   });
 });

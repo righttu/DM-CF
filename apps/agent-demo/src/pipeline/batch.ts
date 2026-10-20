@@ -1,5 +1,9 @@
 import { Container } from "@cloudflare/containers";
 import { AI_OUTBOUND_HOST, aiOutboundHandler, batchOutboundHandler } from "./outbound.js";
+import {
+  CONTAINER_RELEASE_FAILED,
+  destroyRunningContainer
+} from "../shared/container-lifecycle.js";
 
 export interface PipelineEnv {
   QUANT_DB: D1Database;
@@ -90,6 +94,9 @@ export class BatchJobRunner {
     if (!token || token !== (await this.storage.get(CLEANUP_TOKEN_KEY))) return;
     const job = await this.loadJob();
     if (!job || !TERMINAL_STATUSES.has(job.status)) return;
+    // Release the runtime before wiping; a failed release must not wipe —
+    // retrying cleanup is safer than losing the record of an unreleased job.
+    await this.stop();
     await this.cleanup.wipe();
   }
 
@@ -162,6 +169,11 @@ export class BatchJobRunner {
       ];
       await this.saveJob(job);
       await this.armCleanup();
+      // A failed start may still have left a partially started runtime
+      // (start() succeeded but /run failed). Release it before reporting the
+      // original error; a release failure is infrastructure, not a script
+      // failure, so it propagates as the marker instead.
+      await this.stop();
       throw error;
     }
     return job;
@@ -227,8 +239,14 @@ export class BatchJobRunner {
   async stop(): Promise<void> {
     try {
       await this.transport().stop();
-    } catch {
-      // best effort: container may already be gone
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.includes(CONTAINER_RELEASE_FAILED)) throw error;
+      const wrapped = new Error(
+        `${CONTAINER_RELEASE_FAILED}: ${msg}`.slice(0, 300),
+        { cause: error }
+      );
+      throw wrapped;
     }
   }
 }
@@ -266,8 +284,16 @@ export class QuantBatchContainer extends Container<PipelineEnv> {
         }
       },
       request: (path, init) => this.containerFetch(`${CONTAINER_HOST}${path}`, init),
-      stop: () => this.stop()
+      // Container.stop() only sends SIGTERM and returns before exit; use the
+      // awaited destroy path so release is confirmed, not just requested.
+      stop: () => destroyRunningContainer(this.ctx.container!)
     };
+  }
+
+  // Idle expiry is the fallback release path and must use the same confirmed
+  // destruction as the explicit stop, not the base class's SIGTERM.
+  async onActivityExpired(): Promise<void> {
+    await this.runner.stop();
   }
 
   jobContext(): Promise<{ script: string; run_date: string } | null> {

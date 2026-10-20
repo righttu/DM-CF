@@ -4,6 +4,7 @@
 // testable outside the Workflows runtime.
 import { httpTushare, beijingNow, syncStockBasic, type TushareFetcher } from "./stockBasic.js";
 import { bjCompactDate } from "../shared/outbound.js";
+import { CONTAINER_RELEASE_FAILED } from "../shared/container-lifecycle.js";
 import type { BatchJob, DailyParams, PipelineEnv } from "./batch.js";
 
 export { bjCompactDate };
@@ -156,6 +157,30 @@ function jobError(tail: string[]): string {
   return (lines.length ? lines.join(" | ") : "script_failed").slice(0, 300);
 }
 
+// Release step shared by all terminal branches: the memoized step awaits the
+// DO-side destroy and returns evidence ({container_released:true}) instead of
+// a bare null RPC result. Release failures are wrapped with the stable marker
+// so the workflow treats them as infrastructure failures.
+function releaseStep(
+  step: StepLike,
+  name: string,
+  attempt: number,
+  stub: BatchStub
+): Promise<{ container_released: true }> {
+  return step.do(`stop ${name} #${attempt}`, async () => {
+    try {
+      await stub.stopJob();
+      return { container_released: true as const };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.includes(CONTAINER_RELEASE_FAILED)) throw error;
+      throw new Error(`${CONTAINER_RELEASE_FAILED}: ${msg}`.slice(0, 300), {
+        cause: error
+      });
+    }
+  });
+}
+
 // One attempt. Workflows re-execute run() from the top after every sleep, so
 // every timestamp must be produced inside a step (steps are memoized; replayed
 // runs see the original values). Step names carry the attempt number — a retry
@@ -184,15 +209,15 @@ async function runScriptOnce(
     if (poll.job.status === "succeeded") {
       // Terminal: release the container now — sleepAfter alone is only a
       // safety net and leaving instances running exhausts max_instances.
-      await step.do(`stop ${name} #${attempt}`, () => stub.stopJob());
+      await releaseStep(step, name, attempt, stub);
       return { status: "succeeded", error: null };
     }
     if (poll.job.status === "failed") {
-      await step.do(`stop ${name} #${attempt}`, () => stub.stopJob());
+      await releaseStep(step, name, attempt, stub);
       return { status: "failed", error: jobError(poll.job.error_tail) };
     }
     if (poll.now - t0 > capMs) {
-      await step.do(`stop ${name} #${attempt}`, () => stub.stopJob());
+      await releaseStep(step, name, attempt, stub);
       return {
         status: "failed",
         error: `step_timeout_${capMs / 3600000}h`
@@ -304,8 +329,12 @@ export async function runDailyPipeline(
         rec.error = outcome.error;
       }
     } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      // An unreleased container is infrastructure failure: do not continue to
+      // further script starts while capacity is still occupied.
+      if (msg.includes(CONTAINER_RELEASE_FAILED)) throw error;
       rec.status = "failed";
-      rec.error = (error instanceof Error ? error.message : String(error)).slice(0, 300);
+      rec.error = msg.slice(0, 300);
     }
     const end = await step.do(`end ${name}`, () => clock());
     rec.duration_s = Math.round((end - begin.ms) / 1000);
